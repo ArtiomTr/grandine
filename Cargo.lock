@@ -976,8 +976,6 @@ dependencies = [
 [[package]]
 name = "blst"
 version = "0.3.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4378725facc195f1a538864863f6de233b500a8862747e7f165078a419d5e874"
 dependencies = [
  "cc",
  "glob",
@@ -1085,24 +1083,31 @@ dependencies = [
  "allocator",
  "anyhow",
  "binary_utils",
+ "bls",
  "cbindgen",
  "clap 4.5.18",
  "directories",
  "eth1_api",
+ "execution_engine",
  "fork_choice_control",
  "fork_choice_store",
  "grandine_version",
  "http_api",
  "libc",
  "log",
+ "primitive-types",
  "reqwest",
  "runtime",
  "signer",
  "slasher",
  "slashing_protection",
+ "ssz",
  "thiserror",
+ "try_from_iterator",
+ "typenum",
  "types",
  "validator",
+ "web3",
 ]
 
 [[package]]
@@ -4470,7 +4475,6 @@ dependencies = [
 [[package]]
 name = "kzg"
 version = "0.1.0"
-source = "git+https://github.com/grandinetech/rust-kzg.git?branch=integration-raw#5e4383c71e8c6d4266a1b4573e3d2ff4c972fe06"
 dependencies = [
  "blst",
  "sha2 0.10.8",
@@ -6877,7 +6881,6 @@ dependencies = [
 [[package]]
 name = "rust-kzg-blst"
 version = "0.1.0"
-source = "git+https://github.com/grandinetech/rust-kzg.git?branch=integration-raw#5e4383c71e8c6d4266a1b4573e3d2ff4c972fe06"
 dependencies = [
  "blst",
  "hex",
@@ -8901,7 +8904,6 @@ dependencies = [
 [[package]]
 name = "web3"
 version = "0.20.0"
-source = "git+https://github.com/grandinetech/rust-web3.git#9d791a0e8c490dd94ee982f3bffb609781d1ff14"
 dependencies = [
  "arrayvec",
  "base64 0.22.1",

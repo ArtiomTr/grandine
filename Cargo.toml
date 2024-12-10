@@ -290,7 +290,7 @@ base64 = '0.22'
 bincode = '1'
 bit_field = '0.10'
 bitvec = '1'
-blst = { version = '0.3', features = ['portable'] }
+blst = { path = '../blst/bindings/rust', features = ['portable', 'nolink'] }
 bstr = '1'
 build-time = '0.1'
 byteorder = '1'
@@ -355,7 +355,7 @@ itertools = '0.13'
 jemalloc-ctl = '0.5'
 jemallocator = '0.5'
 jwt-simple = { version = '0.12', default-features = false, features = ['pure-rust'] }
-kzg = { git = 'https://github.com/grandinetech/rust-kzg.git', branch = 'integration-raw' }
+kzg = { path = '../rust-kzg/kzg' }
 lazy_static = '1'
 libmdbx = { git = 'https://github.com/paradigmxyz/reth.git', package = 'reth-libmdbx', rev = 'c228fe15808c3acbf18dc3af1a03ef5cbdcda07a' }
 libp2p = { version = '0.53', default-features = false, features = ['metrics', 'dns', 'ecdsa', 'identify', 'macros', 'noise', 'plaintext', 'secp256k1', 'serde', 'tcp', 'tokio', 'yamux', 'quic', 'upnp'] }
@@ -397,7 +397,7 @@ regex = '1'
 replace_with = '0.1'
 reqwest = { version = '0.12', features = ['json', 'native-tls-vendored'] }
 rusqlite = { version = '0.32', features = ['bundled'] }
-rust-kzg-blst = { git = 'https://github.com/grandinetech/rust-kzg.git', branch = 'integration-raw' }
+rust-kzg-blst = { path = '../rust-kzg/blst' }
 scrypt = '0.11'
 semver = '1'
 serde = { version = '1', features = ['derive', 'rc'] }
@@ -446,7 +446,7 @@ url = '2'
 uuid = { version = '1', features = ['serde', 'v4'] }
 variant_count = '1'
 void = '1'
-web3 = { git = 'https://github.com/grandinetech/rust-web3.git' }
+web3 = { path = '../rust-web3' }
 zeroize = { version = '1', features = ['derive', 'serde'] }
 
 allocator = { path = 'allocator' }
