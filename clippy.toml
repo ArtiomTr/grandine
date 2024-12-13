@@ -49,6 +49,8 @@ disallowed-methods = [
     { path = 'tokio::fs::write',            reason = 'use fs_err::tokio::write for more helpful error messages'            },
 
     { path = 'axum::Router::nest', reason = 'specify full resource paths for searchability' },
+
+    { path = 'itertools::repeat_n', reason = 'use core::iter::repeat_n' },
 ]
 disallowed-types = [
     { path = 'std::fs::DirEntry',      reason = 'use fs_err::DirEntry for more helpful error messages'           },
@@ -63,6 +65,9 @@ disallowed-types = [
 
     { path = 'once_cell::sync::Lazy',   reason = 'use std::sync::LazyLock'  },
     { path = 'once_cell::unsync::Lazy', reason = 'use core::cell::LazyCell' },
+
+    { path = 'url::Url',     reason = 'use types::redacting_url::RedactingUrl for print-safe URLs' },
+    { path = 'reqwest::Url', reason = 'use types::redacting_url::RedactingUrl for print-safe URLs' },
 ]
 enforced-import-renames = [
     { path = 'core::fmt::Result', rename = 'FmtResult' },

@@ -45,7 +45,6 @@ const GREEDY_MODE_PEER_LIMIT: usize = 2;
 const MAX_SYNC_DISTANCE_IN_SLOTS: u64 = 10000;
 const NOT_ENOUGH_PEERS_MESSAGE_COOLDOWN: Duration = Duration::from_secs(10);
 const PEER_UPDATE_COOLDOWN_IN_SECONDS: u64 = 12;
-const PEERS_BEFORE_STATUS_UPDATE: usize = 1;
 const SEQUENTIAL_REDOWNLOADS_TILL_RESET: usize = 5;
 
 #[derive(Debug, Eq, PartialEq, Clone, Copy)]
@@ -72,6 +71,7 @@ pub struct SyncManager {
     sequential_redownloads: usize,
     status_updates_cache: TimedSizedCache<Epoch, ()>,
     not_enough_peers_message_shown_at: Option<Instant>,
+    sync_from_finalized: bool,
 }
 
 impl Default for SyncManager {
@@ -88,6 +88,7 @@ impl Default for SyncManager {
                 PEER_UPDATE_COOLDOWN_IN_SECONDS,
             ),
             not_enough_peers_message_shown_at: None,
+            sync_from_finalized: false,
         }
     }
 }
@@ -215,6 +216,7 @@ impl SyncManager {
         sync_batches
     }
 
+    #[expect(clippy::too_many_lines)]
     pub fn build_forward_sync_batches<P: Preset>(
         &mut self,
         config: &Config,
@@ -246,8 +248,14 @@ impl SyncManager {
 
         let mut redownloads_increased = false;
 
+        if self.sync_from_finalized && self.last_sync_range.end >= local_head_slot {
+            self.sync_from_finalized = false;
+        }
+
         let sync_start_slot = {
-            if local_head_slot <= self.last_sync_head {
+            if self.sync_from_finalized {
+                self.last_sync_range.end + 1
+            } else if local_head_slot <= self.last_sync_head {
                 self.log(Level::Debug, "local head not progressing");
                 self.sequential_redownloads += 1;
                 redownloads_increased = true;
@@ -255,6 +263,7 @@ impl SyncManager {
                 if self.sequential_redownloads >= SEQUENTIAL_REDOWNLOADS_TILL_RESET {
                     // Redownload failed 5 times, time to redownload blocks from last finalized slot
                     self.sequential_redownloads = 0;
+                    self.sync_from_finalized = true;
                     local_finalized_slot + 1
                 } else {
                     // If head slot has not changed since last sync,
@@ -350,8 +359,9 @@ impl SyncManager {
         Ok(sync_batches)
     }
 
-    pub fn ready_to_request_blocks_by_range(&mut self) -> bool {
+    pub fn ready_to_request_by_range(&mut self) -> bool {
         self.block_requests.ready_to_request_by_range()
+            && self.blob_requests.ready_to_request_by_range()
     }
 
     pub fn ready_to_request_block_by_root(
@@ -592,33 +602,6 @@ impl SyncManager {
         self.block_requests.expired_range_batches()
     }
 
-    pub fn outdated_peers(&mut self, status: StatusMessage) -> Vec<PeerId> {
-        if let Some(chain) = self.chain_with_max_peer_count() {
-            let status_chain = ChainId::from(&status);
-
-            if chain != status_chain
-                && status_chain.finalized_epoch == chain.finalized_epoch + 1
-                && self.chain_peers(&status_chain).len() >= PEERS_BEFORE_STATUS_UPDATE
-                && self
-                    .status_updates_cache
-                    .cache_get(&status_chain.finalized_epoch)
-                    .is_none()
-            {
-                self.status_updates_cache
-                    .cache_set(status_chain.finalized_epoch, ());
-
-                return self
-                    .peers
-                    .iter()
-                    .filter(move |(_, status)| ChainId::from(*status) == chain)
-                    .map(|(peer_id, _)| *peer_id)
-                    .collect();
-            }
-        }
-
-        vec![]
-    }
-
     pub fn cache_clear(&mut self) {
         self.blob_requests.cache_clear();
         self.block_requests.cache_clear();
@@ -644,7 +627,10 @@ impl SyncManager {
 #[cfg(test)]
 mod tests {
     use test_case::test_case;
-    use types::{phase0::primitives::H32, preset::Minimal};
+    use types::{
+        phase0::primitives::H32,
+        preset::{Mainnet, Minimal},
+    };
 
     use super::*;
 
@@ -706,5 +692,142 @@ mod tests {
                 .map(|batch| (batch.start_slot, batch.count)),
             resulting_batches,
         );
+    }
+
+    #[test]
+    fn test_build_forward_sync_batches_when_head_progresses() -> Result<()> {
+        let config = Config::mainnet();
+        let current_slot = 20_001;
+        let local_head_slot = 3000;
+        let local_finalized_slot = 1000;
+
+        let peer_status = StatusMessage {
+            fork_digest: H32::default(),
+            finalized_root: H256::default(),
+            finalized_epoch: 248,
+            head_root: H256::default(),
+            head_slot: 20_000,
+        };
+
+        let mut sync_manager = SyncManager::default();
+
+        sync_manager.add_peer(PeerId::random(), peer_status);
+
+        for i in 0..50 {
+            let batches = sync_manager.build_forward_sync_batches::<Mainnet>(
+                &config,
+                current_slot,
+                local_head_slot + i,
+                local_finalized_slot,
+            )?;
+
+            let sync_range_from = local_head_slot + 64 * 3 * i + 1;
+            let sync_range_to = sync_range_from + 64 * 3 - 1;
+
+            assert_eq!(sync_manager.last_sync_range, sync_range_from..sync_range_to);
+
+            let first_batch = batches.first().expect("sync batches should be present");
+
+            assert_eq!(first_batch.direction, SyncDirection::Forward);
+            assert_eq!(first_batch.target, SyncTarget::Block);
+
+            itertools::assert_equal(
+                batches
+                    .into_iter()
+                    .map(|batch| (batch.start_slot, batch.count)),
+                [
+                    (sync_range_from, 64),
+                    (sync_range_from + 64, 64),
+                    (sync_range_from + 64 * 2, 64),
+                ],
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_build_forward_sync_batches_when_head_does_not_progress() -> Result<()> {
+        let config = Config::mainnet();
+        let current_slot = 20_001;
+        let local_head_slot = 3000;
+        let local_finalized_slot = 1000;
+
+        let peer_status = StatusMessage {
+            fork_digest: H32::default(),
+            finalized_root: H256::default(),
+            finalized_epoch: 248,
+            head_root: H256::default(),
+            head_slot: 20_000,
+        };
+
+        let mut sync_manager = SyncManager::default();
+
+        sync_manager.add_peer(PeerId::random(), peer_status);
+
+        sync_manager.build_forward_sync_batches::<Mainnet>(
+            &config,
+            current_slot,
+            local_head_slot,
+            local_finalized_slot,
+        )?;
+
+        let sync_range_from = local_head_slot + 1;
+        let sync_range_to = sync_range_from + 64 * 3 - 1;
+
+        assert_eq!(sync_manager.last_sync_range, sync_range_from..sync_range_to);
+
+        // From second to fifth retries try to download blocks from local head slot minus one epoch
+
+        for _ in 0..4 {
+            sync_manager.build_forward_sync_batches::<Mainnet>(
+                &config,
+                current_slot,
+                local_head_slot,
+                local_finalized_slot,
+            )?;
+
+            let sync_range_from = local_head_slot - 32 + 1;
+            let sync_range_to = sync_range_from + 64 * 3 - 1;
+
+            assert_eq!(sync_manager.last_sync_range, sync_range_from..sync_range_to);
+        }
+
+        // It local head still fails to progress, re-download blocks from last finalized slot up to local head slot
+
+        let mut i = 0;
+        let mut sync_range_to = 0;
+
+        while sync_range_to < local_head_slot {
+            sync_manager.build_forward_sync_batches::<Mainnet>(
+                &config,
+                current_slot,
+                local_head_slot,
+                local_finalized_slot,
+            )?;
+
+            let sync_range_from = local_finalized_slot + 64 * 3 * i + 1;
+            sync_range_to = sync_range_from + 64 * 3 - 1;
+
+            assert_eq!(sync_manager.last_sync_range, sync_range_from..sync_range_to);
+
+            i += 1;
+        }
+
+        // Resume normal syncing behaviour
+
+        sync_manager.build_forward_sync_batches::<Mainnet>(
+            &config,
+            current_slot,
+            local_head_slot,
+            local_finalized_slot,
+        )?;
+
+        let sync_range_from = local_head_slot - 32 + 1;
+        let sync_range_to = sync_range_from + 64 * 3 - 1;
+
+        assert_eq!(sync_manager.last_sync_range, sync_range_from..sync_range_to);
+
+        Ok(())
     }
 }

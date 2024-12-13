@@ -13,6 +13,8 @@ pub use crate::{
     misc::{MetricsConfig, StorageConfig},
     predefined_network::PredefinedNetwork,
     validators::Validators,
+    runtime::{run_after_genesis, RuntimeConfig},
+    schema::initialize as initialize_schema,
 };
 
 mod args;

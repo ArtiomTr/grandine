@@ -73,15 +73,15 @@ use types::{
     },
     nonstandard::{BlockRewards, Phase, WithBlobsAndMev},
     phase0::{
-        consts::{FAR_FUTURE_EPOCH, GENESIS_SLOT},
+        consts::FAR_FUTURE_EPOCH,
         containers::{
-            Attestation, AttesterSlashing as Phase0AttesterSlashing,
+            Attestation, AttestationData, AttesterSlashing as Phase0AttesterSlashing,
             BeaconBlock as Phase0BeaconBlock, BeaconBlockBody as Phase0BeaconBlockBody, Deposit,
             Eth1Data, ProposerSlashing, SignedVoluntaryExit,
         },
         primitives::{
-            DepositIndex, Epoch, ExecutionAddress, ExecutionBlockHash, Slot, Uint256,
-            ValidatorIndex, H256,
+            CommitteeIndex, DepositIndex, Epoch, ExecutionAddress, ExecutionBlockHash, Slot,
+            Uint256, ValidatorIndex, H256,
         },
     },
     preset::{Preset, SyncSubcommitteeSize},
@@ -101,12 +101,17 @@ pub type ExecutionPayloadHeaderJoinHandle<P> = JoinHandle<Result<Option<SignedBu
 pub type LocalExecutionPayloadJoinHandle<P> =
     JoinHandle<Option<WithBlobsAndMev<ExecutionPayload<P>, P>>>;
 
+#[derive(Default)]
+pub struct Options {
+    pub fake_execution_payloads: bool,
+}
+
 pub struct BlockProducer<P: Preset, W: Wait> {
     producer_context: Arc<ProducerContext<P, W>>,
 }
 
 impl<P: Preset, W: Wait> BlockProducer<P, W> {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         proposer_configs: Arc<ProposerConfigs>,
         builder_api: Option<Arc<BuilderApi>>,
@@ -118,7 +123,12 @@ impl<P: Preset, W: Wait> BlockProducer<P, W> {
         bls_to_execution_change_pool: Arc<BlsToExecutionChangePool>,
         sync_committee_agg_pool: Arc<SyncCommitteeAggPool<P, W>>,
         metrics: Option<Arc<Metrics>>,
+        options: Option<Options>,
     ) -> Self {
+        let Options {
+            fake_execution_payloads,
+        } = options.unwrap_or_default();
+
         let producer_context = Arc::new(ProducerContext {
             chain_config: controller.chain_config().clone_arc(),
             proposer_configs,
@@ -137,6 +147,7 @@ impl<P: Preset, W: Wait> BlockProducer<P, W> {
             payload_cache: Mutex::new(SizedCache::with_size(PAYLOAD_CACHE_SIZE)),
             payload_id_cache: Mutex::new(SizedCache::with_size(PAYLOAD_ID_CACHE_SIZE)),
             metrics,
+            fake_execution_payloads,
         });
 
         Self { producer_context }
@@ -270,10 +281,14 @@ impl<P: Preset, W: Wait> BlockProducer<P, W> {
             })
     }
 
-    pub fn finalize_deposits(&self, finalized_deposit_index: DepositIndex) -> Result<()> {
+    pub fn finalize_deposits(
+        &self,
+        finalized_deposit_index: DepositIndex,
+        deposit_requests_start_index: Option<DepositIndex>,
+    ) -> Result<()> {
         self.producer_context
             .eth1_chain
-            .finalize_deposits(finalized_deposit_index)
+            .finalize_deposits(finalized_deposit_index, deposit_requests_start_index)
     }
 
     pub async fn get_attester_slashings(&self) -> Vec<AttesterSlashing<P>> {
@@ -570,6 +585,7 @@ struct ProducerContext<P: Preset, W: Wait> {
     payload_cache: Mutex<SizedCache<H256, WithBlobsAndMev<ExecutionPayload<P>, P>>>,
     payload_id_cache: Mutex<SizedCache<(H256, Slot), PayloadId>>,
     metrics: Option<Arc<Metrics>>,
+    fake_execution_payloads: bool,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -705,7 +721,7 @@ impl<P: Preset, W: Wait> BlockBuildContext<P, W> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     async fn build_beacon_block_without_state_root(
         &self,
         randao_reveal: SignatureBytes,
@@ -831,18 +847,55 @@ impl<P: Preset, W: Wait> BlockBuildContext<P, W> {
                 {
                     ContiguousList::default()
                 } else {
-                    // TODO(feature/electra): don't ignore errors
-                    let attestations = attestations
-                        .into_iter()
-                        .filter_map(|attestation| {
-                            operation_pools::convert_to_electra_attestation(attestation).ok()
-                        })
-                        .chunk_by(|attestation| attestation.data);
+                    // Store results in a vec to preserve insertion order and thus the results of the packing algorithm
+                    let mut results: Vec<(
+                        AttestationData,
+                        HashSet<CommitteeIndex>,
+                        Vec<ElectraAttestation<P>>,
+                    )> = Vec::new();
 
-                    let attestations = attestations
+                    for (electra_attestation, committee_index) in
+                        attestations.into_iter().filter_map(|attestation| {
+                            let committee_index = attestation.data.index;
+
+                            match operation_pools::convert_to_electra_attestation(attestation) {
+                                Ok(electra_attestation) => {
+                                    Some((electra_attestation, committee_index))
+                                }
+                                Err(error) => {
+                                    warn!("unable to convert to electra attestation: {error:?}");
+                                    None
+                                }
+                            }
+                        })
+                    {
+                        if let Some((_, indices, attestations)) =
+                            results.iter_mut().find(|(data, indices, _)| {
+                                *data == electra_attestation.data
+                                    && !indices.contains(&committee_index)
+                            })
+                        {
+                            indices.insert(committee_index);
+                            attestations.push(electra_attestation);
+                        } else {
+                            results.push((
+                                electra_attestation.data,
+                                HashSet::from([committee_index]),
+                                vec![electra_attestation],
+                            ))
+                        }
+                    }
+
+                    let attestations = results
                         .into_iter()
-                        .filter_map(|(_, attestations)| {
-                            Self::compute_on_chain_aggregate(attestations).ok()
+                        .filter_map(|(_, _, attestations)| {
+                            match Self::compute_on_chain_aggregate(attestations.into_iter()) {
+                                Ok(electra_aggregate) => Some(electra_aggregate),
+                                Err(error) => {
+                                    warn!("unable to compute on chain aggregate: {error:?}");
+                                    None
+                                }
+                            }
                         })
                         .take(P::MaxAttestationsElectra::USIZE);
 
@@ -1015,29 +1068,24 @@ impl<P: Preset, W: Wait> BlockBuildContext<P, W> {
         };
 
         let WithBlobsAndMev {
-            value: mut execution_payload,
+            value: execution_payload,
             commitments,
             proofs,
             blobs,
             mev,
             execution_requests,
-        } = with_blobs_and_mev.unwrap_or_else(|| WithBlobsAndMev::with_default(None));
+        } = match with_blobs_and_mev {
+            Some(payload_with_mev) => payload_with_mev,
+            None => {
+                if self.beacon_state.post_capella().is_some()
+                    || post_merge_state(&self.beacon_state).is_some()
+                {
+                    return Err(AnyhowError::msg("no execution payload to include in block"));
+                }
 
-        let slot = self.beacon_state.slot();
-
-        // Starting with Capella, all blocks must be post-Merge.
-        // Construct a superficially valid execution payload for snapshot testing.
-        // It will almost always be invalid in a real network, but so would a default payload.
-        // Construct the payload with a fictitious `ExecutionBlockHash` derived from the slot.
-        // Computing the real `ExecutionBlockHash` would make maintaining tests much harder.
-        if self.beacon_state.phase() >= Phase::Capella && execution_payload.is_none() {
-            execution_payload = Some(factory::execution_payload(
-                &self.producer_context.chain_config,
-                &self.beacon_state,
-                slot,
-                ExecutionBlockHash::from_low_u64_be(slot),
-            )?);
-        }
+                WithBlobsAndMev::with_default(None)
+            }
+        };
 
         let without_state_root_with_payload = block_without_state_root
             .with_execution_payload(execution_payload)?
@@ -1308,7 +1356,7 @@ impl<P: Preset, W: Wait> BlockBuildContext<P, W> {
         //                      `SyncCommitteeMessage`s just like `AttestationPacker` does with
         //                      singular attestations.
         let beacon_block_root = self.head_block_root;
-        let message_slot = self.beacon_state.slot().saturating_sub(1).max(GENESIS_SLOT);
+        let message_slot = misc::previous_slot(self.beacon_state.slot());
         let best_subcommittee_contributions = (0..SyncCommitteeSubnetCount::U64)
             .map(|subcommittee_index| {
                 self.producer_context
@@ -1385,50 +1433,9 @@ impl<P: Preset, W: Wait> BlockBuildContext<P, W> {
             )
     }
 
-    pub async fn prepare_execution_payload_for_slot(
+    pub async fn prepare_execution_payload_attributes(
         &self,
-        slot: Slot,
-        safe_execution_payload_hash: ExecutionBlockHash,
-        finalized_execution_payload_hash: ExecutionBlockHash,
-    ) {
-        let head_root = self.head_block_root;
-
-        let payload_id = self
-            .prepare_execution_payload(
-                safe_execution_payload_hash,
-                finalized_execution_payload_hash,
-            )
-            .await;
-
-        match payload_id {
-            Ok(payload_id_option) => {
-                match payload_id_option {
-                    Some(payload_id) => {
-                        info!(
-                            "started work on execution payload with id {payload_id:?} \
-                             for head {head_root:?} at slot {slot}",
-                        );
-
-                        self.producer_context.payload_id_cache.lock().await.cache_set((head_root, slot), payload_id);
-                    }
-                    // If we have no block at 4th-second mark, we preprocess new state without the block.
-                    // In such case, after the state is preprocessed, we attempt to prepare the execution payload for the next slot with
-                    // outdated EL head block hash, which EL client might discard as too old if it has seen newer blocks.
-                    None => warn!(
-                        "could not prepare execution payload: payload_id is None; \
-                         ensure that multiple consensus clients are not driving the same execution client",
-                    ),
-                }
-            }
-            Err(error) => warn!("error while preparing execution payload: {error:?}"),
-        }
-    }
-
-    async fn prepare_execution_payload(
-        &self,
-        safe_block_hash: ExecutionBlockHash,
-        finalized_block_hash: ExecutionBlockHash,
-    ) -> Result<Option<PayloadId>> {
+    ) -> Result<Option<PayloadAttributes<P>>> {
         let chain_config = &self.producer_context.chain_config;
         let state = self.beacon_state.as_ref();
 
@@ -1439,46 +1446,6 @@ impl<P: Preset, W: Wait> BlockBuildContext<P, W> {
         let epoch = accessors::get_current_epoch(state);
         let timestamp = misc::compute_timestamp_at_slot(chain_config, state, state.slot());
         let suggested_fee_recipient = self.fee_recipient().await?;
-
-        // > [Modified in Capella] Removed `is_merge_transition_complete` check in Capella
-        //
-        // See <https://github.com/ethereum/consensus-specs/pull/3350>.
-        let parent_hash = if let Some(state) = state.post_capella() {
-            state.latest_execution_payload_header().block_hash()
-        } else if let Some(state) = post_merge_state(state) {
-            state.latest_execution_payload_header().block_hash()
-        } else {
-            let is_terminal_block_hash_set = !chain_config.terminal_block_hash.is_zero();
-            let is_activation_epoch_reached =
-                epoch >= chain_config.terminal_block_hash_activation_epoch;
-
-            if is_terminal_block_hash_set && !is_activation_epoch_reached {
-                return Ok(None);
-            }
-
-            let Some(terminal_pow_block) = self
-                .producer_context
-                .execution_engine
-                .get_terminal_pow_block()
-                .await?
-            else {
-                return Ok(None);
-            };
-
-            // If the terminal PoW block was found by difficulty, ensure that
-            // `terminal_pow_block.timestamp < timestamp` to avoid making the payload invalid. See:
-            // - <https://github.com/ethereum/hive/pull/569>
-            // - <https://github.com/sigp/lighthouse/issues/3316>
-            // - <https://github.com/prysmaticlabs/prysm/issues/11069>
-            // The root cause of this is a conflict between execution and consensus specifications.
-            if chain_config.terminal_block_hash.is_zero()
-                && terminal_pow_block.timestamp >= timestamp
-            {
-                return Ok(None);
-            }
-
-            terminal_pow_block.pow_block.block_hash
-        };
 
         let prev_randao = accessors::get_randao_mix(state, epoch);
 
@@ -1540,7 +1507,102 @@ impl<P: Preset, W: Wait> BlockBuildContext<P, W> {
             }
         };
 
+        Ok(Some(payload_attributes))
+    }
+
+    pub async fn prepare_execution_payload_for_slot(
+        &self,
+        slot: Slot,
+        safe_execution_payload_hash: ExecutionBlockHash,
+        finalized_execution_payload_hash: ExecutionBlockHash,
+        payload_attributes: PayloadAttributes<P>,
+    ) {
+        let head_root = self.head_block_root;
+
+        let payload_id = self
+            .prepare_execution_payload(
+                safe_execution_payload_hash,
+                finalized_execution_payload_hash,
+                payload_attributes,
+            )
+            .await;
+
+        match payload_id {
+            Ok(payload_id_option) => {
+                match payload_id_option {
+                    Some(payload_id) => {
+                        info!(
+                            "started work on execution payload with id {payload_id:?} \
+                             for head {head_root:?} at slot {slot}",
+                        );
+
+                        self.producer_context.payload_id_cache.lock().await.cache_set((head_root, slot), payload_id);
+                    }
+                    // If we have no block at 4th-second mark, we preprocess new state without the block.
+                    // In such case, after the state is preprocessed, we attempt to prepare the execution payload for the next slot with
+                    // outdated EL head block hash, which EL client might discard as too old if it has seen newer blocks.
+                    None => warn!(
+                        "could not prepare execution payload: payload_id is None; \
+                         ensure that multiple consensus clients are not driving the same execution client",
+                    ),
+                }
+            }
+            Err(error) => warn!("error while preparing execution payload: {error:?}"),
+        }
+    }
+
+    async fn prepare_execution_payload(
+        &self,
+        safe_block_hash: ExecutionBlockHash,
+        finalized_block_hash: ExecutionBlockHash,
+        payload_attributes: PayloadAttributes<P>,
+    ) -> Result<Option<PayloadId>> {
+        let chain_config = &self.producer_context.chain_config;
+        let state = self.beacon_state.as_ref();
+        let epoch = accessors::get_current_epoch(state);
+        let timestamp = misc::compute_timestamp_at_slot(chain_config, state, state.slot());
+
         let (sender, receiver) = futures::channel::oneshot::channel();
+
+        // > [Modified in Capella] Removed `is_merge_transition_complete` check in Capella
+        //
+        // See <https://github.com/ethereum/consensus-specs/pull/3350>.
+        let parent_hash = if let Some(state) = state.post_capella() {
+            state.latest_execution_payload_header().block_hash()
+        } else if let Some(state) = post_merge_state(state) {
+            state.latest_execution_payload_header().block_hash()
+        } else {
+            let is_terminal_block_hash_set = !chain_config.terminal_block_hash.is_zero();
+            let is_activation_epoch_reached =
+                epoch >= chain_config.terminal_block_hash_activation_epoch;
+
+            if is_terminal_block_hash_set && !is_activation_epoch_reached {
+                return Ok(None);
+            }
+
+            let Some(terminal_pow_block) = self
+                .producer_context
+                .execution_engine
+                .get_terminal_pow_block()
+                .await?
+            else {
+                return Ok(None);
+            };
+
+            // If the terminal PoW block was found by difficulty, ensure that
+            // `terminal_pow_block.timestamp < timestamp` to avoid making the payload invalid. See:
+            // - <https://github.com/ethereum/hive/pull/569>
+            // - <https://github.com/sigp/lighthouse/issues/3316>
+            // - <https://github.com/prysmaticlabs/prysm/issues/11069>
+            // The root cause of this is a conflict between execution and consensus specifications.
+            if chain_config.terminal_block_hash.is_zero()
+                && terminal_pow_block.timestamp >= timestamp
+            {
+                return Ok(None);
+            }
+
+            terminal_pow_block.pow_block.block_hash
+        };
 
         self.producer_context
             .execution_engine
@@ -1626,13 +1688,16 @@ impl<P: Preset, W: Wait> BlockBuildContext<P, W> {
                 self.head_block_root
             );
 
-            payload_id = self
-                .prepare_execution_payload(
-                    snapshot.safe_execution_payload_hash(),
-                    snapshot.finalized_execution_payload_hash(),
-                )
-                .await?
-                .map(PayloadIdEntry::Live)
+            if let Some(payload_attributes) = self.prepare_execution_payload_attributes().await? {
+                payload_id = self
+                    .prepare_execution_payload(
+                        snapshot.safe_execution_payload_hash(),
+                        snapshot.finalized_execution_payload_hash(),
+                        payload_attributes,
+                    )
+                    .await?
+                    .map(PayloadIdEntry::Live)
+            }
         };
 
         let Some(payload_id) = payload_id else {
@@ -1655,12 +1720,19 @@ impl<P: Preset, W: Wait> BlockBuildContext<P, W> {
 
                 match payload_id {
                     PayloadIdEntry::Cached(_) => {
-                        let payload_id = self
-                            .prepare_execution_payload(
-                                snapshot.safe_execution_payload_hash(),
-                                snapshot.finalized_execution_payload_hash(),
-                            )
-                            .await?;
+                        let mut payload_id = None;
+
+                        if let Some(payload_attributes) =
+                            self.prepare_execution_payload_attributes().await?
+                        {
+                            payload_id = self
+                                .prepare_execution_payload(
+                                    snapshot.safe_execution_payload_hash(),
+                                    snapshot.finalized_execution_payload_hash(),
+                                    payload_attributes,
+                                )
+                                .await?;
+                        }
 
                         if let Some(payload_id) = payload_id {
                             info!("successfully retrieved non-cached payload_id: {payload_id:?}");
@@ -1699,6 +1771,29 @@ impl<P: Preset, W: Wait> BlockBuildContext<P, W> {
     async fn local_execution_payload_option(
         &self,
     ) -> Option<WithBlobsAndMev<ExecutionPayload<P>, P>> {
+        if self.producer_context.fake_execution_payloads {
+            let slot = self.beacon_state.slot();
+
+            // Starting with Capella, all blocks must be post-Merge.
+            // Construct a superficially valid execution payload for snapshot testing.
+            // It will almost always be invalid in a real network, but so would a default payload.
+            // Construct the payload with a fictitious `ExecutionBlockHash` derived from the slot.
+            // Computing the real `ExecutionBlockHash` would make maintaining tests much harder.
+            if self.beacon_state.phase() >= Phase::Capella {
+                let execution_payload = factory::execution_payload(
+                    &self.producer_context.chain_config,
+                    &self.beacon_state,
+                    slot,
+                    ExecutionBlockHash::from_low_u64_be(slot),
+                );
+
+                match execution_payload {
+                    Ok(payload) => return Some(WithBlobsAndMev::with_default(payload)),
+                    Err(error) => panic!("failed to produce fake payload: {error:?}"),
+                };
+            }
+        }
+
         let _timer = self
             .producer_context
             .metrics

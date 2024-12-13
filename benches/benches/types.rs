@@ -1,6 +1,8 @@
-// The `unused_crate_dependencies` lint checks every crate in a package separately.
-// See <https://github.com/rust-lang/rust/issues/57274>.
-#![allow(unused_crate_dependencies)]
+#![expect(
+    unused_crate_dependencies,
+    reason = "The `unused_crate_dependencies` lint checks every crate in a package separately. \
+              See <https://github.com/rust-lang/rust/issues/57274>."
+)]
 
 use core::cell::LazyCell;
 use std::sync::Arc;
@@ -154,7 +156,7 @@ impl Criterion {
 }
 
 fn state_from_ssz<P: Preset>(config: &Config, bytes: &[u8]) -> Arc<BeaconState<P>> {
-    Arc::from_ssz(config, bytes).expect("state has already been sucessfully deserialized")
+    Arc::from_ssz(config, bytes).expect("state has already been successfully deserialized")
 }
 
 fn state_to_ssz(state: &BeaconState<impl Preset>) -> Vec<u8> {

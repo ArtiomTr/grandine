@@ -11,7 +11,7 @@ use helper_functions::{accessors, misc};
 use itertools::Itertools as _;
 use log::{debug, info, warn};
 use nonzero_ext::nonzero;
-use reqwest::{Client, Url};
+use reqwest::Client;
 use ssz::{Ssz, SszRead, SszReadDefault as _, SszWrite};
 use std_ext::ArcExt as _;
 use thiserror::Error;
@@ -29,6 +29,7 @@ use types::{
         primitives::{Epoch, Slot, H256},
     },
     preset::Preset,
+    redacting_url::RedactingUrl,
     traits::{BeaconState as _, SignedBeaconBlock as _},
 };
 
@@ -39,11 +40,11 @@ pub const DEFAULT_ARCHIVAL_EPOCH_INTERVAL: NonZeroU64 = nonzero!(32_u64);
 pub enum StateLoadStrategy<P: Preset> {
     Auto {
         state_slot: Option<Slot>,
-        checkpoint_sync_url: Option<Url>,
+        checkpoint_sync_url: Option<RedactingUrl>,
         anchor_checkpoint_provider: AnchorCheckpointProvider<P>,
     },
     Remote {
-        checkpoint_sync_url: Url,
+        checkpoint_sync_url: RedactingUrl,
     },
     Anchor {
         block: Arc<SignedBeaconBlock<P>>,
@@ -51,7 +52,7 @@ pub enum StateLoadStrategy<P: Preset> {
     },
 }
 
-#[allow(clippy::struct_field_names)]
+#[expect(clippy::struct_field_names)]
 pub struct Storage<P> {
     config: Arc<Config>,
     pub(crate) database: Database,
@@ -62,7 +63,7 @@ pub struct Storage<P> {
 
 impl<P: Preset> Storage<P> {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         config: Arc<Config>,
         database: Database,
         archival_epoch_interval: NonZeroU64,
@@ -82,7 +83,7 @@ impl<P: Preset> Storage<P> {
         &self.config
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     pub async fn load(
         &self,
         client: &Client,
@@ -932,7 +933,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(clippy::similar_names)]
+    #[expect(clippy::similar_names)]
     fn test_prune_old_blob_sidecars() -> Result<()> {
         let database = Database::persistent("test_db", TempDir::new()?, ByteSize::mib(10), false)?;
 

@@ -17,7 +17,7 @@ use types::{
     combined::{Attestation, SignedBeaconBlock},
     config::Config,
     deneb::{
-        consts::{BlobCommitmentTreeDepth, BlobSidecarSubnetCount, VERSIONED_HASH_VERSION_KZG},
+        consts::{BlobCommitmentTreeDepth, VERSIONED_HASH_VERSION_KZG},
         containers::BlobSidecar,
         primitives::{
             Blob, BlobCommitmentInclusionProof, BlobIndex, KzgCommitment, KzgProof, VersionedHash,
@@ -56,6 +56,24 @@ pub const fn compute_start_slot_at_epoch<P: Preset>(epoch: Epoch) -> Slot {
 #[must_use]
 pub fn is_epoch_start<P: Preset>(slot: Slot) -> bool {
     slots_since_epoch_start::<P>(slot) == 0
+}
+
+#[expect(
+    clippy::unnecessary_min_or_max,
+    reason = "GENESIS_EPOCH const might be adjusted independently."
+)]
+#[must_use]
+pub fn previous_epoch(epoch: Epoch) -> Epoch {
+    epoch.saturating_sub(1).max(GENESIS_EPOCH)
+}
+
+#[expect(
+    clippy::unnecessary_min_or_max,
+    reason = "GENESIS_SLOT const might be adjusted independently."
+)]
+#[must_use]
+pub fn previous_slot(slot: Slot) -> Slot {
+    slot.saturating_sub(1).max(GENESIS_SLOT)
 }
 
 // `consensus-specs` uses this in at least 2 places:
@@ -204,8 +222,8 @@ pub fn compute_subnet_for_attestation<P: Preset>(
 
 /// [`compute_subnet_for_blob_sidecar`](https://github.com/ethereum/consensus-specs/blob/v1.4.0-beta.1/specs/deneb/validator.md#sidecar)
 #[must_use]
-pub fn compute_subnet_for_blob_sidecar(blob_index: BlobIndex) -> SubnetId {
-    blob_index.mod_typenum::<BlobSidecarSubnetCount>()
+pub fn compute_subnet_for_blob_sidecar(config: &Config, blob_index: BlobIndex) -> SubnetId {
+    blob_index % config.blob_sidecar_subnet_count
 }
 
 /// <https://github.com/ethereum/consensus-specs/blob/v1.1.0/specs/altair/validator.md#broadcast-sync-committee-message>

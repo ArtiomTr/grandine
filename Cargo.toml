@@ -116,6 +116,9 @@ unused_lifetimes                       = 'warn'
 unused_macro_rules                     = 'warn'
 unused_qualifications                  = 'warn'
 
+# These are almost never helpful and require boilerplate.
+unstable_name_collisions               = 'allow'
+
 [workspace.lints.clippy]
 # Additional Clippy lint groups.
 nursery  = 'warn'
@@ -176,8 +179,8 @@ wildcard_dependencies   = 'warn'
 #   It's useful to leave some trait methods unimplemented.
 alloc_instead_of_core             = 'warn'
 allow_attributes                  = 'warn'
-allow_attributes_without_reason   = 'warn'
 assertions_on_result_states       = 'warn'
+cfg_not_test                      = 'warn'
 clone_on_ref_ptr                  = 'warn'
 dbg_macro                         = 'warn'
 decimal_literal_representation    = 'warn'
@@ -278,6 +281,7 @@ private_intra_doc_links = 'allow'
 
 [workspace.dependencies]
 aes = { version = '0.8', features = ['zeroize'] }
+alloy-rlp = '0.3.9'
 anyhow = { version = '1', features = ['backtrace'] }
 arc-swap = '1'
 assert-json-diff = '2'
@@ -312,7 +316,7 @@ delay_map = '0.4'
 derivative = '2'
 derive_more = { version = '1', features = ["full"] }
 dirs = '5'
-discv5 = { version = '0.4', features = ['libp2p'] }
+discv5 = { version = '0.9', features = ['libp2p'] }
 drain_filter_polyfill = '0.1'
 duplicate = '1'
 easy-ext = '1'
@@ -335,6 +339,7 @@ git-version = '0.3'
 glob = '0.3'
 good_lp = { version = '1', default-features = false, features = ['highs'] }
 hash_hasher = '2'
+hashlink = '0.9'
 hex = { version = '0.4', features = ['serde'] }
 hex-literal = '0.4'
 hex_fmt = '0.3'
@@ -358,8 +363,8 @@ jwt-simple = { version = '0.12', default-features = false, features = ['pure-rus
 kzg = { path = '../rust-kzg/kzg' }
 lazy_static = '1'
 libmdbx = { git = 'https://github.com/paradigmxyz/reth.git', package = 'reth-libmdbx', rev = 'c228fe15808c3acbf18dc3af1a03ef5cbdcda07a' }
-libp2p = { version = '0.53', default-features = false, features = ['metrics', 'dns', 'ecdsa', 'identify', 'macros', 'noise', 'plaintext', 'secp256k1', 'serde', 'tcp', 'tokio', 'yamux', 'quic', 'upnp'] }
-libp2p-mplex = '0.41'
+libp2p = { version = '0.54', default-features = false, features = ['metrics', 'dns', 'ecdsa', 'identify', 'macros', 'noise', 'plaintext', 'secp256k1', 'serde', 'tcp', 'tokio', 'yamux', 'quic', 'upnp'] }
+libp2p-mplex = '0.42'
 log = '0.4'
 lru = '0.12'
 mediatype = '0.19'

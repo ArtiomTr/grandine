@@ -371,8 +371,7 @@ pub struct BlobsBundleV1<P: Preset> {
 }
 
 /// [`ForkChoiceStateV1`](https://github.com/ethereum/execution-apis/blob/b7c5d3420e00648f456744d121ffbd929862924d/src/engine/paris.md#forkchoicestatev1)
-// clippy warning about all fields ending with same postfixes disabled
-#[allow(clippy::struct_field_names)]
+#[expect(clippy::struct_field_names)]
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ForkChoiceStateV1 {
@@ -382,7 +381,7 @@ pub struct ForkChoiceStateV1 {
 }
 
 /// [`PayloadAttributesV1`](https://github.com/ethereum/execution-apis/blob/b7c5d3420e00648f456744d121ffbd929862924d/src/engine/paris.md#payloadattributesv1)
-#[derive(Clone, Serialize)]
+#[derive(Copy, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PayloadAttributesV1 {
     #[serde(with = "serde_utils::prefixed_hex_quantity")]
@@ -565,7 +564,7 @@ pub struct PayloadStatusV1 {
 }
 
 /// [`WithdrawalV1`](https://github.com/ethereum/execution-apis/blob/b7c5d3420e00648f456744d121ffbd929862924d/src/engine/shanghai.md#withdrawalv1)
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Copy, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WithdrawalV1 {
     #[serde(with = "serde_utils::prefixed_hex_quantity")]

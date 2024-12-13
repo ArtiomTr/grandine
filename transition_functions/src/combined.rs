@@ -7,7 +7,6 @@ use helper_functions::{
     slot_report::{NullSlotReport, RealSlotReport, SlotReport},
     verifier::{MultiVerifier, NullVerifier, Verifier, VerifierOption},
 };
-use prometheus_metrics::METRICS;
 use static_assertions::const_assert_eq;
 use thiserror::Error;
 use types::{
@@ -30,6 +29,9 @@ use crate::{
     },
     unphased::{self, Error, ProcessSlots, StateRootPolicy},
 };
+
+#[cfg(feature = "metrics")]
+use prometheus_metrics::METRICS;
 
 #[derive(From)]
 pub enum EpochReport {
@@ -98,7 +100,7 @@ pub fn state_transition_for_report<P: Preset>(
     Ok(slot_report)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(clippy::too_many_arguments)]
 pub fn custom_state_transition<P: Preset>(
     config: &Config,
     state: &mut BeaconState<P>,
@@ -247,6 +249,7 @@ pub fn process_slots<P: Preset>(
         },
     );
 
+    #[cfg(feature = "metrics")]
     let _timer = METRICS
         .get()
         .map(|metrics| metrics.process_slot_times.start_timer());
@@ -871,7 +874,7 @@ mod spec_tests {
             if should_run_blinded_block_processing(&pre, blocks.clone()) {
                 let mut state = pre;
 
-                assert_still_succeeeds_with_blinded_blocks(
+                assert_still_succeeds_with_blinded_blocks(
                     config,
                     &mut state,
                     blocks,
@@ -953,7 +956,7 @@ mod spec_tests {
     // We can only test blinded block processing with valid blocks.
     // Processing would falsely succeed with incorrect values in `SignedBeaconBlock.signature`.
     // Having official test cases for blinded block processing would be nice.
-    fn assert_still_succeeeds_with_blinded_blocks<P: Preset>(
+    fn assert_still_succeeds_with_blinded_blocks<P: Preset>(
         config: &Config,
         state: &mut BeaconState<P>,
         blocks: impl IntoIterator<Item = SignedBeaconBlock<P>>,

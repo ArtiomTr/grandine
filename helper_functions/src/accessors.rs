@@ -12,7 +12,6 @@ use bls::{AggregatePublicKey, CachedPublicKey, PublicKeyBytes};
 use im::HashMap;
 use itertools::{EitherOrBoth, Itertools as _};
 use num_integer::Roots as _;
-use prometheus_metrics::METRICS;
 use rc_box::ArcBox;
 use ssz::{ContiguousVector, FitsInU64, Hc, SszHash as _};
 use std_ext::CopyExt as _;
@@ -32,7 +31,7 @@ use types::{
     config::Config,
     nonstandard::{AttestationEpoch, Participation, RelativeEpoch},
     phase0::{
-        consts::{DOMAIN_BEACON_ATTESTER, DOMAIN_BEACON_PROPOSER, GENESIS_EPOCH},
+        consts::{DOMAIN_BEACON_ATTESTER, DOMAIN_BEACON_PROPOSER},
         containers::AttestationData,
         primitives::{
             CommitteeIndex, DomainType, Epoch, Gwei, Slot, SubnetId, ValidatorIndex, H256,
@@ -47,11 +46,12 @@ use types::{
 
 use crate::{error::Error, misc, predicates};
 
+#[cfg(feature = "metrics")]
+use prometheus_metrics::METRICS;
+
 #[must_use]
 pub fn get_previous_epoch<P: Preset>(state: &impl BeaconState<P>) -> Epoch {
-    get_current_epoch(state)
-        .saturating_sub(1)
-        .max(GENESIS_EPOCH)
+    misc::previous_epoch(get_current_epoch(state))
 }
 
 #[must_use]
@@ -197,6 +197,7 @@ pub fn get_or_init_validator_indices<P: Preset>(
 ) -> &HashMap<PublicKeyBytes, ValidatorIndex> {
     state.cache().validator_indices.get_or_init(|| {
         if report_cache_miss {
+            #[cfg(feature = "metrics")]
             if let Some(metrics) = METRICS.get() {
                 metrics.validator_indices_init_count.inc();
             }
@@ -264,6 +265,7 @@ pub fn get_or_init_active_validator_indices_ordered<P: Preset>(
 
     state.cache().active_validator_indices_ordered[relative_epoch].get_or_init(|| {
         if report_cache_miss {
+            #[cfg(feature = "metrics")]
             if let Some(metrics) = METRICS.get() {
                 metrics.active_validator_indices_ordered_init_count.inc();
             }
@@ -316,6 +318,7 @@ where
 
     state.cache().active_validator_indices_shuffled[relative_epoch].get_or_init(|| {
         if report_cache_miss {
+            #[cfg(feature = "metrics")]
             if let Some(metrics) = METRICS.get() {
                 metrics.active_validator_indices_shuffled_init_count.inc();
             }
@@ -463,6 +466,7 @@ pub fn get_or_try_init_beacon_proposer_index<P: Preset>(
         .proposer_index
         .get_or_try_init(|| {
             if report_cache_miss {
+                #[cfg(feature = "metrics")]
                 if let Some(metrics) = METRICS.get() {
                     metrics.beacon_proposer_index_init_count.inc();
                 }
@@ -527,6 +531,7 @@ pub fn get_or_init_total_active_balance<P: Preset>(
     state.cache().total_active_balance[RelativeEpoch::Current]
         .get_or_init(|| {
             if report_cache_miss {
+                #[cfg(feature = "metrics")]
                 if let Some(metrics) = METRICS.get() {
                     metrics.total_active_balance_init_count.inc();
                 }
@@ -838,7 +843,10 @@ pub fn get_pending_balance_to_withdraw<P: Preset>(
 #[cfg(test)]
 mod tests {
     use types::{
-        phase0::{beacon_state::BeaconState as Phase0BeaconState, containers::Validator},
+        phase0::{
+            beacon_state::BeaconState as Phase0BeaconState, consts::GENESIS_EPOCH,
+            containers::Validator,
+        },
         preset::Minimal,
     };
 

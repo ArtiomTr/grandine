@@ -12,6 +12,7 @@ use features::Feature;
 use fork_choice_control::Wait;
 use futures::channel::mpsc::UnboundedSender;
 use genesis::AnchorCheckpointProvider;
+use http_api_utils::EventChannels;
 use liveness_tracker::ApiToLiveness;
 use metrics::ApiToMetrics;
 use operation_pools::{AttestationAggPool, BlsToExecutionChangePool, SyncCommitteeAggPool};
@@ -24,7 +25,6 @@ use validator::{ApiToValidator, ValidatorConfig};
 
 use crate::{
     error::Error,
-    events::EventChannels,
     global::{self},
     gui, middleware,
     misc::{BackSyncedStatus, SyncedStatus},
@@ -208,7 +208,7 @@ impl<P: Preset, W: Wait> FromRef<NormalState<P, W>> for Option<Arc<Metrics>> {
     }
 }
 
-#[allow(clippy::struct_field_names)]
+#[expect(clippy::struct_field_names)]
 #[cfg(test)]
 #[derive(Clone)]
 pub struct TestState<P: Preset> {

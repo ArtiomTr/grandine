@@ -30,11 +30,16 @@ use crate::{
 ///
 /// The `*_fork_epoch` fields have type `Epoch` for compatibility with standard configurations.
 /// `Toption<Epoch>` would be more appropriate.
-// The `clippy::unsafe_derive_deserialize` is a false positive triggered by `nonzero!`.
-// `Config` has no invariants. It is intended to be deserialized from user input.
-// The `unsafe` block in `nonzero!` only operates on the literal passed to it.
-// struct_field_name is allowed to have config_name, as it starts with the same name as struct
-#[allow(clippy::unsafe_derive_deserialize, clippy::struct_field_names)]
+#[expect(
+    clippy::unsafe_derive_deserialize,
+    reason = "A false positive triggered by `nonzero!`. \
+             `Config` has no invariants. It is intended to be deserialized from user input. \
+              The `unsafe` block in `nonzero!` only operates on the literal passed to it."
+)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "struct_field_name is allowed to have config_name, as it starts with the same name as struct"
+)]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(default, rename_all = "SCREAMING_SNAKE_CASE")]
 pub struct Config {
@@ -134,9 +139,11 @@ pub struct Config {
     #[serde(with = "serde_utils::string_or_native")]
     pub max_request_blob_sidecars: u64,
     #[serde(with = "serde_utils::string_or_native")]
+    pub max_request_data_column_sidecars: u64,
+    #[serde(with = "serde_utils::string_or_native")]
     pub min_epochs_for_blob_sidecars_requests: u64,
     #[serde(with = "serde_utils::string_or_native")]
-    pub blob_sidecar_subnet_count: u64,
+    pub blob_sidecar_subnet_count: NonZeroU64,
     #[serde(with = "serde_utils::string_or_native")]
     pub data_column_sidecar_subnet_count: u64,
 
@@ -156,9 +163,10 @@ pub struct Config {
     //
     // Collect unknown variables in a map so we can log a warning about them.
     // The downside to this is that we can no longer define `Config`s as constants.
-    //
-    // The warning is a false positive. Serde can only flatten structs and maps.
-    #[allow(clippy::zero_sized_map_values)]
+    #[expect(
+        clippy::zero_sized_map_values,
+        reason = "False positive. Serde can only flatten structs and maps."
+    )]
     #[serde(flatten, skip_serializing)]
     pub unknown: BTreeMap<String, IgnoredAny>,
 }
@@ -227,12 +235,12 @@ impl Default for Config {
             resp_timeout: 10,
             subnets_per_node: 2,
             ttfb_timeout: 5,
-            // TODO(feature/deneb): make eth2_libp2p use these constants instead of duplicating them
-            max_request_blocks: 128,
+            max_request_blocks: 1024,
             max_request_blocks_deneb: 128,
             max_request_blob_sidecars: 768,
+            max_request_data_column_sidecars: 0x4000,
             min_epochs_for_blob_sidecars_requests: 4096,
-            blob_sidecar_subnet_count: 6,
+            blob_sidecar_subnet_count: nonzero!(6_u64),
             data_column_sidecar_subnet_count: 64,
 
             // Transition
@@ -713,6 +721,16 @@ impl Config {
         self.eip7594_fork_epoch != FAR_FUTURE_EPOCH
     }
 
+    #[must_use]
+    pub const fn max_request_blocks(&self, phase: Phase) -> u64 {
+        match phase {
+            Phase::Phase0 | Phase::Altair | Phase::Bellatrix | Phase::Capella => {
+                self.max_request_blocks
+            }
+            Phase::Deneb | Phase::Electra => self.max_request_blocks_deneb,
+        }
+    }
+
     fn fork_slots<P: Preset>(&self) -> impl Iterator<Item = (Phase, Toption<Slot>)> + '_ {
         enum_iterator::all().map(|phase| (phase, self.fork_slot::<P>(phase)))
     }
@@ -754,7 +772,10 @@ pub enum Error {
     NameContainsIllegalCharacters,
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Refactoring worsens readability, which is more important in tests."
+)]
 #[cfg(test)]
 mod tests {
     use test_case::test_case;

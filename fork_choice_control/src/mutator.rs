@@ -38,6 +38,7 @@ use fork_choice_store::{
 };
 use futures::channel::{mpsc::Sender as MultiSender, oneshot::Sender as OneshotSender};
 use helper_functions::{accessors, misc, predicates, verifier::NullVerifier};
+use http_api_utils::{DependentRootsBundle, EventChannels};
 use itertools::{Either, Itertools as _};
 use log::{debug, error, info, warn};
 use num_traits::identities::Zero as _;
@@ -75,15 +76,15 @@ use crate::{
     thread_pool::{Spawn, ThreadPool},
     unbounded_sink::UnboundedSink,
     wait::Wait,
-    ApiMessage, BlockEvent, ChainReorgEvent, FinalizedCheckpointEvent, HeadEvent,
 };
 
-#[allow(clippy::struct_field_names)]
-pub struct Mutator<P: Preset, E, W, AS, TS, PS, LS, NS, SS, VS> {
+#[expect(clippy::struct_field_names)]
+pub struct Mutator<P: Preset, E, W, TS, PS, LS, NS, SS, VS> {
     store: Arc<Store<P>>,
     store_snapshot: Arc<ArcSwap<Store<P>>>,
     state_cache: Arc<StateCacheProcessor<P>>,
     block_processor: Arc<BlockProcessor<P>>,
+    event_channels: Arc<EventChannels>,
     execution_engine: E,
     delayed_until_blobs: HashMap<H256, PendingBlock<P>>,
     delayed_until_block: HashMap<H256, Delayed<P>>,
@@ -113,7 +114,6 @@ pub struct Mutator<P: Preset, E, W, AS, TS, PS, LS, NS, SS, VS> {
     metrics: Option<Arc<Metrics>>,
     mutator_tx: Sender<MutatorMessage<P, W>>,
     mutator_rx: Receiver<MutatorMessage<P, W>>,
-    api_tx: AS,
     attestation_verifier_tx: TS,
     p2p_tx: PS,
     pool_tx: LS,
@@ -122,12 +122,11 @@ pub struct Mutator<P: Preset, E, W, AS, TS, PS, LS, NS, SS, VS> {
     validator_tx: VS,
 }
 
-impl<P, E, W, AS, TS, PS, LS, NS, SS, VS> Mutator<P, E, W, AS, TS, PS, LS, NS, SS, VS>
+impl<P, E, W, TS, PS, LS, NS, SS, VS> Mutator<P, E, W, TS, PS, LS, NS, SS, VS>
 where
     P: Preset,
     E: ExecutionEngine<P> + Clone + Send + Sync + 'static,
     W: Wait,
-    AS: UnboundedSink<ApiMessage<P>>,
     TS: UnboundedSink<AttestationVerifierMessage<P, W>>,
     PS: UnboundedSink<P2pMessage<P>>,
     LS: UnboundedSink<PoolMessage>,
@@ -135,18 +134,18 @@ where
     SS: UnboundedSink<SyncMessage<P>>,
     VS: UnboundedSink<ValidatorMessage<P, W>>,
 {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         store_snapshot: Arc<ArcSwap<Store<P>>>,
         state_cache: Arc<StateCacheProcessor<P>>,
         block_processor: Arc<BlockProcessor<P>>,
+        event_channels: Arc<EventChannels>,
         execution_engine: E,
         storage: Arc<Storage<P>>,
         thread_pool: ThreadPool<P, E, W>,
         metrics: Option<Arc<Metrics>>,
         mutator_tx: Sender<MutatorMessage<P, W>>,
         mutator_rx: Receiver<MutatorMessage<P, W>>,
-        api_tx: AS,
         attestation_verifier_tx: TS,
         p2p_tx: PS,
         pool_tx: LS,
@@ -159,6 +158,7 @@ where
             store_snapshot,
             state_cache,
             block_processor,
+            event_channels,
             execution_engine,
             delayed_until_blobs: HashMap::new(),
             delayed_until_block: HashMap::new(),
@@ -170,7 +170,6 @@ where
             metrics,
             mutator_tx,
             mutator_rx,
-            api_tx,
             attestation_verifier_tx,
             p2p_tx,
             pool_tx,
@@ -318,6 +317,7 @@ where
         Ok(())
     }
 
+    #[expect(clippy::too_many_lines)]
     fn handle_tick(&mut self, wait_group: &W, tick: Tick) -> Result<()> {
         if tick.epoch::<P>() > self.store.current_epoch() {
             let checkpoint = self.store.unrealized_justified_checkpoint();
@@ -354,7 +354,20 @@ where
                 if let Some(execution_payload) = head.block.as_ref().clone().execution_payload() {
                     let mut params = None;
 
-                    if let Some(body) = head.block.message().body().post_deneb() {
+                    if let Some(body) = head.block.message().body().post_electra() {
+                        let versioned_hashes = body
+                            .blob_kzg_commitments()
+                            .iter()
+                            .copied()
+                            .map(misc::kzg_commitment_to_versioned_hash)
+                            .collect();
+
+                        params = Some(ExecutionPayloadParams::Electra {
+                            versioned_hashes,
+                            parent_beacon_block_root: head.block.message().parent_root(),
+                            execution_requests: body.execution_requests().clone(),
+                        });
+                    } else if let Some(body) = head.block.message().body().post_deneb() {
                         let versioned_hashes = body
                             .blob_kzg_commitments()
                             .iter()
@@ -447,7 +460,7 @@ where
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn handle_block(
         &mut self,
         wait_group: W,
@@ -624,7 +637,7 @@ where
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn handle_aggregate_and_proof(
         &mut self,
         wait_group: &W,
@@ -636,7 +649,7 @@ where
             Ok(AggregateAndProofAction::Accept {
                 aggregate_and_proof,
                 attesting_indices,
-                is_superset,
+                is_subset_aggregate,
             }) => {
                 if let Some(metrics) = self.metrics.as_ref() {
                     metrics.register_mutator_aggregate_and_proof(&["accepted"]);
@@ -657,10 +670,10 @@ where
                 let (gossip_id, sender) = origin.split();
 
                 if let Some(gossip_id) = gossip_id {
-                    if is_superset {
-                        P2pMessage::Accept(gossip_id).send(&self.p2p_tx);
-                    } else {
+                    if is_subset_aggregate {
                         P2pMessage::Ignore(gossip_id).send(&self.p2p_tx);
+                    } else {
+                        P2pMessage::Accept(gossip_id).send(&self.p2p_tx);
                     }
                 }
 
@@ -784,7 +797,6 @@ where
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
     fn handle_attestation(
         &mut self,
         wait_group: &W,
@@ -802,7 +814,8 @@ where
                 debug!("attestation accepted (attestation: {attestation:?})");
 
                 if attestation.origin.should_generate_event() {
-                    ApiMessage::AttestationEvent(attestation.item.clone_arc()).send(&self.api_tx);
+                    self.event_channels
+                        .send_attestation_event(&attestation.item);
                 }
 
                 if attestation.origin.send_to_validator() {
@@ -1041,7 +1054,7 @@ where
 
                 reply_to_http_api(sender, Ok(ValidationOutcome::Accept));
 
-                self.accept_blob_sidecar(&wait_group, blob_sidecar);
+                self.accept_blob_sidecar(&wait_group, &blob_sidecar);
             }
             Ok(BlobSidecarAction::Ignore(publishable)) => {
                 let (gossip_id, sender) = origin.split();
@@ -1278,12 +1291,11 @@ where
             .unfinalized_chain_link_by_execution_block_hash(execution_block_hash)
         {
             if chain_link.is_valid() {
-                ApiMessage::BlockEvent(BlockEvent {
-                    slot: chain_link.slot(),
-                    block: chain_link.block_root,
-                    execution_optimistic: false,
-                })
-                .send(&self.api_tx);
+                self.event_channels.send_block_event(
+                    chain_link.slot(),
+                    chain_link.block_root,
+                    false,
+                );
             }
         }
 
@@ -1302,10 +1314,8 @@ where
         // Do not send API events about optimistic blocks.
         // Vouch treats all head events as non-optimistic.
         if (head_changed || head_was_optimistic) && head.is_valid() {
-            match HeadEvent::new(&self.storage, &self.store, head) {
-                Ok(event) => ApiMessage::Head(event).send(&self.api_tx),
-                Err(error) => warn!("{error:#}"),
-            }
+            self.event_channels
+                .send_head_event(head, |head| self.calculate_dependent_roots(head));
 
             if !head_changed {
                 // The call to `Store::notify_about_reorganization` below sends
@@ -1340,8 +1350,8 @@ where
         Ok(())
     }
 
-    #[allow(clippy::cognitive_complexity)]
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::cognitive_complexity)]
+    #[expect(clippy::too_many_lines)]
     fn accept_block(
         &mut self,
         wait_group: &W,
@@ -1372,7 +1382,7 @@ where
         }
 
         // A block may become orphaned while being processed.
-        // The fork choice store is not designed to accomodate blocks like that.
+        // The fork choice store is not designed to accommodate blocks like that.
         if block.message().slot() <= self.store.finalized_slot() {
             debug!(
                 "block became orphaned while being processed \
@@ -1446,12 +1456,8 @@ where
         // Do not send API events about optimistic blocks.
         // Vouch treats all head events as non-optimistic.
         if is_valid {
-            ApiMessage::BlockEvent(BlockEvent {
-                slot: block_slot,
-                block: block_root,
-                execution_optimistic: false,
-            })
-            .send(&self.api_tx);
+            self.event_channels
+                .send_block_event(block_slot, block_root, false);
         }
 
         // TODO(Grandine Team): Performing the validation here results in the block being added to the
@@ -1461,7 +1467,7 @@ where
         //                      That is also why the message sending and task spawning was moved here.
         //                      One possible solution is to check `Mutator.delayed_until_payload` in
         //                      this method before calling `Store::apply_block`.
-        // > - If `exection_payload` verification of block's parent by an execution node is *not*
+        // > - If `execution_payload` verification of block's parent by an execution node is *not*
         // >   complete:
         // >   - [REJECT] The block's parent (defined by `block.parent_root`) passes all validation
         // >     (excluding execution node verification of the `block.body.execution_payload`).
@@ -1536,8 +1542,12 @@ where
             .is_finalized_checkpoint_updated()
             .then(|| {
                 let delayed = self.prune_delayed_until_block();
+                let delayed_until_blobs = self.prune_delayed_until_blobs();
                 let waiting = self.prune_waiting_for_checkpoint_states();
-                delayed.into_iter().chain(waiting)
+                delayed
+                    .into_iter()
+                    .chain(delayed_until_blobs)
+                    .chain(waiting)
             })
             .into_iter()
             .flatten();
@@ -1560,10 +1570,8 @@ where
                 // Do not send API events about optimistic blocks.
                 // Vouch treats all head events as non-optimistic.
                 if new_head.is_valid() {
-                    match HeadEvent::new(&self.storage, &self.store, &new_head) {
-                        Ok(event) => ApiMessage::Head(event).send(&self.api_tx),
-                        Err(error) => warn!("{error:#}"),
-                    }
+                    self.event_channels
+                        .send_head_event(&new_head, |head| self.calculate_dependent_roots(head));
 
                     ValidatorMessage::Head(wait_group.clone(), new_head.clone())
                         .send(&self.validator_tx);
@@ -1595,18 +1603,22 @@ where
         Ok(())
     }
 
-    fn accept_blob_sidecar(&mut self, wait_group: &W, blob_sidecar: Arc<BlobSidecar<P>>) {
+    fn accept_blob_sidecar(&mut self, wait_group: &W, blob_sidecar: &Arc<BlobSidecar<P>>) {
         let old_head = self.store.head().clone();
         let head_was_optimistic = old_head.is_optimistic();
         let block_root = blob_sidecar.signed_block_header.message.hash_tree_root();
 
-        self.store_mut().apply_blob_sidecar(blob_sidecar);
+        self.store_mut()
+            .apply_blob_sidecar(blob_sidecar.clone_arc());
 
         self.update_store_snapshot();
 
-        if let Some(pending_block) = self.delayed_until_blobs.get(&block_root) {
-            self.retry_block(wait_group.clone(), pending_block.clone());
+        if let Some(pending_block) = self.take_delayed_until_blobs(block_root) {
+            self.retry_block(wait_group.clone(), pending_block);
         }
+
+        self.event_channels
+            .send_blob_sidecar_event(block_root, blob_sidecar);
 
         self.spawn(PersistBlobSidecarsTask {
             store_snapshot: self.owned_store(),
@@ -1644,28 +1656,26 @@ where
             metrics.set_beacon_previous_justified_epoch(previous_justified_checkpoint.epoch);
         }
 
+        let finalized_state = self.store.last_finalized().state(&self.store);
+
         ValidatorMessage::FinalizedEth1Data(
-            self.store
-                .last_finalized()
-                .state(&self.store)
-                .eth1_deposit_index(),
+            finalized_state.eth1_deposit_index(),
+            finalized_state.deposit_requests_start_index(),
         )
         .send(&self.validator_tx);
 
-        ApiMessage::FinalizedCheckpoint(FinalizedCheckpointEvent {
-            block: head.block_root,
-            state: finalized_checkpoint.root,
-            epoch: finalized_checkpoint.epoch,
-            execution_optimistic: head.is_optimistic(),
-        })
-        .send(&self.api_tx);
+        self.event_channels.send_finalized_checkpoint_event(
+            head.block_root,
+            finalized_checkpoint,
+            head.is_optimistic(),
+        );
     }
 
     fn notify_about_reorganization(&self, wait_group: W, old_head: &ChainLink<P>) {
         let new_head = self.store.head().clone();
-        let event = ChainReorgEvent::new(&self.store, old_head);
 
-        ApiMessage::ChainReorgEvent(event).send(&self.api_tx);
+        self.event_channels
+            .send_chain_reorg_event(&self.store, old_head);
 
         if let Some(metrics) = self.metrics.as_ref() {
             metrics.beacon_reorgs_total.inc();
@@ -1705,17 +1715,36 @@ where
         let safe_block_hash = self.store.safe_execution_payload_hash();
         let finalized_block_hash = self.store.finalized_execution_payload_hash();
 
-        if !new_head.is_valid() {
-            let head_block_hash = state.latest_execution_payload_header().block_hash();
+        let head_block_hash = state.latest_execution_payload_header().block_hash();
 
-            self.execution_engine.notify_forkchoice_updated(
-                head_block_hash,
-                safe_block_hash,
-                finalized_block_hash,
-                Either::Left(new_head.block.phase()),
-                None,
-            );
-        }
+        self.execution_engine.notify_forkchoice_updated(
+            head_block_hash,
+            safe_block_hash,
+            finalized_block_hash,
+            Either::Left(new_head.block.phase()),
+            None,
+        );
+    }
+
+    // This may even involve a DB lookup so it would be best
+    // if we can avoid making it if no event listeners are present
+    fn calculate_dependent_roots(&self, head: &ChainLink<P>) -> Result<DependentRootsBundle> {
+        let state = head.state(&self.store);
+        let current_epoch = accessors::get_current_epoch(&state);
+        let previous_epoch = accessors::get_previous_epoch(&state);
+
+        let current_duty_dependent_root =
+            self.storage
+                .dependent_root(&self.store, &state, current_epoch)?;
+
+        let previous_duty_dependent_root =
+            self.storage
+                .dependent_root(&self.store, &state, previous_epoch)?;
+
+        Ok(DependentRootsBundle {
+            current_duty_dependent_root,
+            previous_duty_dependent_root,
+        })
     }
 
     fn delay_block_until_blobs(&mut self, beacon_block_root: H256, pending_block: PendingBlock<P>) {
@@ -1892,6 +1921,10 @@ where
             .push(pending_blob_sidecar);
     }
 
+    fn take_delayed_until_blobs(&mut self, block_root: H256) -> Option<PendingBlock<P>> {
+        self.delayed_until_blobs.remove(&block_root)
+    }
+
     fn take_delayed_until_block(&mut self, block_root: H256) -> Option<Delayed<P>> {
         self.delayed_until_block.remove(&block_root)
     }
@@ -2024,6 +2057,26 @@ where
         });
     }
 
+    fn prune_delayed_until_blobs(&mut self) -> Vec<GossipId> {
+        let finalized_slot = self.store.finalized_slot();
+
+        let mut gossip_ids = vec![];
+
+        self.delayed_until_blobs.retain(|_, pending_block| {
+            if pending_block.block.message().slot() > finalized_slot {
+                return true;
+            }
+
+            if let Some(gossip_id) = pending_block.origin.gossip_id() {
+                gossip_ids.push(gossip_id);
+            }
+
+            false
+        });
+
+        gossip_ids
+    }
+
     // Some objects may be delayed until a block that is itself delayed.
     // If the latter is pruned, objects depending on it could be pruned as well.
     // We don't bother doing this. It's tricky to implement and might not even be worth it.
@@ -2036,7 +2089,7 @@ where
 
         let mut gossip_ids = vec![];
 
-        // Use `drain_filter_polyfill` because `Vec::extract_if` is not stable as of Rust 1.80.1.
+        // Use `drain_filter_polyfill` because `Vec::extract_if` is not stable as of Rust 1.82.0.
         self.delayed_until_block.retain(|_, delayed| {
             let Delayed {
                 blocks,
@@ -2110,7 +2163,7 @@ where
 
         let mut gossip_ids = vec![];
 
-        // Use `HashMap::retain` because `HashMap::extract_if` is not stable as of Rust 1.80.1.
+        // Use `HashMap::retain` because `HashMap::extract_if` is not stable as of Rust 1.82.0.
         self.waiting_for_checkpoint_states
             .retain(|target, waiting| {
                 let prune = target.epoch < finalized_epoch;
@@ -2331,6 +2384,13 @@ where
             let type_name = tynm::type_name::<Self>();
 
             let (high_priority_tasks, low_priority_tasks) = self.thread_pool.task_counts();
+
+            metrics.set_collection_length(
+                module_path!(),
+                &type_name,
+                "delayed_until_blobs",
+                self.delayed_until_blobs.len(),
+            );
 
             metrics.set_collection_length(
                 module_path!(),

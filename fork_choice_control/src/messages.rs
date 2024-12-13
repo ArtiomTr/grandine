@@ -1,3 +1,8 @@
+#![allow(
+    clippy::allow_attributes,
+    reason = "allow_attributes lint trigger from some derive macros. \
+              See <https://github.com/rust-lang/rust-clippy/issues/13349>."
+)]
 use std::{
     sync::{mpsc::Sender, Arc},
     time::Instant,
@@ -10,26 +15,22 @@ use execution_engine::PayloadStatusV1;
 use fork_choice_store::{
     AggregateAndProofOrigin, AttestationAction, AttestationItem, AttestationValidationError,
     AttesterSlashingOrigin, BlobSidecarAction, BlobSidecarOrigin, BlockAction, BlockOrigin,
-    ChainLink, Store,
+    ChainLink,
 };
-use helper_functions::{accessors, misc};
 use log::debug;
 use serde::Serialize;
-use tap::Pipe as _;
 use types::{
     combined::{Attestation, BeaconState, SignedAggregateAndProof, SignedBeaconBlock},
     deneb::containers::BlobIdentifier,
     phase0::{
         containers::Checkpoint,
-        primitives::{DepositIndex, Epoch, ExecutionBlockHash, Slot, ValidatorIndex, H256},
+        primitives::{DepositIndex, ExecutionBlockHash, Slot, ValidatorIndex, H256},
     },
     preset::Preset,
-    traits::SignedBeaconBlock as _,
 };
 
 use crate::{
     misc::{MutatorRejectionReason, VerifyAggregateAndProofResult, VerifyAttestationResult},
-    storage::Storage,
     unbounded_sink::UnboundedSink,
 };
 
@@ -195,7 +196,7 @@ impl PoolMessage {
 
 pub enum ValidatorMessage<P: Preset, W> {
     Tick(W, Tick),
-    FinalizedEth1Data(DepositIndex),
+    FinalizedEth1Data(DepositIndex, Option<DepositIndex>),
     Head(W, ChainLink<P>),
     ValidAttestation(W, Arc<Attestation<P>>),
     PrepareExecutionPayload(Slot, ExecutionBlockHash, ExecutionBlockHash),
@@ -206,23 +207,6 @@ impl<P: Preset, W> ValidatorMessage<P, W> {
         // Don't log the value because it can contain entire `BeaconState`s.
         if tx.unbounded_send(self).is_err() {
             debug!("send to validator failed because the receiver was dropped");
-        }
-    }
-}
-
-#[derive(Debug)]
-pub enum ApiMessage<P: Preset> {
-    AttestationEvent(Arc<Attestation<P>>),
-    BlockEvent(BlockEvent),
-    ChainReorgEvent(ChainReorgEvent),
-    FinalizedCheckpoint(FinalizedCheckpointEvent),
-    Head(HeadEvent),
-}
-
-impl<P: Preset> ApiMessage<P> {
-    pub(crate) fn send(self, tx: &impl UnboundedSink<Self>) {
-        if let Err(message) = tx.unbounded_send(self) {
-            debug!("send to HTTP API failed because the receiver was dropped: {message:?}");
         }
     }
 }
@@ -252,112 +236,5 @@ impl<P: Preset> SyncMessage<P> {
                 "send to block sync service failed because the receiver was dropped: {message:?}"
             );
         }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct BlockEvent {
-    #[serde(with = "serde_utils::string_or_native")]
-    pub slot: Slot,
-    pub block: H256,
-    pub execution_optimistic: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct ChainReorgEvent {
-    #[serde(with = "serde_utils::string_or_native")]
-    pub slot: Slot,
-    #[serde(with = "serde_utils::string_or_native")]
-    pub depth: u64,
-    pub old_head_block: H256,
-    pub new_head_block: H256,
-    pub old_head_state: H256,
-    pub new_head_state: H256,
-    #[serde(with = "serde_utils::string_or_native")]
-    pub epoch: Epoch,
-    pub execution_optimistic: bool,
-}
-
-impl ChainReorgEvent {
-    // The [Eth Beacon Node API specification] does not make it clear how `slot`, `depth`, and
-    // `epoch` should be computed. We try to match the behavior of Lighthouse.
-    //
-    // [Eth Beacon Node API specification]: https://ethereum.github.io/beacon-APIs/
-    #[must_use]
-    pub fn new<P: Preset>(store: &Store<P>, old_head: &ChainLink<P>) -> Self {
-        let new_head = store.head();
-        let old_slot = old_head.slot();
-        let new_slot = new_head.slot();
-
-        let depth = store
-            .common_ancestor(old_head.block_root, new_head.block_root)
-            .map(ChainLink::slot)
-            .unwrap_or_else(|| {
-                // A reorganization may be triggered by an alternate chain being finalized.
-                // The old block will no longer be present in `store` if that happens.
-                // Default to the old finalized slot like Lighthouse does.
-                // A proper solution may require significant changes to `Mutator`.
-                old_head
-                    .finalized_checkpoint
-                    .epoch
-                    .pipe(misc::compute_start_slot_at_epoch::<P>)
-            })
-            .abs_diff(old_slot);
-
-        Self {
-            slot: new_slot,
-            depth,
-            old_head_block: old_head.block_root,
-            new_head_block: new_head.block_root,
-            old_head_state: old_head.block.message().state_root(),
-            new_head_state: new_head.block.message().state_root(),
-            epoch: misc::compute_epoch_at_slot::<P>(new_slot),
-            execution_optimistic: new_head.is_optimistic(),
-        }
-    }
-}
-
-#[derive(Debug, Serialize)]
-pub struct FinalizedCheckpointEvent {
-    pub block: H256,
-    pub state: H256,
-    #[serde(with = "serde_utils::string_or_native")]
-    pub epoch: Epoch,
-    pub execution_optimistic: bool,
-}
-
-#[derive(Debug, Serialize)]
-pub struct HeadEvent {
-    #[serde(with = "serde_utils::string_or_native")]
-    pub slot: Slot,
-    pub block: H256,
-    pub state: H256,
-    pub epoch_transition: bool,
-    pub previous_duty_dependent_root: H256,
-    pub current_duty_dependent_root: H256,
-    pub execution_optimistic: bool,
-}
-
-impl HeadEvent {
-    pub fn new<P: Preset>(
-        storage: &Storage<P>,
-        store: &Store<P>,
-        head: &ChainLink<P>,
-    ) -> Result<Self> {
-        let slot = head.slot();
-        let state = head.state(store);
-        let previous_epoch = accessors::get_previous_epoch(&state);
-        let current_epoch = accessors::get_current_epoch(&state);
-        let dependent_root = |epoch| storage.dependent_root(store, &state, epoch);
-
-        Ok(Self {
-            slot,
-            block: head.block_root,
-            state: head.block.message().state_root(),
-            epoch_transition: misc::is_epoch_start::<P>(slot),
-            previous_duty_dependent_root: dependent_root(previous_epoch)?,
-            current_duty_dependent_root: dependent_root(current_epoch)?,
-            execution_optimistic: head.is_optimistic(),
-        })
     }
 }

@@ -1,4 +1,4 @@
-#![allow(clippy::module_name_repetitions)]
+#![expect(clippy::module_name_repetitions)]
 
 use core::{
     fmt::Debug,
@@ -792,9 +792,10 @@ impl BellatrixPreset {
     }
 }
 
-#[allow(clippy::struct_field_names)]
-// Clippy does approve of all members starting with max.
-// However, specification is written with these terms.
+#[expect(
+    clippy::struct_field_names,
+    reason = "Specification is written with terms starting with max_."
+)]
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "SCREAMING_SNAKE_CASE")]
 pub struct CapellaPreset {
@@ -838,7 +839,7 @@ pub struct DenebPreset {
     #[serde(with = "serde_utils::string_or_native")]
     max_blobs_per_block: u64,
     #[serde(with = "serde_utils::string_or_native")]
-    kzg_committment_inclusion_proof_depth: u64,
+    kzg_commitment_inclusion_proof_depth: u64,
 }
 
 impl DenebPreset {
@@ -849,7 +850,7 @@ impl DenebPreset {
             field_elements_per_blob: P::FieldElementsPerBlob::non_zero(),
             max_blob_commitments_per_block: P::MaxBlobCommitmentsPerBlock::U64,
             max_blobs_per_block: P::MaxBlobsPerBlock::U64,
-            kzg_committment_inclusion_proof_depth: P::KzgCommitmentInclusionProofDepth::U64,
+            kzg_commitment_inclusion_proof_depth: P::KzgCommitmentInclusionProofDepth::U64,
         }
     }
 }

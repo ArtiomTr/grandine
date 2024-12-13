@@ -3,16 +3,17 @@ use std::{collections::HashSet, sync::Arc, time::Instant};
 
 use anyhow::Result;
 use bls::PublicKeyBytes;
+use derive_more::Debug;
 use directories::Directories;
 use eth1_api::{Eth1ApiToMetrics, Eth1Metrics, RealController};
 use futures::{channel::mpsc::UnboundedReceiver, future::Either, select, StreamExt as _};
 use log::{debug, info, warn};
 use p2p::SyncToMetrics;
-use reqwest::{Client, StatusCode, Url};
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
 use sysinfo::System;
 use tokio_stream::wrappers::IntervalStream;
-use types::preset::Preset;
+use types::{preset::Preset, redacting_url::RedactingUrl};
 
 use crate::{
     beaconchain::{
@@ -37,11 +38,11 @@ pub struct MetricsChannels {
 
 #[derive(Clone, Debug)]
 pub struct MetricsServiceConfig {
-    pub remote_metrics_url: Option<Url>,
+    pub remote_metrics_url: Option<RedactingUrl>,
     pub directories: Arc<Directories>,
 }
 
-#[allow(clippy::module_name_repetitions)]
+#[expect(clippy::module_name_repetitions)]
 pub struct MetricsService<P: Preset> {
     pub(crate) config: MetricsServiceConfig,
     pub(crate) controller: RealController<P>,
@@ -55,7 +56,7 @@ pub struct MetricsService<P: Preset> {
 
 impl<P: Preset> MetricsService<P> {
     #[must_use]
-    pub fn new(
+    pub const fn new(
         config: MetricsServiceConfig,
         controller: RealController<P>,
         eth1_metrics: Eth1Metrics,
@@ -109,7 +110,7 @@ impl<P: Preset> MetricsService<P> {
                         let process_metrics = ProcessMetrics::get();
 
                         let response = client
-                            .post(url)
+                            .post(url.into_url())
                             .json(&[
                                 self.beacon_node_metrics(process_metrics),
                                 self.validator_metrics(process_metrics),
@@ -208,7 +209,7 @@ impl<P: Preset> MetricsService<P> {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code)]
 #[derive(Debug, Deserialize)]
 struct RemoteError {
     data: String,
@@ -219,5 +220,35 @@ fn refresh_system_stats(system: &mut System, time: &mut Instant) {
     if time.elapsed() >= MIN_TIME_BETWEEN_SYSTEM_STATS_REFRESH {
         *time = Instant::now();
         system.refresh_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use types::redacting_url::RedactingUrl;
+
+    use super::MetricsServiceConfig;
+
+    #[test]
+    fn test_config_debug_with_sensitive_url() -> Result<()> {
+        let config = MetricsServiceConfig {
+            remote_metrics_url: "http://username:password@metrics.service.url"
+                .parse::<RedactingUrl>()?
+                .into(),
+            directories: Arc::default(),
+        };
+
+        assert_eq!(
+            format!("{config:?}"),
+            "MetricsServiceConfig { \
+                remote_metrics_url: Some(\"http://*:*@metrics.service.url/\"), \
+                directories: Directories { data_dir: None, store_directory: None, network_dir: None, validator_dir: None } \
+            }",
+        );
+
+        Ok(())
     }
 }

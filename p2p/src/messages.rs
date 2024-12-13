@@ -3,10 +3,10 @@ use std::{collections::BTreeMap, sync::Arc};
 use anyhow::Result;
 use bls::PublicKeyBytes;
 use eth2_libp2p::{
-    rpc::{GoodbyeReason, StatusMessage},
+    rpc::{GoodbyeReason, RequestId as IncomingRequestId, RequestType, StatusMessage},
     types::{EnrForkId, GossipKind},
     GossipId, GossipTopic, MessageAcceptance, NetworkEvent, PeerAction, PeerId, PeerRequestId,
-    PubsubMessage, ReportSource, Request, Response, Subnet, SubnetDiscovery,
+    PubsubMessage, ReportSource, Response, Subnet, SubnetDiscovery,
 };
 use futures::channel::{mpsc::UnboundedSender, oneshot::Sender};
 use log::debug;
@@ -195,15 +195,16 @@ pub enum ServiceInboundMessage<P: Preset> {
     Publish(PubsubMessage<P>),
     ReportPeer(PeerId, PeerAction, ReportSource, &'static str),
     ReportMessageValidationResult(GossipId, MessageAcceptance),
-    SendRequest(PeerId, RequestId, Request),
-    SendResponse(PeerId, PeerRequestId, Box<Response<P>>),
+    SendRequest(PeerId, RequestId, RequestType<P>),
+    SendResponse(PeerId, PeerRequestId, IncomingRequestId, Box<Response<P>>),
     Subscribe(GossipTopic),
     SubscribeKind(GossipKind),
     SubscribeNewForkTopics(Phase, ForkDigest),
     Unsubscribe(GossipTopic),
     UnsubscribeFromForkTopicsExcept(ForkDigest),
     UpdateEnrSubnet(Subnet, bool),
-    UpdateForkVersion(EnrForkId),
+    UpdateFork(EnrForkId),
+    UpdateGossipsubParameters(u64, Slot),
 }
 
 impl<P: Preset> ServiceInboundMessage<P> {

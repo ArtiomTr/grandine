@@ -2,11 +2,14 @@ use core::{future::Future, net::SocketAddr, panic::AssertUnwindSafe, pin::pin};
 use std::{
     net::{TcpListener, UdpSocket},
     path::PathBuf,
+    process::ExitCode,
     sync::Arc,
 };
 
-use anyhow::{bail, ensure, Context as _, Error as AnyhowError, Result};
+use allocator as _;
+use anyhow::{bail, ensure, Context as _, Result};
 use builder_api::BuilderConfig;
+use clap::{Error as ClapError, Parser as _};
 use database::Database;
 use eth1::{Eth1Chain, Eth1Config};
 use eth1_api::Auth;
@@ -20,10 +23,11 @@ use log::{error, info, warn};
 use logging::PEER_LOG_METRICS;
 use metrics::MetricsServerConfig;
 use p2p::{ListenAddr, NetworkConfig};
-use reqwest::{Client, ClientBuilder, Url};
+use reqwest::{Client, ClientBuilder};
+use runtime::{MetricsConfig, RuntimeConfig, StorageConfig};
 use signer::{KeyOrigin, Signer};
 use slasher::SlasherConfig;
-use slashing_protection::SlashingProtector;
+use slashing_protection::{interchange_format::InterchangeData, SlashingProtector};
 use ssz::SszRead as _;
 use std_ext::ArcExt as _;
 use thiserror::Error;
@@ -32,6 +36,7 @@ use types::{
     config::Config as ChainConfig,
     phase0::primitives::{ExecutionBlockNumber, Slot},
     preset::{Preset, PresetName},
+    redacting_url::RedactingUrl,
     traits::BeaconState as _,
 };
 use validator::{ValidatorApiConfig, ValidatorConfig};
@@ -39,7 +44,7 @@ use validator_key_cache::ValidatorKeyCache;
 
 use crate::{
     commands::{GrandineCommand, InterchangeCommand},
-    db_stats,
+    grandine_args::GrandineArgs,
     grandine_config::GrandineConfig,
     misc::{MetricsConfig, StorageConfig},
     predefined_network::PredefinedNetwork,
@@ -52,6 +57,15 @@ use types::preset::Mainnet;
 #[cfg(any(feature = "preset-minimal", test))]
 use types::preset::Minimal;
 
+mod commands;
+mod config_dir;
+mod consts;
+mod db_stats;
+mod grandine_args;
+mod grandine_config;
+mod predefined_network;
+mod validators;
+
 #[cfg(not(any(feature = "preset-any", test, doc)))]
 compile_error! {
     "at least one preset must be enabled; \
@@ -59,8 +73,10 @@ compile_error! {
      see runtime/Cargo.toml for a list of features"
 }
 
-// False positive. The `bool`s are independent.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "False positive. The `bool`s are independent."
+)]
 #[derive(Clone)]
 struct Context {
     predefined_network: Option<PredefinedNetwork>,
@@ -68,13 +84,13 @@ struct Context {
     store_config: StoreConfig,
     deposit_contract_starting_block: Option<ExecutionBlockNumber>,
     genesis_state_file: Option<PathBuf>,
-    genesis_state_download_url: Option<Url>,
+    genesis_state_download_url: Option<RedactingUrl>,
     validator_api_config: Option<ValidatorApiConfig>,
     validator_config: Arc<ValidatorConfig>,
-    checkpoint_sync_url: Option<Url>,
+    checkpoint_sync_url: Option<RedactingUrl>,
     force_checkpoint_sync: bool,
-    back_sync: bool,
-    eth1_rpc_urls: Vec<Url>,
+    back_sync_enabled: bool,
+    eth1_rpc_urls: Vec<RedactingUrl>,
     network_config: NetworkConfig,
     storage_config: StorageConfig,
     command: Option<GrandineCommand>,
@@ -84,6 +100,7 @@ struct Context {
     state_slot: Option<Slot>,
     eth1_auth: Arc<Auth>,
     http_api_config: HttpApiConfig,
+    max_events: usize,
     metrics_config: MetricsConfig,
     track_liveness: bool,
     detect_doppelgangers: bool,
@@ -142,7 +159,7 @@ impl Context {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     async fn run<P: Preset>(self) -> Result<()> {
         let Self {
             predefined_network,
@@ -155,7 +172,7 @@ impl Context {
             validator_config,
             checkpoint_sync_url,
             force_checkpoint_sync,
-            back_sync,
+            back_sync_enabled,
             eth1_rpc_urls,
             network_config,
             storage_config,
@@ -166,6 +183,7 @@ impl Context {
             state_slot,
             eth1_auth,
             http_api_config,
+            max_events,
             metrics_config,
             track_liveness,
             detect_doppelgangers,
@@ -267,6 +285,14 @@ impl Context {
 
         run_after_genesis(
             chain_config,
+            RuntimeConfig {
+                back_sync_enabled,
+                detect_doppelgangers,
+                max_events,
+                slashing_protection_history_limit,
+                track_liveness,
+                validator_enabled,
+            },
             store_config,
             validator_api_config,
             validator_config,
@@ -280,21 +306,16 @@ impl Context {
             signer,
             slasher_config,
             http_api_config,
-            back_sync,
             metrics_config,
-            track_liveness,
-            detect_doppelgangers,
             eth1_api_to_metrics_tx,
             eth1_api_to_metrics_rx,
-            slashing_protection_history_limit,
-            validator_enabled,
         )
         .await
     }
 }
 
 #[derive(Debug, Error)]
-pub enum Error {
+enum Error {
     #[error("{error}")]
     ArgumentsError { error: AnyhowError },
     #[error("{preset_name} preset is not included in this executable")]
@@ -329,7 +350,7 @@ pub fn run(config: GrandineConfig) -> Result<()> {
         genesis_state_download_url,
         checkpoint_sync_url,
         force_checkpoint_sync,
-        back_sync,
+        back_sync_enabled,
         eth1_rpc_urls,
         data_dir,
         validators,
@@ -337,6 +358,7 @@ pub fn run(config: GrandineConfig) -> Result<()> {
         graffiti,
         max_empty_slots,
         suggested_fee_recipient,
+        default_gas_limit,
         network_config,
         storage_config,
         request_timeout,
@@ -351,6 +373,7 @@ pub fn run(config: GrandineConfig) -> Result<()> {
         builder_config,
         web3signer_config,
         http_api_config,
+        max_events,
         metrics_config,
         track_liveness,
         detect_doppelgangers,
@@ -380,7 +403,7 @@ pub fn run(config: GrandineConfig) -> Result<()> {
             metrics_server_config.as_ref(),
             validator_api_config.as_ref(),
         )
-        .map_err(|error| Error::ArgumentsError { error })?;
+        .map_err(GrandineArgs::clap_error)?;
     }
 
     if !in_memory {
@@ -391,6 +414,7 @@ pub fn run(config: GrandineConfig) -> Result<()> {
         graffiti,
         max_empty_slots,
         suggested_fee_recipient,
+        default_gas_limit,
         keystore_storage_password_file,
     });
 
@@ -489,7 +513,7 @@ pub fn run(config: GrandineConfig) -> Result<()> {
         validator_config,
         checkpoint_sync_url,
         force_checkpoint_sync,
-        back_sync,
+        back_sync_enabled,
         eth1_rpc_urls,
         network_config,
         storage_config,
@@ -500,6 +524,7 @@ pub fn run(config: GrandineConfig) -> Result<()> {
         state_slot,
         eth1_auth,
         http_api_config,
+        max_events,
         metrics_config,
         track_liveness,
         detect_doppelgangers,
@@ -697,8 +722,29 @@ fn handle_command<P: Preset>(
                     );
                 }
                 InterchangeCommand::Export { file_path } => {
-                    slashing_protector
+                    let interchange = slashing_protector
                         .export_to_interchange_file(&file_path, genesis_validators_root)?;
+
+                    if interchange.is_empty() {
+                        warn!(
+                            "no records were exported. \
+                            This may indicate an issue if active validators are present. \
+                            Please verify your configuration settings.",
+                        );
+                    } else {
+                        for data in interchange.data {
+                            let InterchangeData {
+                                pubkey,
+                                signed_attestations,
+                                signed_blocks,
+                            } = data;
+
+                            info!(
+                                "exported {} records for {pubkey:?}",
+                                signed_attestations.len() + signed_blocks.len(),
+                            );
+                        }
+                    }
 
                     info!("interchange file exported to {file_path:?}");
                 }
@@ -709,14 +755,13 @@ fn handle_command<P: Preset>(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn genesis_checkpoint_provider<P: Preset>(
     chain_config: &ChainConfig,
     genesis_state_file: Option<PathBuf>,
     predefined_network: Option<PredefinedNetwork>,
     client: &Client,
     store_directory: PathBuf,
-    genesis_state_download_url: Option<Url>,
+    genesis_state_download_url: Option<RedactingUrl>,
     eth1_chain: &Eth1Chain,
 ) -> Result<AnchorCheckpointProvider<P>> {
     if let Some(file_path) = genesis_state_file {

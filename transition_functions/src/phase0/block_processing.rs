@@ -12,7 +12,6 @@ use helper_functions::{
     slot_report::{NullSlotReport, SlotReport},
     verifier::{SingleVerifier, Triple, Verifier},
 };
-use prometheus_metrics::METRICS;
 use rayon::iter::{IntoParallelRefIterator as _, ParallelIterator as _};
 use typenum::Unsigned as _;
 use types::{
@@ -34,6 +33,9 @@ use types::{
 
 use crate::unphased::{self, CombinedDeposit, Error};
 
+#[cfg(feature = "metrics")]
+use prometheus_metrics::METRICS;
+
 /// <https://github.com/ethereum/consensus-specs/blob/0b76c8367ed19014d104e3fbd4718e73f459a748/specs/phase0/beacon-chain.md#block-processing>
 ///
 /// This also serves as a substitute for [`compute_new_state_root`]. `compute_new_state_root` as
@@ -52,6 +54,7 @@ pub fn process_block<P: Preset>(
     mut verifier: impl Verifier,
     slot_report: impl SlotReport,
 ) -> Result<()> {
+    #[cfg(feature = "metrics")]
     let _timer = METRICS
         .get()
         .map(|metrics| metrics.block_transition_times.start_timer());
@@ -295,6 +298,7 @@ pub fn process_deposit_data<P: Preset>(
             withdrawal_credentials: vec![withdrawal_credentials],
             amounts: smallvec![amount],
             signatures: vec![signature],
+            positions: smallvec![0],
         };
 
         apply_deposits(state, 1, core::iter::once(combined_deposit), NullSlotReport)?;
@@ -314,9 +318,10 @@ pub fn process_deposit_data<P: Preset>(
 
         let combined_deposit = CombinedDeposit::NewValidator {
             pubkey,
-            withdrawal_credentials,
+            withdrawal_credentials: vec![withdrawal_credentials],
             amounts: smallvec![amount],
             signatures: vec![signature],
+            positions: smallvec![0],
         };
 
         apply_deposits(state, 1, core::iter::once(combined_deposit), NullSlotReport)?;
@@ -348,6 +353,7 @@ fn apply_deposits<P: Preset>(
                 ..
             } => {
                 let public_key_bytes = pubkey.to_bytes();
+                let withdrawal_credentials = withdrawal_credentials[0];
                 let first_amount = amounts[0];
                 let total_amount = amounts.iter().sum();
 

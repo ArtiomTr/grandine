@@ -19,6 +19,7 @@ use ssz::ContiguousList;
 use thiserror::Error;
 use typenum::Unsigned as _;
 use types::{
+    combined::BeaconState as CombinedBeaconState,
     config::Config,
     phase0::{
         containers::{Deposit, Eth1Data},
@@ -179,7 +180,7 @@ pub trait Eth1Storage {
 
     fn pending_deposits<P: Preset>(
         &self,
-        state: &impl BeaconState<P>,
+        state: &CombinedBeaconState<P>,
         eth1_vote: Eth1Data,
         metrics: Option<&Arc<Metrics>>,
     ) -> Result<ContiguousList<Deposit, P::MaxDeposits>> {
@@ -198,6 +199,17 @@ pub trait Eth1Storage {
         };
 
         let eth1_deposit_index = state.eth1_deposit_index();
+
+        if let CombinedBeaconState::Electra(state) = state {
+            let eth1_deposit_index_limit = state
+                .eth1_data()
+                .deposit_count
+                .min(state.deposit_requests_start_index);
+
+            if eth1_deposit_index >= eth1_deposit_index_limit {
+                return Ok(ContiguousList::default());
+            }
+        }
 
         features::log!(DebugEth1, "state.eth1_deposit_index: {eth1_deposit_index}");
         features::log!(DebugEth1, "eth1_data: {eth1_data:?}");
@@ -278,17 +290,34 @@ pub trait Eth1Storage {
         deposits.try_into().map_err(Into::into)
     }
 
-    fn finalize_deposits(&self, finalized_deposit_index: DepositIndex) -> Result<()> {
-        features::log!(DebugEth1, "Finalizing deposits: {finalized_deposit_index}");
+    fn finalize_deposits(
+        &self,
+        finalized_deposit_index: DepositIndex,
+        deposit_requests_start_index: Option<DepositIndex>,
+    ) -> Result<()> {
+        features::log!(
+            DebugEth1,
+            "Finalizing deposits: {finalized_deposit_index}, \
+            deposit requests start index: {deposit_requests_start_index:?}"
+        );
 
         let mut unfinalized_blocks = self.unfinalized_blocks_mut();
 
-        let position = unfinalized_blocks.iter().position(|block| {
-            block
-                .deposit_events
-                .iter()
-                .any(|deposit| deposit.index == finalized_deposit_index)
-        });
+        //  Prune downloaded eth1 blocks as a temporary measure:
+        // `https://eips.ethereum.org/EIPS/eip-6110#eth1data-poll-deprecation`
+        let deposit_requests_transition_period_finished = deposit_requests_start_index
+            .is_some_and(|requests_start_index| requests_start_index <= finalized_deposit_index);
+
+        let position = if deposit_requests_transition_period_finished {
+            Some(unfinalized_blocks.len())
+        } else {
+            unfinalized_blocks.iter().position(|block| {
+                block
+                    .deposit_events
+                    .iter()
+                    .any(|deposit| deposit.index == finalized_deposit_index)
+            })
+        };
 
         let Some(block_position) = position else {
             return Ok(());

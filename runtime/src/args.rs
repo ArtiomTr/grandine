@@ -1,6 +1,8 @@
-// Adding backquotes to doc comments affects `--help` output.
-// `clap` derive macros preserve backquotes even if `verbatim_doc_comment` is disabled.
-#![allow(clippy::doc_markdown)]
+#![expect(
+    clippy::doc_markdown,
+    reason = "Adding backquotes to doc comments affects `--help` output. \
+             `clap` derive macros preserve backquotes even if `verbatim_doc_comment` is disabled."
+)]
 
 use core::{
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
@@ -14,6 +16,7 @@ use anyhow::{ensure, Result};
 use bls::PublicKeyBytes;
 use builder_api::{
     BuilderConfig, DEFAULT_BUILDER_MAX_SKIPPED_SLOTS, DEFAULT_BUILDER_MAX_SKIPPED_SLOTS_PER_EPOCH,
+    PREFERRED_EXECUTION_GAS_LIMIT,
 };
 use bytesize::ByteSize;
 use clap::{error::ErrorKind, Args, CommandFactory as _, Error as ClapError, Parser, ValueEnum};
@@ -22,18 +25,28 @@ use derive_more::Display;
 use directories::Directories;
 use enum_iterator::Sequence;
 use eth1_api::AuthOptions;
-use eth2_libp2p::{rpc::config::OutboundRateLimiterConfig, PeerIdSerialized};
+use eth2_libp2p::{
+    rpc::config::{InboundRateLimiterConfig, OutboundRateLimiterConfig},
+    PeerIdSerialized,
+};
 use features::Feature;
 use fork_choice_control::DEFAULT_ARCHIVAL_EPOCH_INTERVAL;
 use fork_choice_store::{StoreConfig, DEFAULT_CACHE_LOCK_TIMEOUT_MILLIS};
 use grandine_version::{APPLICATION_NAME, APPLICATION_NAME_AND_VERSION, APPLICATION_VERSION};
 use http_api::HttpApiConfig;
+use http_api_utils::DEFAULT_MAX_EVENTS;
 use itertools::{EitherOrBoth, Itertools as _};
 use log::warn;
 use metrics::{MetricsServerConfig, MetricsServiceConfig};
 use p2p::{Enr, Multiaddr, NetworkConfig};
 use prometheus_metrics::{Metrics, METRICS};
 use reqwest::{header::HeaderValue, Url};
+use runtime::{
+    MetricsConfig, StorageConfig, DEFAULT_ETH1_DB_SIZE, DEFAULT_ETH2_DB_SIZE,
+    DEFAULT_LIBP2P_IPV4_PORT, DEFAULT_LIBP2P_IPV6_PORT, DEFAULT_LIBP2P_QUIC_IPV4_PORT,
+    DEFAULT_LIBP2P_QUIC_IPV6_PORT, DEFAULT_METRICS_PORT, DEFAULT_REQUEST_TIMEOUT,
+    DEFAULT_TARGET_PEERS, DEFAULT_TARGET_SUBNET_PEERS, DEFAULT_TIMEOUT,
+};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use signer::Web3SignerConfig;
@@ -43,13 +56,14 @@ use std_ext::ArcExt as _;
 use thiserror::Error;
 use tower_http::cors::AllowOrigin;
 use types::{
-    bellatrix::primitives::Difficulty,
+    bellatrix::primitives::{Difficulty, Gas},
     config::Config as ChainConfig,
     nonstandard::Phase,
     phase0::primitives::{
         Epoch, ExecutionAddress, ExecutionBlockHash, ExecutionBlockNumber, Slot, H256,
     },
     preset::PresetName,
+    redacting_url::RedactingUrl,
 };
 use validator::{ValidatorApiConfig, ValidatorConfig};
 
@@ -81,8 +95,10 @@ pub struct GrandineArgs {
     #[clap(flatten)]
     network_config_options: NetworkConfigOptions,
 
-    // TODO(Grandine Team): The slasher is not working properly and should not be used.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "TODO(Grandine Team): The slasher is not working properly and should not be used."
+    )]
     #[clap(skip)]
     slasher_options: SlasherOptions,
 
@@ -167,7 +183,7 @@ struct ChainOptions {
 
     /// Download genesis state from specified URL
     #[clap(long, value_name = "URL")]
-    genesis_state_download_url: Option<Url>,
+    genesis_state_download_url: Option<RedactingUrl>,
 }
 
 #[derive(Args)]
@@ -185,10 +201,6 @@ struct HttpApiOptions {
     #[clap(long, value_delimiter = ',')]
     http_allowed_origins: Vec<HeaderValue>,
 
-    /// Max number of events stored in a single channel for HTTP API /events api call
-    #[clap(long, default_value_t = HttpApiConfig::default().max_events)]
-    max_events: usize,
-
     /// HTTP API timeout in milliseconds
     #[clap(long, default_value_t = HttpApiOptions::default_timeout())]
     timeout: u64,
@@ -200,7 +212,6 @@ impl From<HttpApiOptions> for HttpApiConfig {
             http_address,
             http_port,
             http_allowed_origins,
-            max_events,
             timeout,
         } = http_api_options;
 
@@ -213,7 +224,6 @@ impl From<HttpApiOptions> for HttpApiConfig {
         Self {
             address,
             allow_origin: headers_to_allow_origin(http_allowed_origins).unwrap_or(allow_origin),
-            max_events,
             timeout: Some(Duration::from_millis(timeout)),
         }
     }
@@ -230,17 +240,23 @@ impl HttpApiOptions {
     }
 }
 
-// False positive. The `bool`s are independent.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "False positive. The `bool`s are independent."
+)]
 #[derive(Args)]
 struct BeaconNodeOptions {
     #[clap(long, default_value_t = ValidatorConfig::default().max_empty_slots)]
     max_empty_slots: u64,
 
+    /// Max number of events stored in a single channel for HTTP API /events api call
+    #[clap(long, default_value_t = DEFAULT_MAX_EVENTS)]
+    max_events: usize,
+
     /// Beacon node API URL to load recent finalized checkpoint and sync from it
     /// [default: None]
     #[clap(long)]
-    checkpoint_sync_url: Option<Url>,
+    checkpoint_sync_url: Option<RedactingUrl>,
 
     /// Force checkpoint sync. Requires --checkpoint-sync-url
     /// [default: disabled]
@@ -249,7 +265,7 @@ struct BeaconNodeOptions {
 
     /// List of Eth1 RPC URLs
     #[clap(long, num_args = 1..)]
-    eth1_rpc_urls: Vec<Url>,
+    eth1_rpc_urls: Vec<RedactingUrl>,
 
     /// Parent directory for application data files
     /// [default: $HOME/.grandine/{network}]
@@ -323,8 +339,8 @@ struct BeaconNodeOptions {
 
     /// Enable syncing historical data
     /// [default: disabled]
-    #[clap(long)]
-    back_sync: bool,
+    #[clap(long = "back_sync")]
+    back_sync_enabled: bool,
 
     /// Collect Prometheus metrics
     #[clap(long)]
@@ -340,7 +356,7 @@ struct BeaconNodeOptions {
 
     /// Optional remote metrics URL that Grandine will periodically send metrics to
     #[clap(long)]
-    remote_metrics_url: Option<Url>,
+    remote_metrics_url: Option<RedactingUrl>,
 
     /// Enable validator liveness tracking
     /// [default: disabled]
@@ -359,8 +375,10 @@ struct BeaconNodeOptions {
     in_memory: bool,
 }
 
-// False positive. The `bool`s are independent.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "False positive. The `bool`s are independent."
+)]
 #[derive(Args)]
 struct NetworkConfigOptions {
     /// Listen IPv4 address
@@ -529,6 +547,7 @@ impl NetworkConfigOptions {
         network_config.target_subnet_peers = target_subnet_peers;
         network_config.trusted_peers = trusted_peers;
         network_config.libp2p_private_key_file = libp2p_private_key_file;
+        network_config.inbound_rate_limiter_config = Some(InboundRateLimiterConfig::default());
         network_config.outbound_rate_limiter_config = Some(OutboundRateLimiterConfig::default());
 
         if let Some(listen_address_ipv6) = listen_address_ipv6 {
@@ -633,7 +652,7 @@ impl NetworkConfigOptions {
             if !manual_options.is_empty() {
                 warn!(
                     "UPnP enabled with manual ENR settings: {}; \
-                     manual ENR settings might be overriden by UPnP",
+                     manual ENR settings might be overridden by UPnP",
                     manual_options.join(", "),
                 );
             }
@@ -683,11 +702,11 @@ struct ValidatorOptions {
 
     /// [DEPRECATED] External block builder API URL
     #[clap(long)]
-    builder_api_url: Option<Url>,
+    builder_api_url: Option<RedactingUrl>,
 
     /// External block builder URL
     #[clap(long)]
-    builder_url: Option<Url>,
+    builder_url: Option<RedactingUrl>,
 
     /// Always use specified external block builder without checking for circuit breaker conditions
     #[clap(long)]
@@ -701,6 +720,10 @@ struct ValidatorOptions {
     #[clap(long, default_value_t = DEFAULT_BUILDER_MAX_SKIPPED_SLOTS_PER_EPOCH)]
     builder_max_skipped_slots_per_epoch: u64,
 
+    /// Default execution gas limit for all validators
+    #[clap(long, default_value_t = PREFERRED_EXECUTION_GAS_LIMIT)]
+    default_gas_limit: Gas,
+
     /// List of public keys to use from Web3Signer
     #[clap(long, num_args = 1.., value_delimiter = ',')]
     web3signer_public_keys: Vec<PublicKeyBytes>,
@@ -711,11 +734,11 @@ struct ValidatorOptions {
 
     /// [DEPRECATED] List of Web3Signer API URLs
     #[clap(long, num_args = 1..)]
-    web3signer_api_urls: Vec<Url>,
+    web3signer_api_urls: Vec<RedactingUrl>,
 
     /// List of Web3Signer URLs
     #[clap(long, num_args = 1..)]
-    web3signer_urls: Vec<Url>,
+    web3signer_urls: Vec<RedactingUrl>,
 
     /// Use validator key cache for faster startup
     #[clap(long)]
@@ -819,8 +842,8 @@ impl Network {
 
 impl GrandineArgs {
     // This is not a `TryFrom` impl because this has side effects.
-    #[allow(clippy::cognitive_complexity)]
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::cognitive_complexity)]
+    #[expect(clippy::too_many_lines)]
     pub fn try_into_config(self) -> Result<GrandineConfig> {
         let Self {
             chain_options,
@@ -856,6 +879,7 @@ impl GrandineArgs {
 
         let BeaconNodeOptions {
             max_empty_slots,
+            max_events,
             checkpoint_sync_url,
             eth1_rpc_urls,
             force_checkpoint_sync,
@@ -875,7 +899,7 @@ impl GrandineArgs {
             jwt_id,
             jwt_secret,
             jwt_version,
-            back_sync,
+            back_sync_enabled,
             metrics,
             metrics_address,
             metrics_port,
@@ -903,6 +927,7 @@ impl GrandineArgs {
             builder_disable_checks,
             builder_max_skipped_slots,
             builder_max_skipped_slots_per_epoch,
+            default_gas_limit,
             use_validator_key_cache,
             web3signer_public_keys,
             web3signer_refresh_keys_every_epoch,
@@ -1211,7 +1236,7 @@ impl GrandineArgs {
             genesis_state_download_url,
             checkpoint_sync_url,
             force_checkpoint_sync,
-            back_sync,
+            back_sync_enabled,
             eth1_rpc_urls,
             data_dir: directories.data_dir.clone().unwrap_or_default(),
             validators,
@@ -1219,6 +1244,7 @@ impl GrandineArgs {
             graffiti,
             max_empty_slots,
             suggested_fee_recipient: suggested_fee_recipient.unwrap_or(GRANDINE_DONATION_ADDRESS),
+            default_gas_limit,
             network_config: network_config_options.into_config(
                 network,
                 directories.network_dir.clone().unwrap_or_default(),
@@ -1238,6 +1264,7 @@ impl GrandineArgs {
             builder_config,
             web3signer_config,
             http_api_config,
+            max_events,
             metrics_config,
             track_liveness,
             detect_doppelgangers,
@@ -1470,7 +1497,7 @@ mod tests {
         let config = config_from_args(["--eth1-rpc-urls", "http://localhost:8545"]);
 
         itertools::assert_equal(
-            config.eth1_rpc_urls.iter().map(Url::as_str),
+            config.eth1_rpc_urls.iter().map(RedactingUrl::to_string),
             ["http://localhost:8545/"],
         );
     }
@@ -1484,7 +1511,7 @@ mod tests {
         ]);
 
         itertools::assert_equal(
-            config.eth1_rpc_urls.iter().map(Url::as_str),
+            config.eth1_rpc_urls.iter().map(RedactingUrl::to_string),
             ["http://localhost:8545/", "http://example.com:8545/"],
         );
     }
@@ -1499,7 +1526,7 @@ mod tests {
         ]);
 
         itertools::assert_equal(
-            config.eth1_rpc_urls.iter().map(Url::as_str),
+            config.eth1_rpc_urls.iter().map(RedactingUrl::to_string),
             ["http://localhost:8545/", "http://example.com:8545/"],
         );
     }
@@ -1571,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn http_allowed_origins_option_single_occurence() {
+    fn http_allowed_origins_option_single_occurrence() {
         let config = config_from_args(["--http-allowed-origins", "*"]);
 
         // `Debug` is the only way to inspect the contents of `AllowOrigin`.
@@ -1582,7 +1609,7 @@ mod tests {
     }
 
     #[test]
-    fn http_allowed_origins_option_multiple_occurences() {
+    fn http_allowed_origins_option_multiple_occurrences() {
         let config = config_from_args([
             "--http-allowed-origins",
             "http://localhost",
@@ -1598,7 +1625,7 @@ mod tests {
     }
 
     #[test]
-    fn http_allowed_origins_option_multiple_occurences_including_wildcard() {
+    fn http_allowed_origins_option_multiple_occurrences_including_wildcard() {
         let config = config_from_args([
             "--http-allowed-origins",
             "http://localhost",

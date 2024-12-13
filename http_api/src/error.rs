@@ -1,4 +1,5 @@
-use std::{error::Error as StdError, sync::Arc};
+use core::error::Error as StdError;
+use std::sync::Arc;
 
 use anyhow::Error as AnyhowError;
 use axum::{
@@ -69,6 +70,8 @@ pub enum Error {
     InvalidContributionAndProofs(Vec<IndexedError>),
     #[error("invalid epoch")]
     InvalidEpoch(#[source] AnyhowError),
+    #[error("invalid eth-consensus-version header")]
+    InvalidEthConsensusVersionHeader(#[source] AnyhowError),
     #[error("invalid JSON body")]
     InvalidJsonBody(#[source] JsonRejection),
     #[error("invalid peer ID")]
@@ -100,6 +103,8 @@ pub enum Error {
     LivenessTrackingNotEnabled,
     #[error("matching head block for attestation is not found")]
     MatchingAttestationHeadBlockNotFound,
+    #[error("eth-consensus-version header expected")]
+    MissingEthConsensusVersionHeader,
     #[error("beacon node is currently syncing and not serving requests on this endpoint")]
     NodeIsSyncing,
     #[error("peer not found")]
@@ -193,6 +198,7 @@ impl Error {
             | Self::InvalidBlockId(_)
             | Self::InvalidContributionAndProofs(_)
             | Self::InvalidEpoch(_)
+            | Self::InvalidEthConsensusVersionHeader(_)
             | Self::InvalidQuery(_)
             | Self::InvalidPeerId(_)
             | Self::InvalidProposerSlashing(_)
@@ -203,6 +209,7 @@ impl Error {
             | Self::InvalidRandaoReveal
             | Self::InvalidValidatorId(_)
             | Self::InvalidValidatorSignatures(_)
+            | Self::MissingEthConsensusVersionHeader
             | Self::ProposalSlotNotLaterThanStateSlot
             | Self::SlotNotInEpoch
             | Self::StatePreCapella
@@ -245,7 +252,7 @@ impl Error {
     }
 }
 
-#[allow(clippy::module_name_repetitions)]
+#[expect(clippy::module_name_repetitions)]
 #[derive(Debug, Serialize)]
 pub struct IndexedError {
     pub index: usize,
@@ -263,7 +270,10 @@ struct EthErrorResponse<'error> {
     failures: &'error [IndexedError],
 }
 
-#[allow(clippy::needless_pass_by_value)]
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Refactoring worsens readability, which is more important in tests."
+)]
 #[cfg(test)]
 mod tests {
     use axum::{extract::rejection::MissingJsonContentType, Error as AxumError};

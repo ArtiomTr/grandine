@@ -8,11 +8,13 @@ use http_api::HttpApiConfig;
 use itertools::Itertools as _;
 use log::info;
 use p2p::NetworkConfig;
-use reqwest::Url;
+use runtime::{MetricsConfig, StorageConfig, Url};
 use signer::Web3SignerConfig;
 use types::{
+    bellatrix::primitives::Gas,
     config::Config as ChainConfig,
     phase0::primitives::{ExecutionAddress, ExecutionBlockNumber, Slot, H256},
+    redacting_url::RedactingUrl,
 };
 use validator::ValidatorApiConfig;
 
@@ -23,25 +25,28 @@ use crate::{
     validators::Validators,
 };
 
-// False positive. The `bool`s are independent.
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "False positive. The `bool`s are independent."
+)]
 #[cfg_attr(test, derive(Debug))]
 pub struct GrandineConfig {
     pub predefined_network: Option<PredefinedNetwork>,
     pub chain_config: Arc<ChainConfig>,
     pub deposit_contract_starting_block: Option<ExecutionBlockNumber>,
     pub genesis_state_file: Option<PathBuf>,
-    pub genesis_state_download_url: Option<Url>,
-    pub checkpoint_sync_url: Option<Url>,
+    pub genesis_state_download_url: Option<RedactingUrl>,
+    pub checkpoint_sync_url: Option<RedactingUrl>,
     pub force_checkpoint_sync: bool,
-    pub back_sync: bool,
-    pub eth1_rpc_urls: Vec<Url>,
+    pub back_sync_enabled: bool,
+    pub eth1_rpc_urls: Vec<RedactingUrl>,
     pub data_dir: PathBuf,
     pub validators: Option<Validators>,
     pub keystore_storage_password_file: Option<PathBuf>,
     pub graffiti: Vec<H256>,
     pub max_empty_slots: u64,
     pub suggested_fee_recipient: ExecutionAddress,
+    pub default_gas_limit: Gas,
     pub network_config: NetworkConfig,
     pub storage_config: StorageConfig,
     pub unfinalized_states_in_memory: u64,
@@ -56,6 +61,7 @@ pub struct GrandineConfig {
     pub builder_config: Option<BuilderConfig>,
     pub web3signer_config: Web3SignerConfig,
     pub http_api_config: HttpApiConfig,
+    pub max_events: usize,
     pub metrics_config: MetricsConfig,
     pub track_liveness: bool,
     pub detect_doppelgangers: bool,
@@ -66,12 +72,12 @@ pub struct GrandineConfig {
 }
 
 impl GrandineConfig {
-    #[allow(clippy::cognitive_complexity)]
+    #[expect(clippy::cognitive_complexity)]
     pub fn report(&self) {
         let Self {
             predefined_network,
             chain_config,
-            back_sync,
+            back_sync_enabled,
             eth1_rpc_urls,
             data_dir,
             graffiti,
@@ -159,7 +165,7 @@ impl GrandineConfig {
         }
 
         info!("suggested fee recipient: {suggested_fee_recipient}");
-        info!("back sync enabled: {back_sync}");
+        info!("back sync enabled: {back_sync_enabled}");
 
         if *use_validator_key_cache {
             info!("using validator key cache");

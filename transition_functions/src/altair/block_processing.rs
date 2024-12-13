@@ -9,13 +9,13 @@ use helper_functions::{
     },
     altair::slash_validator,
     error::SignatureKind,
+    misc,
     mutators::{balance, decrease_balance, increase_balance},
     phase0::get_attesting_indices,
     signing::{SignForAllForks as _, SignForSingleFork as _, SignForSingleForkAtSlot as _},
     slot_report::{Delta, NullSlotReport, SlotReport, SyncAggregateRewards},
     verifier::{SingleVerifier, Triple, Verifier},
 };
-use prometheus_metrics::METRICS;
 use rayon::iter::{IntoParallelRefIterator as _, ParallelIterator as _};
 use std_ext::ArcExt as _;
 use typenum::Unsigned as _;
@@ -32,7 +32,7 @@ use types::{
     config::Config,
     nonstandard::{smallvec, AttestationEpoch, SlashingKind},
     phase0::{
-        consts::{FAR_FUTURE_EPOCH, GENESIS_SLOT},
+        consts::FAR_FUTURE_EPOCH,
         containers::{
             Attestation, AttesterSlashing, DepositData, DepositMessage, ProposerSlashing, Validator,
         },
@@ -46,6 +46,9 @@ use crate::{
     phase0,
     unphased::{self, CombinedDeposit, Error},
 };
+
+#[cfg(feature = "metrics")]
+use prometheus_metrics::METRICS;
 
 /// <https://github.com/ethereum/consensus-specs/blob/0b76c8367ed19014d104e3fbd4718e73f459a748/specs/altair/beacon-chain.md#block-processing>
 ///
@@ -65,6 +68,7 @@ pub fn process_block<P: Preset>(
     mut verifier: impl Verifier,
     slot_report: impl SlotReport,
 ) -> Result<()> {
+    #[cfg(feature = "metrics")]
     let _timer = METRICS
         .get()
         .map(|metrics| metrics.block_transition_times.start_timer());
@@ -352,6 +356,7 @@ pub fn process_deposit_data<P: Preset>(
             withdrawal_credentials: vec![withdrawal_credentials],
             amounts: smallvec![amount],
             signatures: vec![signature],
+            positions: smallvec![0],
         };
 
         apply_deposits(state, 1, core::iter::once(combined_deposit), NullSlotReport)?;
@@ -371,9 +376,10 @@ pub fn process_deposit_data<P: Preset>(
 
         let combined_deposit = CombinedDeposit::NewValidator {
             pubkey,
-            withdrawal_credentials,
+            withdrawal_credentials: vec![withdrawal_credentials],
             amounts: smallvec![amount],
             signatures: vec![signature],
+            positions: smallvec![0],
         };
 
         apply_deposits(state, 1, core::iter::once(combined_deposit), NullSlotReport)?;
@@ -405,6 +411,7 @@ pub fn apply_deposits<P: Preset>(
                 ..
             } => {
                 let public_key_bytes = pubkey.to_bytes();
+                let withdrawal_credentials = withdrawal_credentials[0];
                 let first_amount = amounts[0];
                 let total_amount = amounts.iter().sum();
 
@@ -557,7 +564,7 @@ pub fn verify_sync_aggregate_signature<P: Preset, V: Verifier>(
         .filter(|(_, bit)| *bit)
         .map(|(pubkey, _)| pubkey.decompress());
 
-    let previous_slot = state.slot().saturating_sub(1).max(GENESIS_SLOT);
+    let previous_slot = misc::previous_slot(state.slot());
 
     let block_root = get_block_root_at_slot(state, previous_slot).expect(
         "the bound on P::SlotsPerHistoricalRoot ensures that the \

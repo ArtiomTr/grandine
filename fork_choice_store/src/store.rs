@@ -248,7 +248,7 @@ impl<P: Preset> Store<P> {
         };
 
         let validator_count = anchor_state.validators().len_usize();
-        let latest_messages = itertools::repeat_n(None, validator_count).collect();
+        let latest_messages = core::iter::repeat_n(None, validator_count).collect();
 
         Self {
             chain_config,
@@ -310,8 +310,7 @@ impl<P: Preset> Store<P> {
 
     #[must_use]
     pub fn previous_epoch(&self) -> Epoch {
-        // > Use GENESIS_EPOCH for previous when genesis to avoid underflow
-        self.current_epoch().saturating_sub(1).max(GENESIS_EPOCH)
+        misc::previous_epoch(self.current_epoch())
     }
 
     #[must_use]
@@ -1057,13 +1056,7 @@ impl<P: Preset> Store<P> {
         };
 
         // > Check the block is valid and compute the post-state
-        let block_action = state_transition_for_gossip(parent)?;
-
-        if let Some(action) = block_action {
-            return Ok(Some(action));
-        }
-
-        Ok(None)
+        state_transition_for_gossip(parent)
     }
 
     pub fn validate_block_with_custom_state_transition(
@@ -1093,7 +1086,9 @@ impl<P: Preset> Store<P> {
             return Ok(action);
         }
 
-        if !self.indices_of_missing_blobs(block).is_empty() {
+        if self.should_check_data_availability_at_slot(block.message().slot())
+            && !self.indices_of_missing_blobs(block).is_empty()
+        {
             return Ok(BlockAction::DelayUntilBlobs(block.clone_arc()));
         }
 
@@ -1170,7 +1165,7 @@ impl<P: Preset> Store<P> {
         Ok(BlockAction::Accept(chain_link, attester_slashing_results))
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     pub fn validate_aggregate_and_proof<I>(
         &self,
         aggregate_and_proof: Arc<SignedAggregateAndProof<P>>,
@@ -1275,6 +1270,11 @@ impl<P: Preset> Store<P> {
             },
         );
 
+        let index = aggregate
+            .committee_bits()
+            .and_then(|bits| misc::get_committee_indices::<P>(*bits).next())
+            .unwrap_or(index);
+
         let committee = accessors::beacon_committee(&target_state, slot, index)?;
 
         // > The aggregator's validator index is within the committee
@@ -1317,12 +1317,12 @@ impl<P: Preset> Store<P> {
         )?;
 
         // https://github.com/ethereum/consensus-specs/pull/2847
-        let is_superset = self.aggregate_and_proof_supersets.check(&aggregate);
+        let is_subset_aggregate = !self.aggregate_and_proof_supersets.check(&aggregate);
 
         Ok(AggregateAndProofAction::Accept {
             aggregate_and_proof,
             attesting_indices,
-            is_superset,
+            is_subset_aggregate,
         })
     }
 
@@ -1689,7 +1689,6 @@ impl<P: Preset> Store<P> {
     }
 
     // TODO(feature/deneb): Format quotes and log message like everything else.
-    #[allow(clippy::too_many_lines)]
     pub fn validate_blob_sidecar(
         &self,
         blob_sidecar: Arc<BlobSidecar<P>>,
@@ -1706,7 +1705,8 @@ impl<P: Preset> Store<P> {
 
         // [REJECT] The sidecar is for the correct subnet -- i.e. compute_subnet_for_blob_sidecar(blob_sidecar.index) == subnet_id.
         if let Some(actual) = origin.subnet_id() {
-            let expected = misc::compute_subnet_for_blob_sidecar(blob_sidecar.index);
+            let expected =
+                misc::compute_subnet_for_blob_sidecar(&self.chain_config, blob_sidecar.index);
 
             ensure!(
                 actual == expected,
@@ -1740,9 +1740,9 @@ impl<P: Preset> Store<P> {
             return Ok(BlobSidecarAction::Ignore(true));
         }
 
-        let mut state = self
+        let state = self
             .state_cache
-            .before_or_at_slot(self, block_header.parent_root, block_header.slot)
+            .try_state_at_slot(self, block_header.parent_root, block_header.slot)?
             .unwrap_or_else(|| {
                 self.chain_link(block_header.parent_root)
                     .or_else(|| self.chain_link_before_or_at(block_header.slot))
@@ -1830,23 +1830,6 @@ impl<P: Preset> Store<P> {
         // If the proposer_index cannot immediately be verified against the expected shuffling,
         // the sidecar MAY be queued for later processing while proposers for the block's branch are calculated --
         // in such a case do not REJECT, instead IGNORE this message.
-        if state.slot() < block_header.slot {
-            if Feature::WarnOnStateCacheSlotProcessing.is_enabled() && self.is_forward_synced() {
-                // `Backtrace::force_capture` can be costly and a warning may be excessive,
-                // but this is controlled by a `Feature` that should be disabled by default.
-                warn!(
-                    "processing slots for beacon state not found in state cache before state transition \
-                    (block root: {:?}, from slot {} to {})\n{}",
-                    block_header.parent_root,
-                    state.slot(),
-                    block_header.slot,
-                    Backtrace::force_capture(),
-                );
-            }
-
-            combined::process_slots(&self.chain_config, state.make_mut(), block_header.slot)?;
-        }
-
         let computed = accessors::get_beacon_proposer_index(&state)?;
 
         ensure!(
@@ -1994,12 +1977,14 @@ impl<P: Preset> Store<P> {
 
         // Temporary logging for debugging
         if let Some(post_deneb_block_body) = chain_link.block.message().body().post_deneb() {
-            let blob_count = post_deneb_block_body.blob_kzg_commitments().len();
+            if self.should_check_data_availability_at_slot(chain_link.slot()) {
+                let blob_count = post_deneb_block_body.blob_kzg_commitments().len();
 
-            log::info!(
-                "imported {blob_count}/{blob_count} blobs for beacon block: {block_root:?}, slot: {}",
-                chain_link.slot()
-            );
+                log::info!(
+                    "imported {blob_count}/{blob_count} blobs for beacon block: {block_root:?}, slot: {}",
+                    chain_link.slot()
+                );
+            }
         }
 
         self.insert_block(chain_link)?;
@@ -2461,7 +2446,7 @@ impl<P: Preset> Store<P> {
     fn extend_latest_messages_after_finalization(&mut self) {
         let old_length = self.latest_messages.len();
         let new_length = self.last_finalized().state(self).validators().len_usize();
-        let added_vacancies = itertools::repeat_n(None, new_length - old_length);
+        let added_vacancies = core::iter::repeat_n(None, new_length - old_length);
 
         self.latest_messages.extend(added_vacancies);
     }
@@ -3053,6 +3038,17 @@ impl<P: Preset> Store<P> {
 
     pub fn unpersisted_blob_sidecars(&self) -> impl Iterator<Item = BlobSidecarWithId<P>> + '_ {
         self.blob_cache.unpersisted_blob_sidecars()
+    }
+
+    pub fn should_check_data_availability_at_slot(&self, slot: Slot) -> bool {
+        let min_checked_epoch = self.chain_config.deneb_fork_epoch.max(
+            self.tick
+                .epoch::<P>()
+                .checked_sub(self.chain_config.min_epochs_for_blob_sidecars_requests)
+                .unwrap_or(GENESIS_EPOCH),
+        );
+
+        misc::compute_epoch_at_slot::<P>(slot) >= min_checked_epoch
     }
 
     pub fn state_cache(&self) -> Arc<StateCacheProcessor<P>> {

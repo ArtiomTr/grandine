@@ -1,8 +1,8 @@
 //! <https://github.com/ethereum/consensus-specs/blob/b2f42bf4d79432ee21e2f2b3912ff4bbf7898ada/specs/phase0/validator.md>
 
+use core::error::Error as StdError;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
-    error::Error as StdError,
     sync::Arc,
     time::SystemTime,
 };
@@ -34,6 +34,7 @@ use helper_functions::{
     accessors, misc,
     signing::{RandaoEpoch, SignForAllForks, SignForSingleFork},
 };
+use http_api_utils::EventChannels;
 use itertools::Itertools as _;
 use keymanager::ProposerConfigs;
 use liveness_tracker::ValidatorToLiveness;
@@ -65,7 +66,7 @@ use types::{
     },
     nonstandard::{OwnAttestation, Phase, SyncCommitteeEpoch, WithBlobsAndMev, WithStatus},
     phase0::{
-        consts::{GENESIS_EPOCH, GENESIS_SLOT},
+        consts::GENESIS_SLOT,
         containers::{
             AggregateAndProof as Phase0AggregateAndProof, Attestation as Phase0Attestation,
             AttestationData, Checkpoint, SignedAggregateAndProof as Phase0SignedAggregateAndProof,
@@ -77,7 +78,7 @@ use types::{
 };
 
 use crate::{
-    messages::{ApiToValidator, InternalMessage, ValidatorToApi},
+    messages::{ApiToValidator, InternalMessage},
     misc::{Aggregator, SyncCommitteeMember},
     own_beacon_committee_members::{BeaconCommitteeMember, OwnBeaconCommitteeMembers},
     own_sync_committee_subscriptions::OwnSyncCommitteeSubscriptions,
@@ -114,12 +115,11 @@ pub struct Channels<P: Preset, W> {
     pub p2p_to_validator_rx: UnboundedReceiver<P2pToValidator<P>>,
     pub slasher_to_validator_rx: Option<UnboundedReceiver<SlasherToValidator<P>>>,
     pub subnet_service_tx: UnboundedSender<ToSubnetService>,
-    pub validator_to_api_tx: UnboundedSender<ValidatorToApi<P>>,
     pub validator_to_liveness_tx: Option<UnboundedSender<ValidatorToLiveness<P>>>,
     pub validator_to_slasher_tx: Option<UnboundedSender<ValidatorToSlasher>>,
 }
 
-#[allow(clippy::struct_field_names)]
+#[expect(clippy::struct_field_names)]
 pub struct Validator<P: Preset, W: Wait> {
     chain_config: Arc<ChainConfig>,
     validator_config: Arc<ValidatorConfig>,
@@ -141,6 +141,7 @@ pub struct Validator<P: Preset, W: Wait> {
     validator_votes: HashMap<Epoch, Vec<ValidatorVote>>,
     builder_api: Option<Arc<BuilderApi>>,
     doppelganger_protection: Option<Arc<DoppelgangerProtection>>,
+    event_channels: Arc<EventChannels>,
     last_registration_epoch: Option<Epoch>,
     proposer_configs: Arc<ProposerConfigs>,
     signer: Arc<Signer>,
@@ -153,13 +154,12 @@ pub struct Validator<P: Preset, W: Wait> {
     metrics: Option<Arc<Metrics>>,
     internal_tx: UnboundedSender<InternalMessage>,
     internal_rx: UnboundedReceiver<InternalMessage>,
-    validator_to_api_tx: UnboundedSender<ValidatorToApi<P>>,
     validator_to_liveness_tx: Option<UnboundedSender<ValidatorToLiveness<P>>>,
     validator_to_slasher_tx: Option<UnboundedSender<ValidatorToSlasher>>,
 }
 
 impl<P: Preset, W: Wait + Sync> Validator<P, W> {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         validator_config: Arc<ValidatorConfig>,
@@ -168,6 +168,7 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
         attestation_agg_pool: Arc<AttestationAggPool<P, W>>,
         builder_api: Option<Arc<BuilderApi>>,
         doppelganger_protection: Option<Arc<DoppelgangerProtection>>,
+        event_channels: Arc<EventChannels>,
         proposer_configs: Arc<ProposerConfigs>,
         signer: Arc<Signer>,
         slashing_protector: Arc<Mutex<SlashingProtector>>,
@@ -182,7 +183,6 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
             p2p_to_validator_rx,
             slasher_to_validator_rx,
             subnet_service_tx,
-            validator_to_api_tx,
             validator_to_liveness_tx,
             validator_to_slasher_tx,
         } = channels;
@@ -215,6 +215,7 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
             validator_votes: HashMap::new(),
             builder_api,
             doppelganger_protection,
+            event_channels,
             last_registration_epoch: None,
             proposer_configs,
             signer,
@@ -226,13 +227,12 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
             metrics,
             internal_rx,
             internal_tx,
-            validator_to_api_tx,
             validator_to_liveness_tx,
             validator_to_slasher_tx,
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     pub async fn run(mut self) -> Result<()> {
         loop {
             let mut slasher_to_validator_rx = self
@@ -252,8 +252,8 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
                     ValidatorMessage::Tick(wait_group, tick) => {
                         self.handle_tick(wait_group, tick).await?;
                     }
-                    ValidatorMessage::FinalizedEth1Data(finalized_eth1_deposit_index) => {
-                        self.block_producer.finalize_deposits(finalized_eth1_deposit_index)?;
+                    ValidatorMessage::FinalizedEth1Data(finalized_eth1_data, deposit_requests_start_index) => {
+                        self.block_producer.finalize_deposits(finalized_eth1_data, deposit_requests_start_index)?;
                     },
                     ValidatorMessage::Head(wait_group, head) => {
                         if let Some(validator_to_liveness_tx) = &self.validator_to_liveness_tx {
@@ -283,17 +283,46 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
                         let slot_head = self.safe_slot_head(slot).await;
 
                         if let Some(slot_head) = slot_head {
+                            let proposer_index = slot_head.proposer_index()?;
+
                             let block_build_context = self.block_producer.new_build_context(
                                 slot_head.beacon_state.clone_arc(),
                                 slot_head.beacon_block_root,
-                                slot_head.proposer_index()?,
+                                proposer_index,
                                 BlockBuildOptions::default(),
                             );
+
+                            let payload_attributes = match block_build_context.prepare_execution_payload_attributes().await {
+                                Ok(Some(attributes)) => attributes,
+                                Ok(None) => {
+                                    debug!("no payload attributes prepared");
+                                    continue;
+                                },
+                                Err(error) => {
+                                    warn!("failed to prepare execution payload attributes: {error:?}");
+                                    continue
+                                },
+                            };
+
+                            if let Some(state) = slot_head.beacon_state.post_bellatrix() {
+                                let payload = state.latest_execution_payload_header();
+
+                                self.event_channels.send_payload_attributes_event(
+                                    slot_head.beacon_state.phase(),
+                                    proposer_index,
+                                    slot,
+                                    slot_head.beacon_block_root,
+                                    &payload_attributes,
+                                    payload.block_number(),
+                                    payload.block_hash(),
+                                );
+                            }
 
                             block_build_context.prepare_execution_payload_for_slot(
                                 slot,
                                 safe_execution_payload_hash,
                                 finalized_execution_payload_hash,
+                                payload_attributes,
                             ).await;
                         }
                     }
@@ -316,7 +345,7 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
                             .await?;
 
                         if matches!(outcome, PoolAdditionOutcome::Accept) {
-                            ValidatorToApi::AttesterSlashing(slashing).send(&self.validator_to_api_tx);
+                            self.event_channels.send_attester_slashing_event(&slashing);
                         }
 
                         self.handle_pool_addition_outcome_for_p2p(outcome, gossip_id);
@@ -328,7 +357,7 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
                             .await?;
 
                         if matches!(outcome, PoolAdditionOutcome::Accept) {
-                            ValidatorToApi::ProposerSlashing(slashing).send(&self.validator_to_api_tx);
+                            self.event_channels.send_proposer_slashing_event(&slashing);
                         }
 
                         self.handle_pool_addition_outcome_for_p2p(outcome, gossip_id);
@@ -340,7 +369,7 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
                             .await?;
 
                         if matches!(outcome, PoolAdditionOutcome::Accept) {
-                            ValidatorToApi::VoluntaryExit(voluntary_exit).send(&self.validator_to_api_tx);
+                            self.event_channels.send_voluntary_exit_event(&voluntary_exit);
                         }
 
                         self.handle_pool_addition_outcome_for_p2p(outcome, gossip_id);
@@ -439,7 +468,7 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
         message.send(&self.p2p_tx);
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     async fn handle_tick(&mut self, wait_group: W, tick: Tick) -> Result<()> {
         if let Some(metrics) = self.metrics.as_ref() {
             if tick.is_start_of_interval() {
@@ -643,7 +672,7 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
     }
 
     /// <https://github.com/ethereum/consensus-specs/blob/b2f42bf4d79432ee21e2f2b3912ff4bbf7898ada/specs/phase0/validator.md#block-proposal>
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     async fn propose(&mut self, wait_group: W, slot_head: &SlotHead<P>) -> Result<()> {
         if slot_head.slot() == GENESIS_SLOT {
             // All peers should already have the genesis block.
@@ -869,7 +898,7 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
     /// See:
     /// - <https://github.com/ethereum/consensus-specs/blob/b2f42bf4d79432ee21e2f2b3912ff4bbf7898ada/specs/phase0/validator.md#attesting>
     /// - <https://github.com/ethereum/consensus-specs/blob/b2f42bf4d79432ee21e2f2b3912ff4bbf7898ada/specs/phase0/validator.md#attestation-aggregation>
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     async fn attest_and_start_aggregating(
         &mut self,
         wait_group: &W,
@@ -1004,14 +1033,19 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
                     selection_proof,
                 })?;
 
-                Some((own_attestation.attestation.data(), aggregator))
+                let data = AttestationData {
+                    index: committee_index,
+                    ..own_attestation.attestation.data()
+                };
+
+                Some((data, aggregator))
             })
             .pipe(group_into_btreemap);
 
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     async fn publish_aggregates_and_proofs(&self, wait_group: &W, slot_head: &SlotHead<P>) {
         let config = &self.chain_config;
         let phase = slot_head.phase();
@@ -1287,7 +1321,7 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
         self.signer.load().keys().copied().collect::<HashSet<_>>()
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     async fn own_singular_attestations(
         &self,
         slot_head: &SlotHead<P>,
@@ -1666,20 +1700,16 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
+    #[expect(clippy::too_many_lines)]
     fn process_validator_votes(&mut self, current_epoch: Epoch) -> Result<()> {
-        let Some(epoch_to_check) = current_epoch
-            .saturating_sub(1)
-            .max(GENESIS_EPOCH)
-            .checked_sub(1)
-        else {
+        let Some(epoch_to_check) = misc::previous_epoch(current_epoch).checked_sub(1) else {
             return Ok(());
         };
 
         // Take beacon blocks from `epoch_to_check` and the epoch before it in case the first
         // slot(s) of `epoch_to_check` are empty.
-        let start_slot = Self::start_of_epoch(epoch_to_check.saturating_sub(1).max(GENESIS_EPOCH));
-        let end_slot = Self::start_of_epoch(current_epoch.saturating_sub(1).max(GENESIS_EPOCH));
+        let start_slot = Self::start_of_epoch(misc::previous_epoch(epoch_to_check));
+        let end_slot = Self::start_of_epoch(misc::previous_epoch(current_epoch));
 
         // We assume that stored blocks from epoch before previous do reflect canonical chain
         let canonical_blocks_with_roots = self.controller.blocks_by_range(start_slot..end_slot)?;
@@ -1917,12 +1947,14 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
             .filter_map(|(index, contribution_and_proof, result)| async move {
                 match result {
                     Ok(_) => {
-                        ValidatorToApi::ContributionAndProof(Box::new(contribution_and_proof))
-                            .send(&self.validator_to_api_tx);
+                        self.event_channels
+                            .send_contribution_and_proof_event(&contribution_and_proof);
+
                         ValidatorToP2p::PublishContributionAndProof(Box::new(
                             contribution_and_proof,
                         ))
                         .send(&self.p2p_tx);
+
                         None
                     }
                     Err(error) => Some((index, error)),

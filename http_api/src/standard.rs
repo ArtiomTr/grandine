@@ -2,9 +2,6 @@
 //!
 //! [Eth Beacon Node API]: https://ethereum.github.io/beacon-APIs/
 
-// This makes `http_api::routing` less messy at the cost of coupling to `axum` even more.
-#![allow(clippy::unused_async)]
-
 use std::{collections::HashSet, sync::Arc};
 
 use anyhow::{anyhow, ensure, Error as AnyhowError, Result};
@@ -30,7 +27,7 @@ use futures::{
 };
 use genesis::AnchorCheckpointProvider;
 use helper_functions::{accessors, misc};
-use http_api_utils::{BlockId, StateId};
+use http_api_utils::{BlockId, EventChannels, StateId, Topic};
 use itertools::{izip, Either, Itertools as _};
 use liveness_tracker::ApiToLiveness;
 use log::{debug, info, warn};
@@ -72,7 +69,7 @@ use types::{
         WEI_IN_GWEI,
     },
     phase0::{
-        consts::{GENESIS_EPOCH, GENESIS_SLOT},
+        consts::GENESIS_SLOT,
         containers::{
             AttestationData, Checkpoint, Fork, ProposerSlashing, SignedBeaconBlockHeader,
             SignedVoluntaryExit, Validator,
@@ -90,7 +87,6 @@ use validator::{ApiToValidator, ValidatorConfig};
 use crate::{
     block_id,
     error::{Error, IndexedError},
-    events::{EventChannels, Topic},
     extractors::{EthJson, EthJsonOrSsz, EthPath, EthQuery},
     full_config::FullConfig,
     misc::{APIBlock, BackSyncedStatus, BroadcastValidation, SignedAPIBlock, SyncedStatus},
@@ -204,12 +200,11 @@ pub struct ExpectedWithdrawalsQuery {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)]
 pub struct PublishBlockQuery {
     broadcast_validation: Option<BroadcastValidation>,
 }
 
-#[allow(clippy::struct_field_names)]
+#[expect(clippy::struct_field_names)]
 #[derive(Serialize)]
 pub struct GetGenesisResponse {
     #[serde(with = "serde_utils::string_or_native")]
@@ -1262,10 +1257,7 @@ pub async fn submit_pool_proposer_slashing<P: Preset, W: Wait>(
         .await?;
 
     if outcome.is_publishable() {
-        if let Err(error) = send_proposer_slashing_event(*proposer_slashing, &event_channels) {
-            warn!("unable to send proposer slashing event: {error}");
-        }
-
+        event_channels.send_proposer_slashing_event(&proposer_slashing);
         ApiToP2p::PublishProposerSlashing(proposer_slashing).send(&api_to_p2p_tx);
     }
 
@@ -1297,10 +1289,7 @@ pub async fn submit_pool_voluntary_exit<P: Preset, W: Wait>(
         .await?;
 
     if outcome.is_publishable() {
-        if let Err(error) = send_voluntary_exit_event(*signed_voluntary_exit, &event_channels) {
-            warn!("unable to send voluntary exit event: {error}");
-        }
-
+        event_channels.send_voluntary_exit_event(&signed_voluntary_exit);
         ApiToP2p::PublishVoluntaryExit(signed_voluntary_exit).send(&api_to_p2p_tx);
     }
 
@@ -1332,12 +1321,7 @@ pub async fn submit_pool_attester_slashing<P: Preset, W: Wait>(
         .await?;
 
     if outcome.is_publishable() {
-        if let Err(error) =
-            send_attester_slashing_event(*attester_slashing.clone(), &event_channels)
-        {
-            warn!("unable to send attester slashing event: {error}");
-        }
-
+        event_channels.send_attester_slashing_event(&attester_slashing);
         ApiToP2p::PublishAttesterSlashing(attester_slashing).send(&api_to_p2p_tx);
     }
 
@@ -1772,7 +1756,7 @@ pub async fn validator_attester_duties<P: Preset, W: Wait>(
 
     // Unlike `GET /eth/v1/validator/duties/proposer/{epoch}`,
     // this endpoint is supposed to return the dependent root for the previous epoch.
-    let previous_epoch = epoch.saturating_sub(1).max(GENESIS_EPOCH);
+    let previous_epoch = misc::previous_epoch(epoch);
     let dependent_root = controller.dependent_root(&state, previous_epoch)?;
 
     let indices = validator_indices
@@ -2178,10 +2162,7 @@ pub async fn validator_attestation_data<P: Preset, W: Wait>(
     }
 
     let requested_epoch = misc::compute_epoch_at_slot::<P>(slot);
-
-    let previous_epoch = misc::compute_epoch_at_slot::<P>(head_slot)
-        .saturating_sub(1)
-        .max(GENESIS_EPOCH);
+    let previous_epoch = misc::previous_epoch(misc::compute_epoch_at_slot::<P>(head_slot));
 
     // Prevent DoS attacks by limiting how far in the past the attested block can be searched.
     if requested_epoch < previous_epoch {
@@ -2325,7 +2306,6 @@ pub async fn validator_sync_committee_contribution<P: Preset, W: Wait>(
 /// [the specification]: https://ethereum.github.io/beacon-APIs/
 // We box aggregates to reduce the size of various enums.
 // It's probably faster to deserialize them directly into `Vec<Box<_>>`.
-#[allow(clippy::vec_box)]
 pub async fn validator_publish_aggregate_and_proofs<P: Preset, W: Wait>(
     State(controller): State<ApiController<P, W>>,
     State(api_to_p2p_tx): State<UnboundedSender<ApiToP2p<P>>>,
@@ -2636,7 +2616,6 @@ fn publish_block_to_network<P: Preset>(
     ApiToP2p::PublishBeaconBlock(block).send(api_to_p2p_tx);
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn publish_signed_block_v2<P: Preset, W: Wait>(
     block: Arc<SignedBeaconBlock<P>>,
     blob_sidecars: Vec<BlobSidecar<P>>,
@@ -2805,36 +2784,6 @@ async fn submit_blob_sidecars<P: Preset, W: Wait>(
         }
         Err(error) => return Err(Error::InvalidBlock(error)),
     }
-
-    Ok(())
-}
-
-fn send_attester_slashing_event<P: Preset>(
-    attester_slashing: AttesterSlashing<P>,
-    event_channels: &EventChannels,
-) -> Result<()> {
-    let event = Topic::AttesterSlashing.build(attester_slashing)?;
-    event_channels.attester_slashings.send(event)?;
-
-    Ok(())
-}
-
-fn send_proposer_slashing_event(
-    proposer_slashing: ProposerSlashing,
-    event_channels: &EventChannels,
-) -> Result<()> {
-    let event = Topic::ProposerSlashing.build(proposer_slashing)?;
-    event_channels.proposer_slashings.send(event)?;
-
-    Ok(())
-}
-
-fn send_voluntary_exit_event(
-    voluntary_exit: SignedVoluntaryExit,
-    event_channels: &EventChannels,
-) -> Result<()> {
-    let event = Topic::VoluntaryExit.build(voluntary_exit)?;
-    event_channels.voluntary_exits.send(event)?;
 
     Ok(())
 }

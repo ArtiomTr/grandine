@@ -19,7 +19,7 @@ use types::{
 
 type ComputeInAdvanceSlots = U8;
 
-#[allow(clippy::declare_interior_mutable_const)]
+#[expect(clippy::declare_interior_mutable_const)]
 const NONE_MUTEX: Mutex<Option<SlotBeaconCommitteeMembers>> = Mutex::const_new(None);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -248,7 +248,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_computing_own_beacon_commitee_members() -> Result<()> {
+    async fn test_computing_own_beacon_committee_members() -> Result<()> {
         // beacon committees at slot 1:
         //
         // committee 0: validators 41, 45,  0, 24
