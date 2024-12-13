@@ -28,6 +28,7 @@ use types::{
     nonstandard::{Phase, WithBlobsAndMev},
     phase0::primitives::{ExecutionBlockHash, ExecutionBlockNumber},
     preset::{Mainnet, Preset},
+    redacting_url::RedactingUrl,
 };
 use web3::types::{BlockId, BlockNumber, Filter, FilterBuilder, Log, U64};
 
@@ -126,7 +127,7 @@ impl Eth1Api {
         config: Arc<Config>,
         _client: Client,
         _auth: Arc<Auth>,
-        _eth1_rpc_urls: Vec<Url>,
+        _eth1_rpc_urls: Vec<RedactingUrl>,
         _eth1_api_to_metrics_tx: Option<UnboundedSender<Eth1ApiToMetrics>>,
         _metrics: Option<Arc<Metrics>>,
     ) -> Self {

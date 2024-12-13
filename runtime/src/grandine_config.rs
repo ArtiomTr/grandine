@@ -8,7 +8,6 @@ use http_api::HttpApiConfig;
 use itertools::Itertools as _;
 use log::info;
 use p2p::NetworkConfig;
-use runtime::{MetricsConfig, StorageConfig, Url};
 use signer::Web3SignerConfig;
 use types::{
     bellatrix::primitives::Gas,

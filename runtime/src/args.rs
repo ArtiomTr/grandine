@@ -41,12 +41,6 @@ use metrics::{MetricsServerConfig, MetricsServiceConfig};
 use p2p::{Enr, Multiaddr, NetworkConfig};
 use prometheus_metrics::{Metrics, METRICS};
 use reqwest::{header::HeaderValue, Url};
-use runtime::{
-    MetricsConfig, StorageConfig, DEFAULT_ETH1_DB_SIZE, DEFAULT_ETH2_DB_SIZE,
-    DEFAULT_LIBP2P_IPV4_PORT, DEFAULT_LIBP2P_IPV6_PORT, DEFAULT_LIBP2P_QUIC_IPV4_PORT,
-    DEFAULT_LIBP2P_QUIC_IPV6_PORT, DEFAULT_METRICS_PORT, DEFAULT_REQUEST_TIMEOUT,
-    DEFAULT_TARGET_PEERS, DEFAULT_TARGET_SUBNET_PEERS, DEFAULT_TIMEOUT,
-};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
 use signer::Web3SignerConfig;

@@ -6,8 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use allocator as _;
-use anyhow::{bail, ensure, Context as _, Result};
+use anyhow::{bail, ensure, Context as _, Result, Error as AnyhowError};
 use builder_api::BuilderConfig;
 use clap::{Error as ClapError, Parser as _};
 use database::Database;
@@ -24,7 +23,6 @@ use logging::PEER_LOG_METRICS;
 use metrics::MetricsServerConfig;
 use p2p::{ListenAddr, NetworkConfig};
 use reqwest::{Client, ClientBuilder};
-use runtime::{MetricsConfig, RuntimeConfig, StorageConfig};
 use signer::{KeyOrigin, Signer};
 use slasher::SlasherConfig;
 use slashing_protection::{interchange_format::InterchangeData, SlashingProtector};
@@ -44,27 +42,19 @@ use validator_key_cache::ValidatorKeyCache;
 
 use crate::{
     commands::{GrandineCommand, InterchangeCommand},
-    grandine_args::GrandineArgs,
+    args::GrandineArgs,
     grandine_config::GrandineConfig,
     misc::{MetricsConfig, StorageConfig},
     predefined_network::PredefinedNetwork,
-    runtime::run_after_genesis,
+    runtime::{run_after_genesis, RuntimeConfig},
     schema,
+    db_stats
 };
 
 #[cfg(any(feature = "preset-mainnet", test))]
 use types::preset::Mainnet;
 #[cfg(any(feature = "preset-minimal", test))]
 use types::preset::Minimal;
-
-mod commands;
-mod config_dir;
-mod consts;
-mod db_stats;
-mod grandine_args;
-mod grandine_config;
-mod predefined_network;
-mod validators;
 
 #[cfg(not(any(feature = "preset-any", test, doc)))]
 compile_error! {
@@ -315,7 +305,7 @@ impl Context {
 }
 
 #[derive(Debug, Error)]
-enum Error {
+pub enum Error {
     #[error("{error}")]
     ArgumentsError { error: AnyhowError },
     #[error("{preset_name} preset is not included in this executable")]
