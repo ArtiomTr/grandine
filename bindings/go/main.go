@@ -244,7 +244,7 @@ type ELAdapter interface {
 	EthLogs(Filter) []Log
 	EngineNewPayloadV1(ExecutionPayloadV1) PayloadStatusV1
 	EngineNewPayloadV2(ExecutionPayloadV2) PayloadStatusV1
-	EngineNewPayloadV3(ExecutionPayloadV3, [][32]byte, [32]byte) PayloadStatusV1
+	EngineNewPayloadV3(ExecutionPayloadV3, [][32]byte, [32]byte) (*PayloadStatusV1, error)
 	EngineNewPayloadV4(ExecutionPayloadV3, [][32]byte, [32]byte, [][]byte) PayloadStatusV1
 	EngineForkChoiceUpdatedV1(ForkChoiceStateV1, *PayloadAttributesV1) ForkChoiceUpdatedResponse
 	EngineForkChoiceUpdatedV2(ForkChoiceStateV1, *PayloadAttributesV2) ForkChoiceUpdatedResponse
@@ -635,7 +635,7 @@ func GoEngineNewPayloadV3(payload C.CExecutionPayloadV3, versioned_hashes **C.ui
 			versioned_hashes_slice = append(versioned_hashes_slice, *(*[32]byte)(C.GoBytes(unsafe.Pointer(raw_versioned_hashes[i]), 32)))
 		}
 
-		payload_status := (*globalAdapter).EngineNewPayloadV3(ExecutionPayloadV3{
+		payload_status, err := (*globalAdapter).EngineNewPayloadV3(ExecutionPayloadV3{
 			ParentHash:    *(*[32]byte)(unsafe.Pointer(&payload.parent_hash)),
 			FeeRecipient:  *(*[20]byte)(unsafe.Pointer(&payload.fee_recipient)),
 			StateRoot:     *(*[32]byte)(unsafe.Pointer(&payload.state_root)),
@@ -655,7 +655,11 @@ func GoEngineNewPayloadV3(payload C.CExecutionPayloadV3, versioned_hashes **C.ui
 			ExcessBlobGas: uint64(payload.excess_blob_gas),
 		}, versioned_hashes_slice, *(*[32]byte)(unsafe.Pointer(parent_beacon_block_root)))
 
-		return C.CResult_CPayloadStatusV1{value: goPayloadStatusV1ToC(payload_status), error: 0}
+		if err != nil {
+			return C.CResult_CPayloadStatusV1{error: 2}
+		}
+
+		return C.CResult_CPayloadStatusV1{value: goPayloadStatusV1ToC(*payload_status), error: 0}
 	}
 
 	return C.CResult_CPayloadStatusV1{error: 1}
