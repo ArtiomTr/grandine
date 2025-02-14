@@ -9,11 +9,11 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
         include:
           - os: ubuntu-latest
-            backend: blst
+            backend: blst,mcl
           - os: windows-latest
             backend: zkcrypto,constantine
           - os: macos-latest
-            backend: arkworks,mcl
+            backend: blst,arkworks
 
     runs-on: ${{ matrix.os }}
 
@@ -21,6 +21,13 @@ jobs:
     - name: Disable autocrlf (Windows)
       if: runner.os == 'Windows'
       run: git config --global core.autocrlf false
+    - name: Setup nim for constantine
+      if: runner.os == 'Windows'
+      uses: jiro4989/setup-nim-action@v2
+      with:
+        nim-version: '2.0.2'
+        repo-token: ${{ secrets.GITHUB_TOKEN }}
+        parent-nim-install-directory: ${{ runner.temp }}
     - uses: actions/checkout@v4
       with:
         submodules: true
