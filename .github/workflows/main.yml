@@ -150,6 +150,7 @@ jobs:
       #     path: grandine
       - name: Get latest nethermind release
         uses: actions/github-script@v8
+        id: get-release
         env:
           RID: ${{ matrix.rid }}
         with:
@@ -160,7 +161,7 @@ jobs:
             const asset = release.data.assets.find(asset => asset.name.endsWith(rid + '.zip'));
             return asset.browser_download_url;
       - name: Download nethermind release
-        run: wget "${{steps.set-result.outputs.result}}" -o nethermind.zip
+        run: wget "${{steps.get-release.outputs.result}}" -o nethermind.zip
 
       - name: Unzip nethermind release
         run: unzip nethermind.zip
