@@ -198,7 +198,7 @@ jobs:
           if-no-files-found: error
   publish:
     name: Draft release
-    needs: [pack_nethermind]
+    needs: [build_bin, pack_nethermind]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
