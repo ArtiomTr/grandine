@@ -162,7 +162,6 @@ jobs:
         env:
           RID: ${{ matrix.alias || matrix.rid }}
         with:
-          result-encoding: string
           script: |
             const rid = process.env.RID;
             const release = await github.rest.repos.getLatestRelease({ owner: 'NethermindEth', repo: 'nethermind' });
