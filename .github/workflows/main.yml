@@ -9,6 +9,9 @@ on:
       ref:
         description: 'The reference (branch/tag/commit) to checkout'
         required: false
+      tag:
+        description: 'Version'
+        required: false
 
 jobs:
   build_bin:
@@ -19,9 +22,11 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
+            short-id: amd64
             
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
+            short-id: arm64
     steps:
       - name: Disable autocrlf (Windows)
         if: runner.os == 'Windows'
@@ -29,7 +34,7 @@ jobs:
         
       - name: Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
-        if: matrix.rid == 'linux-arm64'
+        if: runner.os == 'Linux'
           
       - uses: actions/checkout@v4
         with:
@@ -46,7 +51,7 @@ jobs:
       - name: Upload binaries
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
+          name: grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.short-id }}
           path: |
             target/${{ matrix.target }}/compact/grandine
           # target/${{ matrix.target }}/compact/grandine.exe # maybe in the future
@@ -120,3 +125,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: artifacts/*
+          tag_name: ${{ inputs.tag || github.ref_name }}
