@@ -141,7 +141,15 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        rid: ['linux-x64', 'linux-arm64', 'win-x64', 'osx-x64', 'osx-arm64']
+        include:
+          - rid: 'linux-x64'
+          - rid: 'linux-arm64'
+          - rid: 'osx-x64'
+            alias: 'macos-x64'
+          - rid: 'osx-arm64'
+            alias: 'macos-arm64'
+          - rid: 'win-x64'
+            alias: 'windows-x64'
     steps:
       # - name: Download compiled library
       #   uses: actions/download-artifact@v4
@@ -152,16 +160,16 @@ jobs:
         uses: actions/github-script@v8
         id: get-release
         env:
-          RID: ${{ matrix.rid }}
+          RID: ${{ matrix.alias || matrix.rid }}
         with:
           result-encoding: string
           script: |
             const rid = process.env.RID;
             const release = await github.rest.repos.getLatestRelease({ owner: 'NethermindEth', repo: 'nethermind' });
             const asset = release.data.assets.find(asset => asset.name.endsWith(rid + '.zip'));
-            return asset.browser_download_url;
+            return asset;
       - name: Download nethermind release
-        run: wget -O nethermind.zip "${{steps.get-release.outputs.result}}"
+        run: wget -O nethermind.zip "${{ steps.get-release.outputs.result.browser_download_url }}"
 
       - name: Unzip nethermind release
         run: unzip nethermind.zip
