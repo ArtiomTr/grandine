@@ -14,48 +14,48 @@ on:
         required: false
 
 jobs:
-  # build_bin:
-  #   name: Build binary for target ${{ matrix.target }}
-  #   runs-on: ${{ matrix.os }}
-  #   strategy:
-  #     matrix:
-  #       include:
-  #         - target: x86_64-unknown-linux-gnu
-  #           os: ubuntu-latest
-  #           short-id: amd64
+  build_bin:
+    name: Build binary for target ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            short-id: amd64
             
-  #         - target: aarch64-unknown-linux-gnu
-  #           os: ubuntu-latest
-  #           short-id: arm64
-  #   steps:
-  #     - name: Disable autocrlf (Windows)
-  #       if: runner.os == 'Windows'
-  #       run: git config --global core.autocrlf false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            short-id: arm64
+    steps:
+      - name: Disable autocrlf (Windows)
+        if: runner.os == 'Windows'
+        run: git config --global core.autocrlf false
         
-  #     - name: Free Disk Space (Ubuntu)
-  #       uses: jlumbroso/free-disk-space@main
-  #       if: runner.os == 'Linux'
+      - name: Free Disk Space (Ubuntu)
+        uses: jlumbroso/free-disk-space@main
+        if: runner.os == 'Linux'
           
-  #     - uses: actions/checkout@v4
-  #       with:
-  #         ref: ${{ inputs.ref || github.ref }}
-  #         submodules: true
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          submodules: true
           
-  #     - name: Build binary
-  #       uses: houseabsolute/actions-rust-cross@v1
-  #       with:
-  #         command: build
-  #         target: ${{ matrix.target }}
-  #         args: "--bin grandine --features default-networks --profile=compact --workspace --exclude zkvm_host --exclude zkvm_guest_risc0"
+      - name: Build binary
+        uses: houseabsolute/actions-rust-cross@v1
+        with:
+          command: build
+          target: ${{ matrix.target }}
+          args: "--bin grandine --features default-networks --profile=compact --workspace --exclude zkvm_host --exclude zkvm_guest_risc0"
 
-  #     - name: Upload binary
-  #       uses: actions/upload-artifact@v4
-  #       with:
-  #         name: grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.short-id }}
-  #         path: |
-  #           target/${{ matrix.target }}/compact/grandine
-  #         # target/${{ matrix.target }}/compact/grandine.exe # maybe in the future
-  #         if-no-files-found: error
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.short-id }}
+          path: |
+            target/${{ matrix.target }}/compact/grandine
+          # target/${{ matrix.target }}/compact/grandine.exe # maybe in the future
+          if-no-files-found: error
   build_csharp_bindings:
     name: Build C# bindings
     runs-on: ubuntu-latest
@@ -91,21 +91,21 @@ jobs:
             os: ubuntu-latest
             rid: linux-x64
             
-          # - target: aarch64-unknown-linux-gnu
-          #   os: ubuntu-latest
-          #   rid: linux-arm64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            rid: linux-arm64
             
-          # - target: x86_64-pc-windows-msvc
-          #   os: windows-latest
-          #   rid: win-x64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            rid: win-x64
             
-          # - target: x86_64-apple-darwin
-          #   os: macos-latest
-          #   rid: osx-x64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            rid: osx-x64
 
-          # - target: aarch64-apple-darwin
-          #   os: macos-latest
-          #   rid: osx-arm64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            rid: osx-arm64
     steps:
       - name: Disable autocrlf (Windows)
         if: runner.os == 'Windows'
@@ -144,13 +144,13 @@ jobs:
       matrix:
         include:
           - rid: 'linux-x64'
-          # - rid: 'linux-arm64'
-          # - rid: 'osx-x64'
-          #   alias: 'macos-x64'
-          # - rid: 'osx-arm64'
-          #   alias: 'macos-arm64'
-          # - rid: 'win-x64'
-          #   alias: 'windows-x64'
+          - rid: 'linux-arm64'
+          - rid: 'osx-x64'
+            alias: 'macos-x64'
+          - rid: 'osx-arm64'
+            alias: 'macos-arm64'
+          - rid: 'win-x64'
+            alias: 'windows-x64'
     steps:
       - name: Download compiled library
         uses: actions/download-artifact@v4
@@ -207,12 +207,9 @@ jobs:
           pattern: grandine-*
           path: artifacts
 
-      - name: List downloaded artifacts
-        run: ls artifacts
-
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*
+          files: artifacts/**
           draft: true
           tag_name: ${{ inputs.tag || github.ref_name }}
