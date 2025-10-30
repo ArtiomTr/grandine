@@ -14,73 +14,19 @@ on:
         required: false
 
 jobs:
-  build_bin:
-    name: Build binary for target ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            short-id: amd64
-            
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            short-id: arm64
-    steps:
-      - name: Disable autocrlf (Windows)
-        if: runner.os == 'Windows'
-        run: git config --global core.autocrlf false
-        
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        if: runner.os == 'Linux'
-          
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          submodules: true
-          
-      - name: Build binary
-        uses: houseabsolute/actions-rust-cross@v1
-        with:
-          command: build
-          target: ${{ matrix.target }}
-          args: "--bin grandine --features default-networks --profile=compact --workspace --exclude zkvm_host --exclude zkvm_guest_risc0"
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.short-id }}
-          path: |
-            target/${{ matrix.target }}/compact/grandine
-          # target/${{ matrix.target }}/compact/grandine.exe # maybe in the future
-          if-no-files-found: error
-  # build:
-  #   name: Build for target ${{ matrix.target }}
+  # build_bin:
+  #   name: Build binary for target ${{ matrix.target }}
   #   runs-on: ${{ matrix.os }}
   #   strategy:
   #     matrix:
   #       include:
   #         - target: x86_64-unknown-linux-gnu
   #           os: ubuntu-latest
-  #           rid: linux-x64
+  #           short-id: amd64
             
   #         - target: aarch64-unknown-linux-gnu
   #           os: ubuntu-latest
-  #           rid: linux-arm64
-            
-  #         - target: x86_64-pc-windows-msvc
-  #           os: windows-latest
-  #           rid: win-x64
-            
-  #         - target: x86_64-apple-darwin
-  #           os: macos-latest
-  #           rid: osx-x64
-
-  #         - target: aarch64-apple-darwin
-  #           os: macos-latest
-  #           rid: osx-arm64
+  #           short-id: arm64
   #   steps:
   #     - name: Disable autocrlf (Windows)
   #       if: runner.os == 'Windows'
@@ -88,41 +34,127 @@ jobs:
         
   #     - name: Free Disk Space (Ubuntu)
   #       uses: jlumbroso/free-disk-space@main
-  #       if: matrix.rid == 'linux-arm64'
+  #       if: runner.os == 'Linux'
           
   #     - uses: actions/checkout@v4
   #       with:
   #         ref: ${{ inputs.ref || github.ref }}
   #         submodules: true
           
-  #     - name: Build library
+  #     - name: Build binary
   #       uses: houseabsolute/actions-rust-cross@v1
   #       with:
   #         command: build
   #         target: ${{ matrix.target }}
-  #         args: "-p c_grandine --locked --profile=compact"
-          
-  #     - name: Upload dynamic libs
+  #         args: "--bin grandine --features default-networks --profile=compact --workspace --exclude zkvm_host --exclude zkvm_guest_risc0"
+
+  #     - name: Upload binary
   #       uses: actions/upload-artifact@v4
   #       with:
-  #         name: ${{ matrix.rid }}
+  #         name: grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.short-id }}
   #         path: |
-  #           target/${{ matrix.target }}/compact/libc_grandine.so
-  #           target/${{ matrix.target }}/compact/libc_grandine.dylib
-  #           target/${{ matrix.target }}/compact/c_grandine.dll
+  #           target/${{ matrix.target }}/compact/grandine
+  #         # target/${{ matrix.target }}/compact/grandine.exe # maybe in the future
   #         if-no-files-found: error
-  publish:
-    name: Draft release
-    needs: [build_bin]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
+  # build_csharp_bindings:
+  #   name: Build C# bindings
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         ref: ${{ inputs.ref || github.ref }}
+  #         submodules: false
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
+  #     - name: Setup .NET 9
+  #       uses: actions/setup-dotnet@v4
+  #       with:
+  #         dotnet-version: '9.x'
+
+  #     - name: Build C# bindings
+  #       working-directory: bindings/csharp/Grandine.Bindings
+  #       run: dotnet publish -c Release
+
+  #     - name: Upload C# bindings dll
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: grandine-${{ inputs.tag || github.ref_name }}-dll
+  #         path: |
+  #           bindings/csharp/Grandine.Bindings/Release/net9.0/Grandine.Bindings.dll
+  #         if-no-files-found: error
+  build:
+    name: Build nethermind integration for target ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            rid: linux-x64
+            
+          # - target: aarch64-unknown-linux-gnu
+          #   os: ubuntu-latest
+          #   rid: linux-arm64
+            
+          # - target: x86_64-pc-windows-msvc
+          #   os: windows-latest
+          #   rid: win-x64
+            
+          # - target: x86_64-apple-darwin
+          #   os: macos-latest
+          #   rid: osx-x64
+
+          # - target: aarch64-apple-darwin
+          #   os: macos-latest
+          #   rid: osx-arm64
+    steps:
+      # - name: Disable autocrlf (Windows)
+      #   if: runner.os == 'Windows'
+      #   run: git config --global core.autocrlf false
+        
+      # - name: Free Disk Space (Ubuntu)
+      #   uses: jlumbroso/free-disk-space@main
+      #   if: matrix.rid == 'linux-arm64'
+          
+      # - uses: actions/checkout@v4
+      #   with:
+      #     ref: ${{ inputs.ref || github.ref }}
+      #     submodules: true
+          
+      # - name: Build library
+      #   uses: houseabsolute/actions-rust-cross@v1
+      #   with:
+      #     command: build
+      #     target: ${{ matrix.target }}
+      #     args: "-p c_grandine --locked --profile=compact"
+
+      - name: Download latest nethermind release
+        uses: actions/github-script@v8
         with:
-          files: artifacts/*
-          tag_name: ${{ inputs.tag || github.ref_name }}
+          script: |
+            const releases = await github.paginate(github.rest.repos.listReleases({ owner: 'NethermindEth', repo: 'nethermind', per_page: 1 }));
+            console.log(releases);
+      
+      # - name: Upload dynamic libs
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: ${{ matrix.rid }}
+      #     path: |
+      #       target/${{ matrix.target }}/compact/libgrandine.so
+      #       target/${{ matrix.target }}/compact/libgrandine.dylib
+      #       target/${{ matrix.target }}/compact/grandine.dll
+      #     if-no-files-found: error
+  # publish:
+  #   name: Draft release
+  #   needs: [build_bin]
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Download all artifacts
+  #       uses: actions/download-artifact@v4
+  #       with:
+  #         path: artifacts
+
+  #     - name: Publish release
+  #       uses: softprops/action-gh-release@v2
+  #       with:
+  #         files: artifacts/*
+  #         tag_name: ${{ inputs.tag || github.ref_name }}
