@@ -1,4 +1,4 @@
-name: Build & publish C# bindings
+name: Create release
 
 on:
   push:
@@ -41,14 +41,14 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
           submodules: true
           
-      - name: Build library
+      - name: Build binary
         uses: houseabsolute/actions-rust-cross@v1
         with:
           command: build
           target: ${{ matrix.target }}
           args: "--bin grandine --features default-networks --profile=compact --workspace --exclude zkvm_host --exclude zkvm_guest_risc0"
 
-      - name: Upload binaries
+      - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.short-id }}
