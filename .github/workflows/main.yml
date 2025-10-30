@@ -79,7 +79,7 @@ jobs:
         with:
           name: grandine-${{ inputs.tag || github.ref_name }}-dll
           path: |
-            bindings/csharp/Grandine.Bindings/Release/net9.0/Grandine.Bindings.dll
+            bindings/csharp/Grandine.Bindings/bin/Release/net9.0/Grandine.Bindings.dll
           if-no-files-found: error
   build_lib:
     name: Build nethermind integration for target ${{ matrix.target }}
