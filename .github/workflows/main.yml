@@ -81,73 +81,89 @@ jobs:
   #         path: |
   #           bindings/csharp/Grandine.Bindings/Release/net9.0/Grandine.Bindings.dll
   #         if-no-files-found: error
-  build:
-    name: Build nethermind integration for target ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
+  # build_lib:
+  #   name: Build nethermind integration for target ${{ matrix.target }}
+  #   runs-on: ${{ matrix.os }}
+  #   strategy:
+  #     matrix:
+  #       include:
+  #         - target: x86_64-unknown-linux-gnu
+  #           os: ubuntu-latest
+  #           rid: linux-x64
+            
+  #         - target: aarch64-unknown-linux-gnu
+  #           os: ubuntu-latest
+  #           rid: linux-arm64
+            
+  #         - target: x86_64-pc-windows-msvc
+  #           os: windows-latest
+  #           rid: win-x64
+            
+  #         - target: x86_64-apple-darwin
+  #           os: macos-latest
+  #           rid: osx-x64
+
+  #         - target: aarch64-apple-darwin
+  #           os: macos-latest
+  #           rid: osx-arm64
+  #   steps:
+  #     - name: Disable autocrlf (Windows)
+  #       if: runner.os == 'Windows'
+  #       run: git config --global core.autocrlf false
+        
+  #     - name: Free Disk Space (Ubuntu)
+  #       uses: jlumbroso/free-disk-space@main
+  #       if: matrix.rid == 'linux-arm64'
+          
+  #     - uses: actions/checkout@v4
+  #       with:
+  #         ref: ${{ inputs.ref || github.ref }}
+  #         submodules: true
+          
+  #     - name: Build library
+  #       uses: houseabsolute/actions-rust-cross@v1
+  #       with:
+  #         command: build
+  #         target: ${{ matrix.target }}
+  #         args: "-p c_grandine --locked --profile=compact"
+      
+  #     - name: Upload dynamic libs
+  #       uses: actions/upload-artifact@v4
+  #       with:
+  #         name: lib-${{ matrix.rid }}
+  #         path: |
+  #           target/${{ matrix.target }}/compact/libgrandine.so
+  #           target/${{ matrix.target }}/compact/libgrandine.dylib
+  #           target/${{ matrix.target }}/compact/grandine.dll
+  #         if-no-files-found: error
+  pack_nethermind:
+    name: Pack nethermind release with embedded grandine
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            rid: linux-x64
-            
-          # - target: aarch64-unknown-linux-gnu
-          #   os: ubuntu-latest
-          #   rid: linux-arm64
-            
-          # - target: x86_64-pc-windows-msvc
-          #   os: windows-latest
-          #   rid: win-x64
-            
-          # - target: x86_64-apple-darwin
-          #   os: macos-latest
-          #   rid: osx-x64
-
-          # - target: aarch64-apple-darwin
-          #   os: macos-latest
-          #   rid: osx-arm64
+        rid: ['linux-x64', 'linux-arm64', 'win-x64', 'osx-x64', 'osx-arm64']
     steps:
-      # - name: Disable autocrlf (Windows)
-      #   if: runner.os == 'Windows'
-      #   run: git config --global core.autocrlf false
-        
-      # - name: Free Disk Space (Ubuntu)
-      #   uses: jlumbroso/free-disk-space@main
-      #   if: matrix.rid == 'linux-arm64'
-          
-      # - uses: actions/checkout@v4
+      # - name: Download compiled library
+      #   uses: actions/download-artifact@v4
       #   with:
-      #     ref: ${{ inputs.ref || github.ref }}
-      #     submodules: true
-          
-      # - name: Build library
-      #   uses: houseabsolute/actions-rust-cross@v1
-      #   with:
-      #     command: build
-      #     target: ${{ matrix.target }}
-      #     args: "-p c_grandine --locked --profile=compact"
-
-      - name: Download latest nethermind release
+      #     name: lib-${{ matrix.rid }}
+      #     path: grandine
+      - name: Get latest nethermind release
         uses: actions/github-script@v8
         env:
           RID: ${{ matrix.rid }}
         with:
+          result-encoding: string
           script: |
             const rid = process.env.RID;
             const release = await github.rest.repos.getLatestRelease({ owner: 'NethermindEth', repo: 'nethermind' });
             const asset = release.data.assets.find(asset => asset.name.endsWith(rid + '.zip'));
-            console.log(asset);
-            
-      
-      # - name: Upload dynamic libs
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: ${{ matrix.rid }}
-      #     path: |
-      #       target/${{ matrix.target }}/compact/libgrandine.so
-      #       target/${{ matrix.target }}/compact/libgrandine.dylib
-      #       target/${{ matrix.target }}/compact/grandine.dll
-      #     if-no-files-found: error
+            return asset.browser_download_url;
+      - name: Download nethermind release
+        run: wget "${{steps.set-result.outputs.result}}" -o nethermind.zip
+
+      - name: Unzip nethermind release
+        run: unzip nethermind.zip
   # publish:
   #   name: Draft release
   #   needs: [build_bin]
