@@ -131,8 +131,9 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
-            const release = await github.rest.repos.getLatestRelease({ owner: 'NethermindEth', repo: 'nethermind', per_page: 1 });
-            console.log(release);
+            const repo = { owner: 'NethermindEth', repo: 'nethermind' };
+            const release = await github.rest.repos.getLatestRelease({ ...repo });
+            console.log(release.data.assets);
             
       
       # - name: Upload dynamic libs
