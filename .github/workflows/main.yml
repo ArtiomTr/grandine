@@ -161,7 +161,7 @@ jobs:
             const asset = release.data.assets.find(asset => asset.name.endsWith(rid + '.zip'));
             return asset.browser_download_url;
       - name: Download nethermind release
-        run: wget "${{steps.get-release.outputs.result}}" -o nethermind.zip
+        run: wget -O nethermind.zip "${{steps.get-release.outputs.result}}"
 
       - name: Unzip nethermind release
         run: unzip nethermind.zip
