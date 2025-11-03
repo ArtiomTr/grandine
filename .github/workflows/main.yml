@@ -41,7 +41,13 @@ jobs:
         run: |
           sudo DEBIAN_FRONTEND='noninteractive' apt-get install \
             --no-install-recommends -yq \
-            llvm
+            ca-certificates \
+            libssl-dev \
+            clang \
+            cmake \
+            unzip \
+            protobuf-compiler \
+            libz-dev
 
       - uses: actions/checkout@v4
         with:
