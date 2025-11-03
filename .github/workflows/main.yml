@@ -35,7 +35,14 @@ jobs:
       - name: Free Disk Space (Ubuntu)
         uses: jlumbroso/free-disk-space@main
         if: runner.os == 'Linux'
-          
+
+      - name: Install system dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo DEBIAN_FRONTEND='noninteractive' apt-get install \
+            --no-install-recommends -yq \
+            llvm
+
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
