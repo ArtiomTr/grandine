@@ -129,6 +129,7 @@ jobs:
           file: ./Dockerfile.cross
           push: true
           tags: sirsedev/test-repo:amd64-${{ inputs.tag || github.ref_name }}
+          platforms: linux/amd64
 
       - name: Build and push arm64
         uses: docker/build-push-action@v6
@@ -137,10 +138,11 @@ jobs:
           file: ./Dockerfile.cross
           push: true
           tags: sirsedev/test-repo:arm64-${{ inputs.tag || github.ref_name }}
+          platforms: linux/arm64
 
       - name: Push tag ${{ inputs.tag || github.ref_name }}
         run: |
-          docker manifest inspect sirsedev/test-repo:amd64-${{ inputs.tag || github.ref_name }}
+          docker manifest rm sirsedev/test-repo:${{ inputs.tag || github.ref_name }}
           docker manifest create sirsedev/test-repo:${{ inputs.tag || github.ref_name }} \
             --amend sirsedev/test-repo:amd64-${{ inputs.tag || github.ref_name }} \
             --amend sirsedev/test-repo:arm64-${{ inputs.tag || github.ref_name }}
