@@ -137,6 +137,7 @@ jobs:
           context: ./artifacts/grandine-linux-arm64/
           file: ./Dockerfile.cross
           push: true
+          provenance: false
           tags: sirsedev/test-repo:arm64-${{ inputs.tag || github.ref_name }}
           platforms: linux/arm64
 
