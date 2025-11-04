@@ -128,7 +128,7 @@ jobs:
           context: ./artifacts/grandine-linux-x64/
           file: ./Dockerfile.cross
           push: true
-          tags: sirsedev/test-repo:amd64-${{ inputs.ref || github.ref }}
+          tags: sirsedev/test-repo:amd64-${{ inputs.tag || github.ref_name }}
 
       - name: Build and push arm64
         uses: docker/build-push-action@v6
@@ -136,14 +136,15 @@ jobs:
           context: ./artifacts/grandine-linux-arm64/
           file: ./Dockerfile.cross
           push: true
-          tags: sirsedev/test-repo:arm64-${{ inputs.ref || github.ref }}
+          tags: sirsedev/test-repo:arm64-${{ inputs.tag || github.ref_name }}
 
-      - name: Push tag ${{ inputs.ref || github.ref }}
+      - name: Push tag ${{ inputs.tag || github.ref_name }}
         run: |
-          docker manifest create sirsedev/test-repo:${{ inputs.ref || github.ref }} \
-            --amend sirsedev/test-repo:amd64-${{ inputs.ref || github.ref }} \
-            --amend sirsedev/test-repo:arm64-${{ inputs.ref || github.ref }}
-          docker manifest push sirsedev/test-repo:${{ inputs.ref || github.ref }}
+          docker manifest inspect sirsedev/test-repo:amd64-${{ inputs.tag || github.ref_name }}
+          docker manifest create sirsedev/test-repo:${{ inputs.tag || github.ref_name }} \
+            --amend sirsedev/test-repo:amd64-${{ inputs.tag || github.ref_name }} \
+            --amend sirsedev/test-repo:arm64-${{ inputs.tag || github.ref_name }}
+          docker manifest push sirsedev/test-repo:${{ inputs.tag || github.ref_name }}
   # build_csharp_bindings:
   #   name: Build C# bindings
   #   runs-on: ubuntu-latest
