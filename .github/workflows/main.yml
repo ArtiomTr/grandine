@@ -329,20 +329,21 @@ jobs:
   #         name: grandine-nethermind-${{ matrix.rid }}
   #         path: grandine-${{ inputs.tag || github.ref_name }}-${{ fromJson(steps.get-release.outputs.result).name }}
   #         if-no-files-found: error
-  # publish:
-  #   name: Draft release
-  #   needs: [build_bin]
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - name: Download all artifacts
-  #       uses: actions/download-artifact@v5
-  #       with:
-  #         pattern: grandine-*
-  #         path: artifacts
+  publish:
+    name: Draft release
+    if: github.event_name == 'push' && github.event.ref != 'refs/heads/develop'
+    needs: [build_bin]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: grandine-*
+          path: artifacts
 
-  #     - name: Publish release
-  #       uses: softprops/action-gh-release@v2
-  #       with:
-  #         files: artifacts/**
-  #         draft: true
-  #         tag_name: ${{ inputs.tag || github.ref_name }}
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**
+          draft: true
+          tag_name: ${{ inputs.tag || github.ref_name }}
