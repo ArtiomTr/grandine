@@ -124,18 +124,21 @@ jobs:
       # - name: Set up Docker Buildx
       #   uses: docker/setup-buildx-action@v3
 
-      - name: Log push event
-        run: echo "${{ github.event_name }}" "${{ github.event.ref }}"
+      # - name: Log push event
+      #   run: echo "${{ github.event_name }}" "${{ github.event.ref }}"
 
-      # - name: Docker meta for amd64
-      #   id: arm64-meta
-      #   uses: docker/metadata-action@v5
-      #   with:
-      #     images: |
-      #       sirsedev/test-repo
-      #     tags: |
-      #       type=semver,pattern=stable-amd64-{{version}}
-      #       type=raw,enable=${{ github.event.push.ref }}
+      - name: Docker meta for amd64
+        id: arm64-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            sirsedev/test-repo
+          tags: |
+            type=semver,pattern=stable-amd64-{{version}}
+            type=raw,enable=${{ github.event_name == "push" && github.event.ref == "refs/heads/develop" }},value=unstable-amd64
+
+      - name: Print docker meta
+        run: echo "${{ steps.meta.outputs.tags }}" "${{ steps.meta.outputs.labels }}"
         
       # - name: Build and push amd64
       #   uses: docker/build-push-action@v6
