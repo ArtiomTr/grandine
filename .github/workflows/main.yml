@@ -139,6 +139,7 @@ jobs:
             type=raw,enable=${{ github.event_name == 'push' && github.event.ref == 'refs/heads/develop' }},value=unstable-amd64
 
       - name: Build and push amd64
+        id: build-amd64
         uses: docker/build-push-action@v6
         with:
           context: ./artifacts/grandine-linux-x64/
@@ -148,6 +149,9 @@ jobs:
           tags: ${{ steps.amd64-meta.outputs.tags }}
           labels: ${{ steps.amd64-meta.outputs.labels }}
           platforms: linux/amd64
+
+      - name: Print metadata
+        run: echo "${{ toJSON(steps.build-amd64.outputs) }}"
 
       - name: Docker meta for arm64
         id: arm64-meta
