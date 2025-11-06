@@ -2,6 +2,8 @@ name: Create release
 
 on:
   push:
+    branches:
+      - develop
     tags:
       - '**'
   workflow_dispatch:
@@ -14,140 +16,153 @@ on:
         required: false
 
 jobs:
-  build_bin:
-    name: Build binary for target ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            rid: linux-x64
+#   build_bin:
+#     name: Build binary for target ${{ matrix.target }}
+#     runs-on: ${{ matrix.os }}
+#     strategy:
+#       matrix:
+#         include:
+#           - target: x86_64-unknown-linux-gnu
+#             os: ubuntu-latest
+#             rid: linux-x64
             
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            rid: linux-arm64
+#           - target: aarch64-unknown-linux-gnu
+#             os: ubuntu-latest
+#             rid: linux-arm64
 
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            rid: win-x64
+#           - target: x86_64-pc-windows-msvc
+#             os: windows-latest
+#             rid: win-x64
             
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            rid: osx-x64
+#           - target: x86_64-apple-darwin
+#             os: macos-latest
+#             rid: osx-x64
 
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            rid: osx-arm64
-    steps:
-      - name: Disable autocrlf (Windows)
-        if: runner.os == 'Windows'
-        run: git config --global core.autocrlf false
+#           - target: aarch64-apple-darwin
+#             os: macos-latest
+#             rid: osx-arm64
+#     steps:
+#       - name: Disable autocrlf (Windows)
+#         if: runner.os == 'Windows'
+#         run: git config --global core.autocrlf false
         
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        if: runner.os == 'Linux'
+#       - name: Free Disk Space (Ubuntu)
+#         uses: jlumbroso/free-disk-space@main
+#         if: runner.os == 'Linux'
 
-      - name: Install system dependencies (Ubuntu)
-        if: runner.os == 'Linux'
-        run: |
-          sudo DEBIAN_FRONTEND='noninteractive' apt-get install \
-            --no-install-recommends -yq \
-            ca-certificates \
-            libssl-dev \
-            clang \
-            cmake \
-            unzip \
-            protobuf-compiler \
-            libz-dev
+#       - name: Install system dependencies (Ubuntu)
+#         if: runner.os == 'Linux'
+#         run: |
+#           sudo DEBIAN_FRONTEND='noninteractive' apt-get install \
+#             --no-install-recommends -yq \
+#             ca-certificates \
+#             libssl-dev \
+#             clang \
+#             cmake \
+#             unzip \
+#             protobuf-compiler \
+#             libz-dev
 
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          submodules: true
+#       - uses: actions/checkout@v4
+#         with:
+#           ref: ${{ inputs.ref || github.ref }}
+#           submodules: true
           
-      - name: Build binary
-        uses: houseabsolute/actions-rust-cross@v1
-        with:
-          command: build
-          target: ${{ matrix.target }}
-          args: "--bin grandine --features default-networks --profile=compact --workspace --exclude zkvm_host --exclude zkvm_guest_risc0"
+#       - name: Build binary
+#         uses: houseabsolute/actions-rust-cross@v1
+#         with:
+#           command: build
+#           target: ${{ matrix.target }}
+#           args: "--bin grandine --features default-networks --profile=compact --workspace --exclude zkvm_host --exclude zkvm_guest_risc0"
 
-      - name: Rename binary (MacOS / Linux)
-        if: runner.os != 'Windows'
-        run: mv target/${{ matrix.target }}/compact/grandine ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}
+#       - name: Rename binary (MacOS / Linux)
+#         if: runner.os != 'Windows'
+#         run: mv target/${{ matrix.target }}/compact/grandine ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}
 
-      - name: Rename binary (Windows)
-        if: runner.os == 'Windows'
-        run: mv target/${{ matrix.target }}/compact/grandine.exe ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}.exe
+#       - name: Rename binary (Windows)
+#         if: runner.os == 'Windows'
+#         run: mv target/${{ matrix.target }}/compact/grandine.exe ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}.exe
 
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: grandine-${{ matrix.rid }}
-          path: |
-            ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}
-            ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}.exe
-          if-no-files-found: error
+#       - name: Upload binary
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: grandine-${{ matrix.rid }}
+#           path: |
+#             ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}
+#             ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}.exe
+#           if-no-files-found: error
   build_docker:
     name: Build docker images
     runs-on: ubuntu-latest
-    needs: [build_bin]
+    # needs: [build_bin]
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.ref }}
           submodules: false
 
-      - name: Download artifacts
-        uses: actions/download-artifact@v5
-        with:
-          pattern: grandine-*
-          path: artifacts
+      # - name: Download artifacts
+      #   uses: actions/download-artifact@v5
+      #   with:
+      #     pattern: grandine-*
+      #     path: artifacts
 
-      - name: Move artifacts
-        run: |
-          mv ./artifacts/grandine-linux-x64/grandine-${{ inputs.tag || github.ref_name }}-linux-x64 ./artifacts/grandine-linux-x64/grandine
-          mv ./artifacts/grandine-linux-arm64/grandine-${{ inputs.tag || github.ref_name }}-linux-arm64 ./artifacts/grandine-linux-arm64/grandine
+      # - name: Move artifacts
+      #   run: |
+      #     mv ./artifacts/grandine-linux-x64/grandine-${{ inputs.tag || github.ref_name }}-linux-x64 ./artifacts/grandine-linux-x64/grandine
+      #     mv ./artifacts/grandine-linux-arm64/grandine-${{ inputs.tag || github.ref_name }}-linux-arm64 ./artifacts/grandine-linux-arm64/grandine
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # - name: Login to Docker Hub
+      #   uses: docker/login-action@v3
+      #   with:
+      #     username: ${{ vars.DOCKERHUB_USERNAME }}
+      #     password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      # - name: Set up QEMU
+      #   uses: docker/setup-qemu-action@v3
         
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      # - name: Set up Docker Buildx
+      #   uses: docker/setup-buildx-action@v3
+
+      - name: Log push event
+        run: echo "${{ github.event.push.ref }}"
+
+      # - name: Docker meta for amd64
+      #   id: arm64-meta
+      #   uses: docker/metadata-action@v5
+      #   with:
+      #     images: |
+      #       sirsedev/test-repo
+      #     tags: |
+      #       type=semver,pattern=stable-amd64-{{version}}
+      #       type=raw,enable=${{ github.event.push.ref }}
         
-      - name: Build and push amd64
-        uses: docker/build-push-action@v6
-        with:
-          context: ./artifacts/grandine-linux-x64/
-          file: ./Dockerfile.cross
-          push: true
-          provenance: false
-          tags: sirsedev/test-repo:amd64-${{ inputs.tag || github.ref_name }}
-          platforms: linux/amd64
+      # - name: Build and push amd64
+      #   uses: docker/build-push-action@v6
+      #   with:
+      #     context: ./artifacts/grandine-linux-x64/
+      #     file: ./Dockerfile.cross
+      #     push: true
+      #     provenance: false
+      #     tags: sirsedev/test-repo:amd64-${{ inputs.tag || github.ref_name }}
+      #     platforms: linux/amd64
 
-      - name: Build and push arm64
-        uses: docker/build-push-action@v6
-        with:
-          context: ./artifacts/grandine-linux-arm64/
-          file: ./Dockerfile.cross
-          push: true
-          provenance: false
-          tags: sirsedev/test-repo:arm64-${{ inputs.tag || github.ref_name }}
-          platforms: linux/arm64
+      # - name: Build and push arm64
+      #   uses: docker/build-push-action@v6
+      #   with:
+      #     context: ./artifacts/grandine-linux-arm64/
+      #     file: ./Dockerfile.cross
+      #     push: true
+      #     provenance: false
+      #     tags: sirsedev/test-repo:stable-arm64-${{ steps.vars.outputs.sha_short }}, sirsedev/test-repo:stable-arm64-${{ inputs.tag || github.ref_name }}
+      #     platforms: linux/arm64
 
-      - name: Push tag ${{ inputs.tag || github.ref_name }}
-        run: |
-          docker manifest create sirsedev/test-repo:${{ inputs.tag || github.ref_name }} \
-            --amend sirsedev/test-repo:amd64-${{ inputs.tag || github.ref_name }} \
-            --amend sirsedev/test-repo:arm64-${{ inputs.tag || github.ref_name }}
-          docker manifest push sirsedev/test-repo:${{ inputs.tag || github.ref_name }}
+      # - name: Push tag ${{ inputs.tag || github.ref_name }}
+      #   run: |
+      #     docker manifest create sirsedev/test-repo:${{ inputs.tag || github.ref_name }} \
+      #       --amend sirsedev/test-repo:amd64-${{ inputs.tag || github.ref_name }} \
+      #       --amend sirsedev/test-repo:arm64-${{ inputs.tag || github.ref_name }}
+      #     docker manifest push sirsedev/test-repo:${{ inputs.tag || github.ref_name }}
   # build_csharp_bindings:
   #   name: Build C# bindings
   #   runs-on: ubuntu-latest
@@ -288,20 +303,20 @@ jobs:
   #         name: grandine-nethermind-${{ matrix.rid }}
   #         path: grandine-${{ inputs.tag || github.ref_name }}-${{ fromJson(steps.get-release.outputs.result).name }}
   #         if-no-files-found: error
-  publish:
-    name: Draft release
-    needs: [build_bin]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v5
-        with:
-          pattern: grandine-*
-          path: artifacts
+  # publish:
+  #   name: Draft release
+  #   needs: [build_bin]
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: Download all artifacts
+  #       uses: actions/download-artifact@v5
+  #       with:
+  #         pattern: grandine-*
+  #         path: artifacts
 
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/**
-          draft: true
-          tag_name: ${{ inputs.tag || github.ref_name }}
+  #     - name: Publish release
+  #       uses: softprops/action-gh-release@v2
+  #       with:
+  #         files: artifacts/**
+  #         draft: true
+  #         tag_name: ${{ inputs.tag || github.ref_name }}
