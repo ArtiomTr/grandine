@@ -135,7 +135,7 @@ jobs:
             sirsedev/test-repo
           tags: |
             type=semver,pattern=stable-amd64-{{version}}
-            type=raw,enable=${{ github.event_name == "push" && github.event.ref == "refs/heads/develop" }},value=unstable-amd64
+            type=raw,enable=${{ github.event_name == 'push' && github.event.ref == 'refs/heads/develop' }},value=unstable-amd64
 
       - name: Print docker meta
         run: echo "${{ steps.meta.outputs.tags }}" "${{ steps.meta.outputs.labels }}"
