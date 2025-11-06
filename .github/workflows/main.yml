@@ -188,8 +188,12 @@ jobs:
           docker manifest create sirsedev/test-repo:${{ github.ref_name }} \
             --amend sirsedev/test-repo:stable-amd64-${{ github.ref_name }} \
             --amend sirsedev/test-repo:stable-arm64-${{ github.ref_name }}
-          docker manifest create sirsedev/test-repo:stable sirsedev/test-repo:${{ github.ref_name }}
-          docker manifest create sirsedev/test-repo:latest sirsedev/test-repo:${{ github.ref_name }}
+          docker manifest create sirsedev/test-repo:stable \
+            --amend sirsedev/test-repo:stable-amd64-${{ github.ref_name }} \
+            --amend sirsedev/test-repo:stable-arm64-${{ github.ref_name }}
+          docker manifest create sirsedev/test-repo:latest \
+            --amend sirsedev/test-repo:stable-amd64-${{ github.ref_name }} \
+            --amend sirsedev/test-repo:stable-arm64-${{ github.ref_name }}
           docker manifest push sirsedev/test-repo:${{ github.ref_name }}
           docker manifest push sirsedev/test-repo:stable
           docker manifest push sirsedev/test-repo:latest
