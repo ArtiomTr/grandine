@@ -138,7 +138,7 @@ jobs:
             type=raw,enable=${{ github.event_name == 'push' && github.event.ref == 'refs/heads/develop' }},value=unstable-amd64
 
       - name: Print docker meta
-        run: echo "${{ steps.meta.outputs.tags }}" "${{ steps.meta.outputs.labels }}"
+        run: echo "${{ steps.arm64-meta.outputs.tags }}" "${{ steps.arm64-meta.outputs.labels }}"
         
       # - name: Build and push amd64
       #   uses: docker/build-push-action@v6
