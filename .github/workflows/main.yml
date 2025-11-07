@@ -196,25 +196,25 @@ jobs:
       - name: Push unstable tag
         if: github.event_name == 'push' && github.event.ref == 'refs/heads/develop'
         run: |
-          docker buildx imagetools -t sirsedev/test-repo:unstable \
+          docker buildx imagetools create -t sirsedev/test-repo:unstable \
             sirsedev/test-repo:unstable-amd64 \
             sirsedev/test-repo:unstable-arm64
 
       - name: Push stable tags
         if: github.event_name == 'push' && github.event.ref != 'refs/heads/develop'
         run: |
-          docker buildx imagetools -t sirsedev/test-repo:${{ env.GRANDINE_VERSION }} \
+          docker buildx imagetools create -t sirsedev/test-repo:${{ env.GRANDINE_VERSION }} \
             sirsedev/test-repo:stable-amd64-${{ env.GRANDINE_VERSION }} \
             sirsedev/test-repo:stable-arm64-${{ env.GRANDINE_VERSION }}
-          docker buildx imagetools -t sirsedev/test-repo:stable \
+          docker buildx imagetools create -t sirsedev/test-repo:stable \
             sirsedev/test-repo:${{ env.GRANDINE_VERSION }}
-          docker buildx imagetools -t sirsedev/test-repo:latest \
+          docker buildx imagetools create -t sirsedev/test-repo:latest \
             sirsedev/test-repo:${{ env.GRANDINE_VERSION }}
 
       - name: Push commit tag
         if: github.event_name == 'workflow_dispatch'
         run: |
-          docker buildx imagetools -t sirsedev/test-repo:unstable-${{ env.GRANDINE_COMMIT }} \
+          docker buildx imagetools create -t sirsedev/test-repo:unstable-${{ env.GRANDINE_COMMIT }} \
             sirsedev/test-repo:unstable-amd64-${{ env.GRANDINE_COMMIT }} \
             sirsedev/test-repo:unstable-arm64-${{ env.GRANDINE_COMMIT }}
   publish:
