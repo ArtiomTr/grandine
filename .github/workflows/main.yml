@@ -219,7 +219,7 @@ jobs:
   publish:
     name: Draft release
     if: github.event_name == 'push' && github.event.ref != 'refs/heads/develop'
-    needs: [build_bin, pack_nethermind]
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
