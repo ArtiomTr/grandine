@@ -32,8 +32,6 @@ jobs:
   build:
     name: Build binary for target ${{ matrix.target }}
     needs: [version]
-    env:
-      GRANDINE_VERSION: ${{ needs.version.outputs.version }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -57,7 +55,15 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             rid: osx-arm64
+    env:
+      GRANDINE_VERSION: ${{ needs.version.outputs.version }}
     steps:
+      - name: Echo grandine version
+        run: echo "${{ env.GRANDINE_VERSION }}"
+
+      - name: Echo outputs
+        run: echo "${{ toJSON(needs.version.outputs) }}"
+
       - name: Disable autocrlf (Windows)
         if: runner.os == 'Windows'
         run: git config --global core.autocrlf false
@@ -161,7 +167,6 @@ jobs:
           context: ./artifacts/grandine-linux-x64/
           file: ./Dockerfile.cross
           push: true
-          provenance: false
           tags: ${{ steps.amd64-meta.outputs.tags }}
           labels: ${{ steps.amd64-meta.outputs.labels }}
           platforms: linux/amd64
@@ -183,7 +188,6 @@ jobs:
           context: ./artifacts/grandine-linux-arm64/
           file: ./Dockerfile.cross
           push: true
-          provenance: false
           tags: ${{ steps.arm64-meta.outputs.tags }}
           labels: ${{ steps.arm64-meta.outputs.labels }}
           platforms: linux/arm64
@@ -191,38 +195,31 @@ jobs:
       - name: Push unstable tag
         if: github.event_name == 'push' && github.event.ref == 'refs/heads/develop'
         run: |
-          docker manifest create sirsedev/test-repo:unstable \
-            --amend sirsedev/test-repo:unstable-amd64 \
-            --amend sirsedev/test-repo:unstable-arm64
-          docker manifest push sirsedev/test-repo:unstable
+          docker buildx imagetools -t sirsedev/test-repo:unstable \
+            sirsedev/test-repo:unstable-amd64 \
+            sirsedev/test-repo:unstable-arm64
 
       - name: Push stable tags
         if: github.event_name == 'push' && github.event.ref != 'refs/heads/develop'
         run: |
-          docker manifest create sirsedev/test-repo:${{ github.ref_name }} \
-            --amend sirsedev/test-repo:stable-amd64-${{ github.ref_name }} \
-            --amend sirsedev/test-repo:stable-arm64-${{ github.ref_name }}
-          docker manifest create sirsedev/test-repo:stable \
-            --amend sirsedev/test-repo:stable-amd64-${{ github.ref_name }} \
-            --amend sirsedev/test-repo:stable-arm64-${{ github.ref_name }}
-          docker manifest create sirsedev/test-repo:latest \
-            --amend sirsedev/test-repo:stable-amd64-${{ github.ref_name }} \
-            --amend sirsedev/test-repo:stable-arm64-${{ github.ref_name }}
-          docker manifest push sirsedev/test-repo:${{ github.ref_name }}
-          docker manifest push sirsedev/test-repo:stable
-          docker manifest push sirsedev/test-repo:latest
+          docker buildx imagetools -t sirsedev/test-repo:${{ env.GRANDINE_VERSION }} \
+            sirsedev/test-repo:stable-amd64-${{ env.GRANDINE_VERSION }} \
+            sirsedev/test-repo:stable-arm64-${{ env.GRANDINE_VERSION }}
+          docker buildx imagetools -t sirsedev/test-repo:stable \
+            sirsedev/test-repo:${{ env.GRANDINE_VERSION }}
+          docker buildx imagetools -t sirsedev/test-repo:latest \
+            sirsedev/test-repo:${{ env.GRANDINE_VERSION }}
 
       - name: Push commit tag
         if: github.event_name == 'workflow_dispatch'
         run: |
-          docker manifest create sirsedev/test-repo:unstable-${{ env.GRANDINE_COMMIT }} \
-            --amend sirsedev/test-repo:unstable-amd64-${{ env.GRANDINE_COMMIT }} \
-            --amend sirsedev/test-repo:unstable-arm64-${{ env.GRANDINE_COMMIT }}
-          docker manifest push sirsedev/test-repo:unstable-${{ env.GRANDINE_COMMIT }}
+          docker buildx imagetools -t sirsedev/test-repo:unstable-${{ env.GRANDINE_COMMIT }} \
+            sirsedev/test-repo:unstable-amd64-${{ env.GRANDINE_COMMIT }} \
+            sirsedev/test-repo:unstable-arm64-${{ env.GRANDINE_COMMIT }}
   publish:
     name: Draft release
     if: github.event_name == 'push' && github.event.ref != 'refs/heads/develop'
-    needs: [build]
+    needs: [build_bin, pack_nethermind]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
