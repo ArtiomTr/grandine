@@ -13,8 +13,27 @@ on:
         required: false
 
 jobs:
-  build_bin:
+  version:
+    name: Get version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          submodules: false
+
+      - name: Get short commit hash
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+    outputs:
+      commit: ${{ steps.vars.sha_short }}
+      version: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/develop' && github.ref_name) || steps.vars.sha_short }}
+      
+  build:
     name: Build binary for target ${{ matrix.target }}
+    needs: [version]
+    env:
+      GRANDINE_VERSION: ${{ needs.version.outputs.version }}
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -60,41 +79,43 @@ jobs:
             protobuf-compiler \
             libz-dev
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.ref || github.ref }}
           submodules: true
-          
+
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
       - name: Build binary
-        uses: houseabsolute/actions-rust-cross@v1
-        with:
-          command: build
-          target: ${{ matrix.target }}
-          args: "--bin grandine --features default-networks --profile=compact --workspace --exclude zkvm_host --exclude zkvm_guest_risc0"
+        run: make TARGET=${{ matrix.target }} release
 
       - name: Rename binary (MacOS / Linux)
         if: runner.os != 'Windows'
-        run: mv target/${{ matrix.target }}/compact/grandine ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}
+        run: mv target/${{ matrix.target }}/compact/grandine ./grandine-${{ env.GRANDINE_VERSION }}-${{ matrix.rid }}
 
       - name: Rename binary (Windows)
         if: runner.os == 'Windows'
-        run: mv target/${{ matrix.target }}/compact/grandine.exe ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}.exe
+        run: mv target/${{ matrix.target }}/compact/grandine.exe ./grandine-${{ env.GRANDINE_VERSION }}-${{ matrix.rid }}.exe
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
         with:
           name: grandine-${{ matrix.rid }}
           path: |
-            ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}
-            ./grandine-${{ inputs.tag || github.ref_name }}-${{ matrix.rid }}.exe
+            ./grandine-${{ env.GRANDINE_VERSION }}-${{ matrix.rid }}
+            ./grandine-${{ env.GRANDINE_VERSION }}-${{ matrix.rid }}.exe
           if-no-files-found: error
 
   build_docker:
     name: Build docker images
     runs-on: ubuntu-latest
-    needs: [build_bin]
+    needs: [version, build]
+    env:
+      GRANDINE_VERSION: ${{ needs.version.outputs.version }}
+      GRANDINE_COMMIT: ${{ needs.version.outputs.commit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           ref: ${{ inputs.ref || github.ref }}
           submodules: false
@@ -107,8 +128,8 @@ jobs:
 
       - name: Move artifacts
         run: |
-          mv ./artifacts/grandine-linux-x64/grandine-${{ inputs.tag || github.ref_name }}-linux-x64 ./artifacts/grandine-linux-x64/grandine
-          mv ./artifacts/grandine-linux-arm64/grandine-${{ inputs.tag || github.ref_name }}-linux-arm64 ./artifacts/grandine-linux-arm64/grandine
+          mv ./artifacts/grandine-linux-x64/grandine-${{ env.GRANDINE_VERSION }}-linux-x64 ./artifacts/grandine-linux-x64/grandine
+          mv ./artifacts/grandine-linux-arm64/grandine-${{ env.GRANDINE_VERSION }}-linux-arm64 ./artifacts/grandine-linux-arm64/grandine
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -122,10 +143,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Get short commit hash
-        id: vars
-        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-        
       - name: Docker meta for amd64
         id: amd64-meta
         uses: docker/metadata-action@v5
@@ -135,7 +152,7 @@ jobs:
           tags: |
             type=semver,pattern=stable-amd64-{{version}}
             type=raw,enable=${{ github.event_name == 'push' && github.event.ref == 'refs/heads/develop' }},value=unstable-amd64
-            type=raw,enable=${{ github.event_name == 'workflow_dispatch' }},value=unstable-amd64-${{ steps.vars.outputs.sha_short }}
+            type=raw,enable=${{ github.event_name == 'workflow_dispatch' }},value=unstable-amd64-${{ env.GRANDINE_COMMIT }}
 
       - name: Build and push amd64
         id: build-amd64
@@ -158,7 +175,7 @@ jobs:
           tags: |
             type=semver,pattern=stable-arm64-{{version}}
             type=raw,enable=${{ github.event_name == 'push' && github.event.ref == 'refs/heads/develop' }},value=unstable-arm64
-            type=raw,enable=${{ github.event_name == 'workflow_dispatch' }},value=unstable-arm64-${{ steps.vars.outputs.sha_short }}
+            type=raw,enable=${{ github.event_name == 'workflow_dispatch' }},value=unstable-arm64-${{ env.GRANDINE_COMMIT }}
 
       - name: Build and push arm64
         uses: docker/build-push-action@v6
@@ -198,154 +215,14 @@ jobs:
       - name: Push commit tag
         if: github.event_name == 'workflow_dispatch'
         run: |
-          docker manifest create sirsedev/test-repo:unstable-${{ steps.vars.outputs.sha_short }} \
-            --amend sirsedev/test-repo:unstable-amd64-${{ steps.vars.outputs.sha_short }} \
-            --amend sirsedev/test-repo:unstable-arm64-${{ steps.vars.outputs.sha_short }}
-          docker manifest push sirsedev/test-repo:unstable-${{ steps.vars.outputs.sha_short }}
-  build_csharp_bindings:
-    name: Build C# bindings
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          submodules: true
-
-      - name: Setup .NET 9
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '9.x'
-
-      - name: Build C# bindings
-        working-directory: bindings/csharp/Grandine.Bindings
-        run: dotnet publish -c Release
-
-      - name: Upload C# bindings dll
-        uses: actions/upload-artifact@v4
-        with:
-          name: plugin
-          path: |
-            bindings/csharp/Grandine.Bindings/bin/Release/net9.0/Grandine.Bindings.dll
-          if-no-files-found: error
-  build_lib:
-    name: Build nethermind integration for target ${{ matrix.target }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            rid: linux-x64
-            
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            rid: linux-arm64
-            
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            rid: win-x64
-            
-          - target: x86_64-apple-darwin
-            os: macos-latest
-            rid: osx-x64
-
-          - target: aarch64-apple-darwin
-            os: macos-latest
-            rid: osx-arm64
-    steps:
-      - name: Disable autocrlf (Windows)
-        if: runner.os == 'Windows'
-        run: git config --global core.autocrlf false
-        
-      - name: Free Disk Space (Ubuntu)
-        uses: jlumbroso/free-disk-space@main
-        if: matrix.rid == 'linux-arm64'
-          
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          submodules: true
-          
-      - name: Build library
-        uses: houseabsolute/actions-rust-cross@v1
-        with:
-          command: build
-          target: ${{ matrix.target }}
-          args: "-p c_grandine --locked --profile=compact"
-      
-      - name: Upload dynamic libs
-        uses: actions/upload-artifact@v4
-        with:
-          name: lib-${{ matrix.rid }}
-          path: |
-            target/${{ matrix.target }}/compact/libgrandine.so
-            target/${{ matrix.target }}/compact/libgrandine.dylib
-            target/${{ matrix.target }}/compact/grandine.dll
-          if-no-files-found: error
-  pack_nethermind:
-    name: Pack nethermind release with embedded grandine
-    runs-on: ubuntu-latest
-    needs: [build_csharp_bindings, build_lib]
-    strategy:
-      matrix:
-        include:
-          - rid: 'linux-x64'
-          - rid: 'linux-arm64'
-          - rid: 'osx-x64'
-            alias: 'macos-x64'
-          - rid: 'osx-arm64'
-            alias: 'macos-arm64'
-          - rid: 'win-x64'
-            alias: 'windows-x64'
-    steps:
-      - name: Download compiled library
-        uses: actions/download-artifact@v4
-        with:
-          name: lib-${{ matrix.rid }}
-          path: grandine
-      
-      - name: Download plugin
-        uses: actions/download-artifact@v4
-        with:
-          name: plugin
-          path: plugin
-      
-      - name: Get latest nethermind release
-        uses: actions/github-script@v8
-        id: get-release
-        env:
-          RID: ${{ matrix.alias || matrix.rid }}
-        with:
-          script: |
-            const rid = process.env.RID;
-            const release = await github.rest.repos.getLatestRelease({ owner: 'NethermindEth', repo: 'nethermind' });
-            const asset = release.data.assets.find(asset => asset.name.endsWith(rid + '.zip'));
-            return asset;
-      
-      - name: Download nethermind release
-        run: wget -O nethermind.zip "${{ fromJson(steps.get-release.outputs.result).browser_download_url }}"
-
-      - name: Unzip nethermind
-        run: unzip nethermind.zip -d nethermind
-
-      - name: Put plugin into nethermind
-        run: |
-          mv ./grandine/* ./nethermind/plugins
-          mv ./plugin/* ./nethermind/plugins
-
-      - name: Zip nethermind back
-        run: zip -r "grandine-${{ inputs.tag || github.ref_name }}-${{ fromJson(steps.get-release.outputs.result).name }}" ./nethermind/*
-
-      - name: Upload nethermind
-        uses: actions/upload-artifact@v4
-        with:
-          name: grandine-nethermind-${{ matrix.rid }}
-          path: grandine-${{ inputs.tag || github.ref_name }}-${{ fromJson(steps.get-release.outputs.result).name }}
-          if-no-files-found: error
+          docker manifest create sirsedev/test-repo:unstable-${{ env.GRANDINE_COMMIT }} \
+            --amend sirsedev/test-repo:unstable-amd64-${{ env.GRANDINE_COMMIT }} \
+            --amend sirsedev/test-repo:unstable-arm64-${{ env.GRANDINE_COMMIT }}
+          docker manifest push sirsedev/test-repo:unstable-${{ env.GRANDINE_COMMIT }}
   publish:
     name: Draft release
     if: github.event_name == 'push' && github.event.ref != 'refs/heads/develop'
-    needs: [build_bin, pack_nethermind]
+    needs: [build]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
