@@ -133,6 +133,9 @@ jobs:
           pattern: grandine-*
           path: artifacts
 
+      - name: List artifacts
+        run: sudo apt-get install tree && tree
+
       - name: Move artifacts
         run: |
           mv ./artifacts/grandine-${{ env.GRANDINE_VERSION }}-linux-x64/grandine-${{ env.GRANDINE_VERSION }}-linux-x64 ./artifacts/grandine-linux-x64/grandine
