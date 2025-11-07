@@ -26,8 +26,8 @@ jobs:
         id: vars
         run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
     outputs:
-      commit: ${{ steps.vars.sha_short }}
-      version: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/develop' && github.ref_name) || steps.vars.sha_short }}
+      commit: ${{ steps.vars.outputs.sha_short }}
+      version: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/develop' && github.ref_name) || steps.vars.outputs.sha_short }}
       
   build:
     name: Build binary for target ${{ matrix.target }}
@@ -91,6 +91,7 @@ jobs:
           submodules: true
 
       - name: Install cross
+        if: runner.os == 'Linux'
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build binary
