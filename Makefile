@@ -20,8 +20,10 @@ download-spec-tests:
 release:
 ifeq ($(TARGET),)
 	cargo build --profile compact --bin grandine --features default-networks $(EXCLUDES)
-else
+else ifneq (,$(findstring linux,$(TARGET)))
 	cross build --bin grandine --target $(TARGET) --features default-networks --profile compact $(EXCLUDES)
+else
+	cargo build --profile compact --bin grandine --target $(TARGET) --features default-networks $(EXCLUDES)
 endif
 
 .PHONY: test
