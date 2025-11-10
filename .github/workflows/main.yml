@@ -138,8 +138,8 @@ jobs:
 
       - name: Move artifacts
         run: |
-          mv ./artifacts/grandine-${{ env.GRANDINE_VERSION }}-linux-x64/grandine-${{ env.GRANDINE_VERSION }}-linux-x64 ./artifacts/grandine-linux-x64/grandine
-          mv ./artifacts/grandine-${{ env.GRANDINE_VERSION }}-linux-arm64/grandine-${{ env.GRANDINE_VERSION }}-linux-arm64 ./artifacts/grandine-linux-arm64/grandine
+          mv ./artifacts/grandine-${{ env.GRANDINE_VERSION }}-linux-x64/grandine-${{ env.GRANDINE_VERSION }}-linux-x64 ./artifacts/grandine-${{ env.GRANDINE_VERSION }}-linux-x64/grandine
+          mv ./artifacts/grandine-${{ env.GRANDINE_VERSION }}-linux-arm64/grandine-${{ env.GRANDINE_VERSION }}-linux-arm64 ./artifacts/grandine-${{ env.GRANDINE_VERSION }}-linux-arm64/grandine
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -168,7 +168,7 @@ jobs:
         id: build-amd64
         uses: docker/build-push-action@v6
         with:
-          context: ./artifacts/grandine-linux-x64/
+          context: ./artifacts/grandine-${{ env.GRANDINE_VERSION }}-linux-x64/
           file: ./Dockerfile.cross
           push: true
           tags: ${{ steps.amd64-meta.outputs.tags }}
@@ -189,7 +189,7 @@ jobs:
       - name: Build and push arm64
         uses: docker/build-push-action@v6
         with:
-          context: ./artifacts/grandine-linux-arm64/
+          context: ./artifacts/grandine-${{ env.GRANDINE_VERSION }}-linux-arm64/
           file: ./Dockerfile.cross
           push: true
           tags: ${{ steps.arm64-meta.outputs.tags }}
