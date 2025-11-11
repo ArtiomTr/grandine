@@ -126,8 +126,8 @@ pack-grandine-nethermind: ./build/grandine-$(GRANDINE_VERSION)-nethermind-$(NETH
 
 # ------ GRANDINE-NETHERMIND LINUX ARM64 ------
 
-./build/grandine-$(GRANDINE_VERSION)-nethermind-$(NETHERMIND_VERSION)-linux-arm64: ./build/nethermind-$(NETHERMIND_VERSION)-aarch64-unknown-linux-gnu.zip.zip ./target/aarch64-unknown-linux-gnu/compact/libgrandine.so ./bindings/csharp/Grandine.NethermindPlugin/bin/Release/net9.0/Grandine.NethermindPlugin.dll
-	unzip ./build/nethermind-$(NETHERMIND_VERSION)-aarch64-unknown-linux-gnu.zip.zip -d ./build/grandine-$(GRANDINE_VERSION)-nethermind-$(NETHERMIND_VERSION)-linux-arm64
+./build/grandine-$(GRANDINE_VERSION)-nethermind-$(NETHERMIND_VERSION)-linux-arm64: ./build/nethermind-$(NETHERMIND_VERSION)-aarch64-unknown-linux-gnu.zip ./target/aarch64-unknown-linux-gnu/compact/libgrandine.so ./bindings/csharp/Grandine.NethermindPlugin/bin/Release/net9.0/Grandine.NethermindPlugin.dll
+	unzip ./build/nethermind-$(NETHERMIND_VERSION)-aarch64-unknown-linux-gnu.zip -d ./build/grandine-$(GRANDINE_VERSION)-nethermind-$(NETHERMIND_VERSION)-linux-arm64
 	cp ./target/aarch64-unknown-linux-gnu/compact/libgrandine.so ./build/grandine-$(GRANDINE_VERSION)-nethermind-$(NETHERMIND_VERSION)-linux-arm64/plugins
 	cp ./bindings/csharp/Grandine.NethermindPlugin/bin/Release/net9.0/Grandine.NethermindPlugin.dll ./build/grandine-$(GRANDINE_VERSION)-nethermind-$(NETHERMIND_VERSION)-linux-arm64/plugins
 
