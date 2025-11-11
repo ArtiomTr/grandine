@@ -49,9 +49,11 @@ public class GrandinePlugin(IGrandineConfig grandineConfig) : INethermindPlugin
     public string Author => "Grandine team";
 
     private ILogger _logger;
+
+    #pragma warning disable CS8618 
     private INethermindApi _api;
 
-    public bool Enabled => grandineConfig.Enabled;
+    public bool Enabled => grandineConfig.Enabled ?? throw new ArgumentNullException(nameof(grandineConfig.Enabled));
 
     private List<string> _arguments = new List<string>();
 
@@ -65,7 +67,14 @@ public class GrandinePlugin(IGrandineConfig grandineConfig) : INethermindPlugin
 
         var rpcConfig = nethermindApi.Config<IJsonRpcConfig>();
 
-        PropertyInfo[] properties = configType.GetInterface("IGrandineConfig").GetProperties(BindingFlags.Public | BindingFlags.Instance);
+        var configInterface = configType.GetInterface("IGrandineConfig");
+
+        if (configInterface == null)
+        {
+            throw new Exception("Unexpected exception occurred - IGrandineConfig interface not found");
+        }
+
+        PropertyInfo[] properties = configInterface.GetProperties(BindingFlags.Public | BindingFlags.Instance);
 
         if (grandineConfig.Network == null)
         {
@@ -76,14 +85,14 @@ public class GrandinePlugin(IGrandineConfig grandineConfig) : INethermindPlugin
 
         foreach (PropertyInfo prop in properties)
         {
-            GrandineConfigItemAttribute attribute = prop.GetCustomAttribute<GrandineConfigItemAttribute>();
+            GrandineConfigItemAttribute? attribute = prop.GetCustomAttribute<GrandineConfigItemAttribute>();
 
             if (attribute == null)
             {
                 continue;
             }
 
-            object value = prop.GetValue(grandineConfig);
+            object? value = prop.GetValue(grandineConfig);
 
             if (value == null)
             {

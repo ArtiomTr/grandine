@@ -579,7 +579,7 @@ public class GrandineEngineApi
     {
         _logger.Warn("================================================================= engine_forkchoiceUpdatedV1 =================================================================");
         try {
-            PayloadAttributes attributes = null;
+            PayloadAttributes? attributes = null;
             if (payload.is_something) {
                 attributes = new PayloadAttributes
                 {
@@ -684,7 +684,7 @@ public class GrandineEngineApi
     {
         _logger.Warn("================================================================= engine_forkchoiceUpdatedV2 =================================================================");
         try {
-            PayloadAttributes attributes = null;
+            PayloadAttributes? attributes = null;
             if (payload.is_something) {
                 var withdrawals = new List<Withdrawal>();
                 for (var i = 0; i < (int)payload.value.withdrawals_len; ++i) {
@@ -801,7 +801,7 @@ public class GrandineEngineApi
     {
         _logger.Warn("================================================================= engine_forkchoiceUpdatedV3 =================================================================");
         try {
-            PayloadAttributes attributes = null;
+            PayloadAttributes? attributes = null;
             if (payload.is_something) {
                 var withdrawals = new List<Withdrawal>();
                 for (var i = 0; i < (int)payload.value.withdrawals_len; ++i) {
@@ -930,46 +930,53 @@ public class GrandineEngineApi
                 throw new Exception("unexpected failure");
             }
 
+            var payloadData = payload.Data;
+
+            if (payloadData == null)
+            {
+                throw new Exception("unexpected failure");
+            }
+
             var exPayload = new CExecutionPayloadV1 { };
 
-            fixed (byte* sourcePtr = payload.Data.ParentHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.parent_hash, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.FeeRecipient.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.fee_recipient, 20, 20); }
-            fixed (byte* sourcePtr = payload.Data.StateRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.state_root, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ReceiptsRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.receipts_root, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ParentHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.parent_hash, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.FeeRecipient.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.fee_recipient, 20, 20); }
+            fixed (byte* sourcePtr = payloadData.StateRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.state_root, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ReceiptsRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.receipts_root, 32, 32); }
 
             {
-                var bloomLen = payload.Data.LogsBloom.Bytes.Length;
+                var bloomLen = payloadData.LogsBloom.Bytes.Length;
                 IntPtr convBloom = Marshal.AllocHGlobal(bloomLen);
-                Marshal.Copy(payload.Data.LogsBloom.Bytes.ToArray(), 0, convBloom, bloomLen);
+                Marshal.Copy(payloadData.LogsBloom.Bytes.ToArray(), 0, convBloom, bloomLen);
                 exPayload.logs_bloom = (byte*)convBloom;
                 exPayload.logs_bloom_len = (ulong)bloomLen;
             }
 
-            fixed (byte* sourcePtr = payload.Data.PrevRandao.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.prev_randao, 32, 32); }
-            exPayload.block_number = (ulong)payload.Data.BlockNumber;
-            exPayload.gas_limit = (ulong)payload.Data.GasLimit;
-            exPayload.gas_used = (ulong)payload.Data.GasUsed;
-            exPayload.timestamp = payload.Data.Timestamp;
+            fixed (byte* sourcePtr = payloadData.PrevRandao.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.prev_randao, 32, 32); }
+            exPayload.block_number = (ulong)payloadData.BlockNumber;
+            exPayload.gas_limit = (ulong)payloadData.GasLimit;
+            exPayload.gas_used = (ulong)payloadData.GasUsed;
+            exPayload.timestamp = payloadData.Timestamp;
 
             {
-                var extraDataLen = payload.Data.ExtraData.Length;
+                var extraDataLen = payloadData.ExtraData.Length;
                 IntPtr convExtraData = Marshal.AllocHGlobal(extraDataLen);
-                Marshal.Copy(payload.Data.ExtraData.ToArray(), 0, convExtraData, extraDataLen);
+                Marshal.Copy(payloadData.ExtraData.ToArray(), 0, convExtraData, extraDataLen);
                 exPayload.extra_data = (byte*)convExtraData;
                 exPayload.extra_data_len = (ulong)extraDataLen;
             }
 
-            fixed (byte* sourcePtr = payload.Data.BaseFeePerGas.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, exPayload.base_fee_per_gas, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.BlockHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.block_hash, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.BaseFeePerGas.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, exPayload.base_fee_per_gas, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.BlockHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.block_hash, 32, 32); }
 
             {
-                var transactionsLen = payload.Data.Transactions.Length;
+                var transactionsLen = payloadData.Transactions.Length;
                 IntPtr convTransactions = Marshal.AllocHGlobal(transactionsLen * Marshal.SizeOf<CTransaction>());
                 for (var i = 0; i < transactionsLen; ++i)
                 {
-                    var len = payload.Data.Transactions[i].Length;
+                    var len = payloadData.Transactions[i].Length;
                     var transaction = Marshal.AllocHGlobal(len);
-                    Marshal.Copy(payload.Data.Transactions[i], 0, transaction, len);
+                    Marshal.Copy(payloadData.Transactions[i], 0, transaction, len);
                     Marshal.StructureToPtr(new CTransaction
                     {
                         bytes_len = (ulong)len,
@@ -1016,48 +1023,51 @@ public class GrandineEngineApi
                 throw new Exception("unexpected failure");
             }
 
+            var payloadData = payload.Data ?? throw new Exception("Returned payload is null");
             var response = new CEngineGetPayloadV2Response { };
 
             var exPayload = new CExecutionPayloadV2 { };
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.ParentHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.parent_hash, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.FeeRecipient.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.fee_recipient, 20, 20); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.StateRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.state_root, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.ReceiptsRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.receipts_root, 32, 32); }
+            var executionPayload = payloadData.ExecutionPayload ?? throw new Exception("ExecutionPayload is null");
+
+            fixed (byte* sourcePtr = executionPayload.ParentHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.parent_hash, 32, 32); }
+            fixed (byte* sourcePtr = executionPayload.FeeRecipient.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.fee_recipient, 20, 20); }
+            fixed (byte* sourcePtr = executionPayload.StateRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.state_root, 32, 32); }
+            fixed (byte* sourcePtr = executionPayload.ReceiptsRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.receipts_root, 32, 32); }
 
             {
-                var bloomLen = payload.Data.ExecutionPayload.LogsBloom.Bytes.Length;
+                var bloomLen = executionPayload.LogsBloom.Bytes.Length;
                 IntPtr convBloom = Marshal.AllocHGlobal(bloomLen);
-                Marshal.Copy(payload.Data.ExecutionPayload.LogsBloom.Bytes.ToArray(), 0, convBloom, bloomLen);
+                Marshal.Copy(executionPayload.LogsBloom.Bytes.ToArray(), 0, convBloom, bloomLen);
                 exPayload.logs_bloom = (byte*)convBloom;
                 exPayload.logs_bloom_len = (ulong)bloomLen;
             }
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.PrevRandao.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.prev_randao, 32, 32); }
-            exPayload.block_number = (ulong)payload.Data.ExecutionPayload.BlockNumber;
-            exPayload.gas_limit = (ulong)payload.Data.ExecutionPayload.GasLimit;
-            exPayload.gas_used = (ulong)payload.Data.ExecutionPayload.GasUsed;
-            exPayload.timestamp = payload.Data.ExecutionPayload.Timestamp;
+            fixed (byte* sourcePtr = executionPayload.PrevRandao.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.prev_randao, 32, 32); }
+            exPayload.block_number = (ulong)executionPayload.BlockNumber;
+            exPayload.gas_limit = (ulong)executionPayload.GasLimit;
+            exPayload.gas_used = (ulong)executionPayload.GasUsed;
+            exPayload.timestamp = executionPayload.Timestamp;
 
             {
-                var extraDataLen = payload.Data.ExecutionPayload.ExtraData.Length;
+                var extraDataLen = executionPayload.ExtraData.Length;
                 IntPtr convExtraData = Marshal.AllocHGlobal(extraDataLen);
-                Marshal.Copy(payload.Data.ExecutionPayload.ExtraData.ToArray(), 0, convExtraData, extraDataLen);
+                Marshal.Copy(executionPayload.ExtraData.ToArray(), 0, convExtraData, extraDataLen);
                 exPayload.extra_data = (byte*)convExtraData;
                 exPayload.extra_data_len = (ulong)extraDataLen;
             }
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.BaseFeePerGas.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, exPayload.base_fee_per_gas, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.BlockHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.block_hash, 32, 32); }
+            fixed (byte* sourcePtr = executionPayload.BaseFeePerGas.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, exPayload.base_fee_per_gas, 32, 32); }
+            fixed (byte* sourcePtr = executionPayload.BlockHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.block_hash, 32, 32); }
 
             {
-                var transactionsLen = payload.Data.ExecutionPayload.Transactions.Length;
+                var transactionsLen = executionPayload.Transactions.Length;
                 IntPtr convTransactions = Marshal.AllocHGlobal(transactionsLen * Marshal.SizeOf<CTransaction>());
                 for (var i = 0; i < transactionsLen; ++i)
                 {
-                    var len = payload.Data.ExecutionPayload.Transactions[i].Length;
+                    var len = executionPayload.Transactions[i].Length;
                     var transaction = Marshal.AllocHGlobal(len);
-                    Marshal.Copy(payload.Data.ExecutionPayload.Transactions[i], 0, transaction, len);
+                    Marshal.Copy(executionPayload.Transactions[i], 0, transaction, len);
                     Marshal.StructureToPtr(new CTransaction
                     {
                         bytes_len = (ulong)len,
@@ -1067,23 +1077,24 @@ public class GrandineEngineApi
                         false
                     );
                 }
-                ;
 
                 exPayload.transactions = (CTransaction*)convTransactions;
                 exPayload.transactions_len = (ulong)transactionsLen;
             }
 
             {
-                var withdrawalsLen = payload.Data.ExecutionPayload.Transactions.Length;
+                var withdrawals = executionPayload.Withdrawals ?? throw new Exception("Withdrawals array is null");
+
+                var withdrawalsLen = withdrawals.Length;
                 IntPtr convWithdrawals = Marshal.AllocHGlobal(withdrawalsLen * Marshal.SizeOf<CWithdrawalV1>());
                 for (var i = 0; i < withdrawalsLen; ++i)
                 {
                     var withdrawal = new CWithdrawalV1 { };
 
-                    withdrawal.index = payload.Data.ExecutionPayload.Withdrawals[i].Index;
-                    withdrawal.validator_index = payload.Data.ExecutionPayload.Withdrawals[i].ValidatorIndex;
-                    fixed (byte* sourcePtr = payload.Data.ExecutionPayload.Withdrawals[i].Address.Bytes) { Buffer.MemoryCopy(sourcePtr, withdrawal.address, 20, 20); }
-                    withdrawal.amount = (ulong)payload.Data.ExecutionPayload.Withdrawals[i].AmountInGwei;
+                    withdrawal.index = withdrawals[i].Index;
+                    withdrawal.validator_index = withdrawals[i].ValidatorIndex;
+                    fixed (byte* sourcePtr = withdrawals[i].Address.Bytes) { Buffer.MemoryCopy(sourcePtr, withdrawal.address, 20, 20); }
+                    withdrawal.amount = (ulong)withdrawals[i].AmountInGwei;
 
                     Marshal.StructureToPtr(withdrawal, IntPtr.Add(convWithdrawals, i * Marshal.SizeOf<CWithdrawalV1>()), false);
                 }
@@ -1094,7 +1105,7 @@ public class GrandineEngineApi
 
             response.execution_payload = exPayload;
 
-            fixed (byte* sourcePtr = payload.Data.BlockValue.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, response.block_value, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.BlockValue.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, response.block_value, 32, 32); }
 
             return new CResultCEngineGetPayloadV2Response
             {
@@ -1128,48 +1139,50 @@ public class GrandineEngineApi
                 throw new Exception("unexpected failure");
             }
 
+            var payloadData = payload.Data ?? throw new Exception("Returned payload is null");
+
             var response = new CEngineGetPayloadV3Response { };
 
             var exPayload = new CExecutionPayloadV3 { };
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.ParentHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.parent_hash, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.FeeRecipient.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.fee_recipient, 20, 20); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.StateRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.state_root, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.ReceiptsRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.receipts_root, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.ParentHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.parent_hash, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.FeeRecipient.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.fee_recipient, 20, 20); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.StateRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.state_root, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.ReceiptsRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.receipts_root, 32, 32); }
 
             {
-                var bloomLen = payload.Data.ExecutionPayload.LogsBloom.Bytes.Length;
+                var bloomLen = payloadData.ExecutionPayload.LogsBloom.Bytes.Length;
                 IntPtr convBloom = Marshal.AllocHGlobal(bloomLen);
-                Marshal.Copy(payload.Data.ExecutionPayload.LogsBloom.Bytes.ToArray(), 0, convBloom, bloomLen);
+                Marshal.Copy(payloadData.ExecutionPayload.LogsBloom.Bytes.ToArray(), 0, convBloom, bloomLen);
                 exPayload.logs_bloom = (byte*)convBloom;
                 exPayload.logs_bloom_len = (ulong)bloomLen;
             }
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.PrevRandao.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.prev_randao, 32, 32); }
-            exPayload.block_number = (ulong)payload.Data.ExecutionPayload.BlockNumber;
-            exPayload.gas_limit = (ulong)payload.Data.ExecutionPayload.GasLimit;
-            exPayload.gas_used = (ulong)payload.Data.ExecutionPayload.GasUsed;
-            exPayload.timestamp = payload.Data.ExecutionPayload.Timestamp;
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.PrevRandao.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.prev_randao, 32, 32); }
+            exPayload.block_number = (ulong)payloadData.ExecutionPayload.BlockNumber;
+            exPayload.gas_limit = (ulong)payloadData.ExecutionPayload.GasLimit;
+            exPayload.gas_used = (ulong)payloadData.ExecutionPayload.GasUsed;
+            exPayload.timestamp = payloadData.ExecutionPayload.Timestamp;
 
             {
-                var extraDataLen = payload.Data.ExecutionPayload.ExtraData.Length;
+                var extraDataLen = payloadData.ExecutionPayload.ExtraData.Length;
                 IntPtr convExtraData = Marshal.AllocHGlobal(extraDataLen);
-                Marshal.Copy(payload.Data.ExecutionPayload.ExtraData.ToArray(), 0, convExtraData, extraDataLen);
+                Marshal.Copy(payloadData.ExecutionPayload.ExtraData.ToArray(), 0, convExtraData, extraDataLen);
                 exPayload.extra_data = (byte*)convExtraData;
                 exPayload.extra_data_len = (ulong)extraDataLen;
             }
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.BaseFeePerGas.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, exPayload.base_fee_per_gas, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.BlockHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.block_hash, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.BaseFeePerGas.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, exPayload.base_fee_per_gas, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.BlockHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.block_hash, 32, 32); }
 
             {
-                var transactionsLen = payload.Data.ExecutionPayload.Transactions.Length;
+                var transactionsLen = payloadData.ExecutionPayload.Transactions.Length;
                 IntPtr convTransactions = Marshal.AllocHGlobal(transactionsLen * Marshal.SizeOf<CTransaction>());
                 for (var i = 0; i < transactionsLen; ++i)
                 {
-                    var len = payload.Data.ExecutionPayload.Transactions[i].Length;
+                    var len = payloadData.ExecutionPayload.Transactions[i].Length;
                     var transaction = Marshal.AllocHGlobal(len);
-                    Marshal.Copy(payload.Data.ExecutionPayload.Transactions[i], 0, transaction, len);
+                    Marshal.Copy(payloadData.ExecutionPayload.Transactions[i], 0, transaction, len);
                     Marshal.StructureToPtr(new CTransaction
                     {
                         bytes_len = (ulong)len,
@@ -1186,41 +1199,41 @@ public class GrandineEngineApi
             }
 
             {
-                var withdrawalsLen = payload.Data.ExecutionPayload.Transactions.Length;
-                IntPtr convWithdrawals = Marshal.AllocHGlobal(withdrawalsLen * Marshal.SizeOf<CWithdrawalV1>());
-                for (var i = 0; i < withdrawalsLen; ++i)
+                var withdrawals = payloadData.ExecutionPayload.Withdrawals ?? throw new Exception("Withdrawal list is null");
+                IntPtr convWithdrawals = Marshal.AllocHGlobal(withdrawals.Length * Marshal.SizeOf<CWithdrawalV1>());
+                for (var i = 0; i < withdrawals.Length; ++i)
                 {
                     var withdrawal = new CWithdrawalV1 { };
 
-                    withdrawal.index = payload.Data.ExecutionPayload.Withdrawals[i].Index;
-                    withdrawal.validator_index = payload.Data.ExecutionPayload.Withdrawals[i].ValidatorIndex;
-                    fixed (byte* sourcePtr = payload.Data.ExecutionPayload.Withdrawals[i].Address.Bytes) { Buffer.MemoryCopy(sourcePtr, withdrawal.address, 20, 20); }
-                    withdrawal.amount = (ulong)payload.Data.ExecutionPayload.Withdrawals[i].AmountInGwei;
+                    withdrawal.index = withdrawals[i].Index;
+                    withdrawal.validator_index = withdrawals[i].ValidatorIndex;
+                    fixed (byte* sourcePtr = withdrawals[i].Address.Bytes) { Buffer.MemoryCopy(sourcePtr, withdrawal.address, 20, 20); }
+                    withdrawal.amount = (ulong)withdrawals[i].AmountInGwei;
 
                     Marshal.StructureToPtr(withdrawal, IntPtr.Add(convWithdrawals, i * Marshal.SizeOf<CWithdrawalV1>()), false);
                 }
 
                 exPayload.withdrawals = (CWithdrawalV1*)convWithdrawals;
-                exPayload.withdrawals_len = (ulong)withdrawalsLen;
+                exPayload.withdrawals_len = (ulong)withdrawals.Length;
             }
 
-            exPayload.blob_gas_used = (ulong)payload.Data.ExecutionPayload.BlobGasUsed;
-            exPayload.excess_blob_gas = (ulong)payload.Data.ExecutionPayload.ExcessBlobGas;
+            exPayload.blob_gas_used = (ulong)(payloadData.ExecutionPayload.BlobGasUsed ?? throw new Exception("BlobGasUsed is null"));
+            exPayload.excess_blob_gas = (ulong)(payloadData.ExecutionPayload.ExcessBlobGas ?? throw new Exception("ExcessBlobGas is null"));
 
             response.execution_payload = exPayload;
 
-            fixed (byte* sourcePtr = payload.Data.BlockValue.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, response.block_value, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.BlockValue.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, response.block_value, 32, 32); }
 
             var blobsBundle = new CBlobsBundleV1 { };
 
             {
-                var commitmentsLen = payload.Data.BlobsBundle.Commitments.Length;
+                var commitmentsLen = payloadData.BlobsBundle.Commitments.Length;
                 var commitments = Marshal.AllocHGlobal(commitmentsLen * Marshal.SizeOf<IntPtr>());
 
                 for (var i = 0; i < commitmentsLen; ++i)
                 {
                     var commitment = Marshal.AllocHGlobal(48);
-                    fixed (byte* sourcePtr = payload.Data.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)commitment, 48, 48); }
+                    fixed (byte* sourcePtr = payloadData.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)commitment, 48, 48); }
                     Marshal.StructureToPtr(commitment, IntPtr.Add(commitments, i * Marshal.SizeOf<IntPtr>()), false);
                 }
 
@@ -1229,13 +1242,13 @@ public class GrandineEngineApi
             }
 
             {
-                var proofsLen = payload.Data.BlobsBundle.Commitments.Length;
+                var proofsLen = payloadData.BlobsBundle.Commitments.Length;
                 var proofs = Marshal.AllocHGlobal(proofsLen * Marshal.SizeOf<IntPtr>());
 
                 for (var i = 0; i < proofsLen; ++i)
                 {
                     var proof = Marshal.AllocHGlobal(48);
-                    fixed (byte* sourcePtr = payload.Data.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)proof, 48, 48); }
+                    fixed (byte* sourcePtr = payloadData.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)proof, 48, 48); }
                     Marshal.StructureToPtr(proof, IntPtr.Add(proofs, i * Marshal.SizeOf<IntPtr>()), false);
                 }
 
@@ -1244,13 +1257,13 @@ public class GrandineEngineApi
             }
 
             {
-                var blobsLen = payload.Data.BlobsBundle.Commitments.Length;
+                var blobsLen = payloadData.BlobsBundle.Commitments.Length;
                 var blobs = Marshal.AllocHGlobal(blobsLen * Marshal.SizeOf<IntPtr>());
 
                 for (var i = 0; i < blobsLen; ++i)
                 {
                     var blob = Marshal.AllocHGlobal(4096 * 32);
-                    fixed (byte* sourcePtr = payload.Data.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)blob, 4096 * 32, 4096 * 32); }
+                    fixed (byte* sourcePtr = payloadData.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)blob, 4096 * 32, 4096 * 32); }
                     Marshal.StructureToPtr(blob, IntPtr.Add(blobs, i * Marshal.SizeOf<IntPtr>()), false);
                 }
 
@@ -1260,7 +1273,7 @@ public class GrandineEngineApi
 
             response.blobs_bundle = blobsBundle;
 
-            response.should_override_builder = payload.Data.ShouldOverrideBuilder;
+            response.should_override_builder = payloadData.ShouldOverrideBuilder;
 
             return new CResultCEngineGetPayloadV3Response
             {
@@ -1294,48 +1307,50 @@ public class GrandineEngineApi
                 throw new Exception("unexpected failure");
             }
 
+            var payloadData = payload.Data ?? throw new Exception("Result payload is null");
+
             var response = new CEngineGetPayloadV4Response { };
 
             var exPayload = new CExecutionPayloadV3 { };
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.ParentHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.parent_hash, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.FeeRecipient.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.fee_recipient, 20, 20); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.StateRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.state_root, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.ReceiptsRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.receipts_root, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.ParentHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.parent_hash, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.FeeRecipient.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.fee_recipient, 20, 20); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.StateRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.state_root, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.ReceiptsRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.receipts_root, 32, 32); }
 
             {
-                var bloomLen = payload.Data.ExecutionPayload.LogsBloom.Bytes.Length;
+                var bloomLen = payloadData.ExecutionPayload.LogsBloom.Bytes.Length;
                 IntPtr convBloom = Marshal.AllocHGlobal(bloomLen);
-                Marshal.Copy(payload.Data.ExecutionPayload.LogsBloom.Bytes.ToArray(), 0, convBloom, bloomLen);
+                Marshal.Copy(payloadData.ExecutionPayload.LogsBloom.Bytes.ToArray(), 0, convBloom, bloomLen);
                 exPayload.logs_bloom = (byte*)convBloom;
                 exPayload.logs_bloom_len = (ulong)bloomLen;
             }
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.PrevRandao.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.prev_randao, 32, 32); }
-            exPayload.block_number = (ulong)payload.Data.ExecutionPayload.BlockNumber;
-            exPayload.gas_limit = (ulong)payload.Data.ExecutionPayload.GasLimit;
-            exPayload.gas_used = (ulong)payload.Data.ExecutionPayload.GasUsed;
-            exPayload.timestamp = payload.Data.ExecutionPayload.Timestamp;
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.PrevRandao.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.prev_randao, 32, 32); }
+            exPayload.block_number = (ulong)payloadData.ExecutionPayload.BlockNumber;
+            exPayload.gas_limit = (ulong)payloadData.ExecutionPayload.GasLimit;
+            exPayload.gas_used = (ulong)payloadData.ExecutionPayload.GasUsed;
+            exPayload.timestamp = payloadData.ExecutionPayload.Timestamp;
 
             {
-                var extraDataLen = payload.Data.ExecutionPayload.ExtraData.Length;
+                var extraDataLen = payloadData.ExecutionPayload.ExtraData.Length;
                 IntPtr convExtraData = Marshal.AllocHGlobal(extraDataLen);
-                Marshal.Copy(payload.Data.ExecutionPayload.ExtraData.ToArray(), 0, convExtraData, extraDataLen);
+                Marshal.Copy(payloadData.ExecutionPayload.ExtraData.ToArray(), 0, convExtraData, extraDataLen);
                 exPayload.extra_data = (byte*)convExtraData;
                 exPayload.extra_data_len = (ulong)extraDataLen;
             }
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.BaseFeePerGas.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, exPayload.base_fee_per_gas, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.BlockHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.block_hash, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.BaseFeePerGas.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, exPayload.base_fee_per_gas, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.BlockHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.block_hash, 32, 32); }
 
             {
-                var transactionsLen = payload.Data.ExecutionPayload.Transactions.Length;
+                var transactionsLen = payloadData.ExecutionPayload.Transactions.Length;
                 IntPtr convTransactions = Marshal.AllocHGlobal(transactionsLen * Marshal.SizeOf<CTransaction>());
                 for (var i = 0; i < transactionsLen; ++i)
                 {
-                    var len = payload.Data.ExecutionPayload.Transactions[i].Length;
+                    var len = payloadData.ExecutionPayload.Transactions[i].Length;
                     var transaction = Marshal.AllocHGlobal(len);
-                    Marshal.Copy(payload.Data.ExecutionPayload.Transactions[i], 0, transaction, len);
+                    Marshal.Copy(payloadData.ExecutionPayload.Transactions[i], 0, transaction, len);
                     Marshal.StructureToPtr(new CTransaction
                     {
                         bytes_len = (ulong)len,
@@ -1352,41 +1367,41 @@ public class GrandineEngineApi
             }
 
             {
-                var withdrawalsLen = payload.Data.ExecutionPayload.Transactions.Length;
-                IntPtr convWithdrawals = Marshal.AllocHGlobal(withdrawalsLen * Marshal.SizeOf<CWithdrawalV1>());
-                for (var i = 0; i < withdrawalsLen; ++i)
+                var withdrawals = payloadData.ExecutionPayload.Withdrawals ?? throw new Exception("Withdrawal array is null");
+                IntPtr convWithdrawals = Marshal.AllocHGlobal(withdrawals.Length * Marshal.SizeOf<CWithdrawalV1>());
+                for (var i = 0; i < withdrawals.Length; ++i)
                 {
                     var withdrawal = new CWithdrawalV1 { };
 
-                    withdrawal.index = payload.Data.ExecutionPayload.Withdrawals[i].Index;
-                    withdrawal.validator_index = payload.Data.ExecutionPayload.Withdrawals[i].ValidatorIndex;
-                    fixed (byte* sourcePtr = payload.Data.ExecutionPayload.Withdrawals[i].Address.Bytes) { Buffer.MemoryCopy(sourcePtr, withdrawal.address, 20, 20); }
-                    withdrawal.amount = (ulong)payload.Data.ExecutionPayload.Withdrawals[i].AmountInGwei;
+                    withdrawal.index = withdrawals[i].Index;
+                    withdrawal.validator_index = withdrawals[i].ValidatorIndex;
+                    fixed (byte* sourcePtr = withdrawals[i].Address.Bytes) { Buffer.MemoryCopy(sourcePtr, withdrawal.address, 20, 20); }
+                    withdrawal.amount = (ulong)withdrawals[i].AmountInGwei;
 
                     Marshal.StructureToPtr(withdrawal, IntPtr.Add(convWithdrawals, i * Marshal.SizeOf<CWithdrawalV1>()), false);
                 }
 
                 exPayload.withdrawals = (CWithdrawalV1*)convWithdrawals;
-                exPayload.withdrawals_len = (ulong)withdrawalsLen;
+                exPayload.withdrawals_len = (ulong)withdrawals.Length;
             }
 
-            exPayload.blob_gas_used = (ulong)payload.Data.ExecutionPayload.BlobGasUsed;
-            exPayload.excess_blob_gas = (ulong)payload.Data.ExecutionPayload.ExcessBlobGas;
+            exPayload.blob_gas_used = (ulong)(payloadData.ExecutionPayload.BlobGasUsed ?? throw new Exception("BlobGasUsed is null"));
+            exPayload.excess_blob_gas = (ulong)(payloadData.ExecutionPayload.ExcessBlobGas ?? throw new Exception("ExcessBlobGas is null"));
 
             response.execution_payload = exPayload;
 
-            fixed (byte* sourcePtr = payload.Data.BlockValue.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, response.block_value, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.BlockValue.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, response.block_value, 32, 32); }
 
             var blobsBundle = new CBlobsBundleV1 { };
 
             {
-                var commitmentsLen = payload.Data.BlobsBundle.Commitments.Length;
+                var commitmentsLen = payloadData.BlobsBundle.Commitments.Length;
                 var commitments = Marshal.AllocHGlobal(commitmentsLen * Marshal.SizeOf<IntPtr>());
 
                 for (var i = 0; i < commitmentsLen; ++i)
                 {
                     var commitment = Marshal.AllocHGlobal(48);
-                    fixed (byte* sourcePtr = payload.Data.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)commitment, 48, 48); }
+                    fixed (byte* sourcePtr = payloadData.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)commitment, 48, 48); }
                     Marshal.StructureToPtr(commitment, IntPtr.Add(commitments, i * Marshal.SizeOf<IntPtr>()), false);
                 }
 
@@ -1395,13 +1410,13 @@ public class GrandineEngineApi
             }
 
             {
-                var proofsLen = payload.Data.BlobsBundle.Commitments.Length;
+                var proofsLen = payloadData.BlobsBundle.Commitments.Length;
                 var proofs = Marshal.AllocHGlobal(proofsLen * Marshal.SizeOf<IntPtr>());
 
                 for (var i = 0; i < proofsLen; ++i)
                 {
                     var proof = Marshal.AllocHGlobal(48);
-                    fixed (byte* sourcePtr = payload.Data.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)proof, 48, 48); }
+                    fixed (byte* sourcePtr = payloadData.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)proof, 48, 48); }
                     Marshal.StructureToPtr(proof, IntPtr.Add(proofs, i * Marshal.SizeOf<IntPtr>()), false);
                 }
 
@@ -1410,13 +1425,13 @@ public class GrandineEngineApi
             }
 
             {
-                var blobsLen = payload.Data.BlobsBundle.Commitments.Length;
+                var blobsLen = payloadData.BlobsBundle.Commitments.Length;
                 var blobs = Marshal.AllocHGlobal(blobsLen * Marshal.SizeOf<IntPtr>());
 
                 for (var i = 0; i < blobsLen; ++i)
                 {
                     var blob = Marshal.AllocHGlobal(4096 * 32);
-                    fixed (byte* sourcePtr = payload.Data.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)blob, 4096 * 32, 4096 * 32); }
+                    fixed (byte* sourcePtr = payloadData.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)blob, 4096 * 32, 4096 * 32); }
                     Marshal.StructureToPtr(blob, IntPtr.Add(blobs, i * Marshal.SizeOf<IntPtr>()), false);
                 }
 
@@ -1426,24 +1441,24 @@ public class GrandineEngineApi
 
             response.blobs_bundle = blobsBundle;
 
-            response.should_override_builder = payload.Data.ShouldOverrideBuilder;
+            response.should_override_builder = payloadData.ShouldOverrideBuilder;
 
             var executionRequests = new CExecutionRequests { };
 
             {
-                var requestsLen = payload.Data.ExecutionRequests.Length;
-                var requests = Marshal.AllocHGlobal(requestsLen * Marshal.SizeOf<CRequest>());
+                var array = payloadData.ExecutionRequests ?? throw new Exception("Execution requests is null");
+                var requests = Marshal.AllocHGlobal(array.Length * Marshal.SizeOf<CRequest>());
 
-                for (var i = 0; i < requestsLen; ++i)
+                for (var i = 0; i < array.Length; ++i)
                 {
-                    var bytesLen = payload.Data.ExecutionRequests[i].Length;
+                    var bytesLen = payloadData.ExecutionRequests[i].Length;
                     var bytes = Marshal.AllocHGlobal(bytesLen);
-                    fixed (byte* sourcePtr = payload.Data.ExecutionRequests[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)bytes, bytesLen, bytesLen); }
+                    fixed (byte* sourcePtr = payloadData.ExecutionRequests[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)bytes, bytesLen, bytesLen); }
                     Marshal.StructureToPtr(new CRequest { bytes = (byte*)bytes, bytes_len = (ulong)bytesLen }, IntPtr.Add(requests, i * Marshal.SizeOf<CRequest>()), false);
                 }
 
                 executionRequests.requests = (CRequest*)requests;
-                executionRequests.requests_len = (ulong)requestsLen;
+                executionRequests.requests_len = (ulong)array.Length;
             }
 
             response.execution_requests = executionRequests;
@@ -1480,48 +1495,50 @@ public class GrandineEngineApi
                 throw new Exception("unexpected failure");
             }
 
+            var payloadData = payload.Data ?? throw new Exception("Payload is null");
+
             var response = new CEngineGetPayloadV5Response { };
 
             var exPayload = new CExecutionPayloadV3 { };
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.ParentHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.parent_hash, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.FeeRecipient.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.fee_recipient, 20, 20); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.StateRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.state_root, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.ReceiptsRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.receipts_root, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.ParentHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.parent_hash, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.FeeRecipient.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.fee_recipient, 20, 20); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.StateRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.state_root, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.ReceiptsRoot.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.receipts_root, 32, 32); }
 
             {
-                var bloomLen = payload.Data.ExecutionPayload.LogsBloom.Bytes.Length;
+                var bloomLen = payloadData.ExecutionPayload.LogsBloom.Bytes.Length;
                 IntPtr convBloom = Marshal.AllocHGlobal(bloomLen);
-                Marshal.Copy(payload.Data.ExecutionPayload.LogsBloom.Bytes.ToArray(), 0, convBloom, bloomLen);
+                Marshal.Copy(payloadData.ExecutionPayload.LogsBloom.Bytes.ToArray(), 0, convBloom, bloomLen);
                 exPayload.logs_bloom = (byte*)convBloom;
                 exPayload.logs_bloom_len = (ulong)bloomLen;
             }
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.PrevRandao.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.prev_randao, 32, 32); }
-            exPayload.block_number = (ulong)payload.Data.ExecutionPayload.BlockNumber;
-            exPayload.gas_limit = (ulong)payload.Data.ExecutionPayload.GasLimit;
-            exPayload.gas_used = (ulong)payload.Data.ExecutionPayload.GasUsed;
-            exPayload.timestamp = payload.Data.ExecutionPayload.Timestamp;
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.PrevRandao.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.prev_randao, 32, 32); }
+            exPayload.block_number = (ulong)payloadData.ExecutionPayload.BlockNumber;
+            exPayload.gas_limit = (ulong)payloadData.ExecutionPayload.GasLimit;
+            exPayload.gas_used = (ulong)payloadData.ExecutionPayload.GasUsed;
+            exPayload.timestamp = payloadData.ExecutionPayload.Timestamp;
 
             {
-                var extraDataLen = payload.Data.ExecutionPayload.ExtraData.Length;
+                var extraDataLen = payloadData.ExecutionPayload.ExtraData.Length;
                 IntPtr convExtraData = Marshal.AllocHGlobal(extraDataLen);
-                Marshal.Copy(payload.Data.ExecutionPayload.ExtraData.ToArray(), 0, convExtraData, extraDataLen);
+                Marshal.Copy(payloadData.ExecutionPayload.ExtraData.ToArray(), 0, convExtraData, extraDataLen);
                 exPayload.extra_data = (byte*)convExtraData;
                 exPayload.extra_data_len = (ulong)extraDataLen;
             }
 
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.BaseFeePerGas.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, exPayload.base_fee_per_gas, 32, 32); }
-            fixed (byte* sourcePtr = payload.Data.ExecutionPayload.BlockHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.block_hash, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.BaseFeePerGas.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, exPayload.base_fee_per_gas, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.ExecutionPayload.BlockHash.Bytes) { Buffer.MemoryCopy(sourcePtr, exPayload.block_hash, 32, 32); }
 
             {
-                var transactionsLen = payload.Data.ExecutionPayload.Transactions.Length;
+                var transactionsLen = payloadData.ExecutionPayload.Transactions.Length;
                 IntPtr convTransactions = Marshal.AllocHGlobal(transactionsLen * Marshal.SizeOf<CTransaction>());
                 for (var i = 0; i < transactionsLen; ++i)
                 {
-                    var len = payload.Data.ExecutionPayload.Transactions[i].Length;
+                    var len = payloadData.ExecutionPayload.Transactions[i].Length;
                     var transaction = Marshal.AllocHGlobal(len);
-                    Marshal.Copy(payload.Data.ExecutionPayload.Transactions[i], 0, transaction, len);
+                    Marshal.Copy(payloadData.ExecutionPayload.Transactions[i], 0, transaction, len);
                     Marshal.StructureToPtr(new CTransaction
                     {
                         bytes_len = (ulong)len,
@@ -1538,41 +1555,41 @@ public class GrandineEngineApi
             }
 
             {
-                var withdrawalsLen = payload.Data.ExecutionPayload.Transactions.Length;
-                IntPtr convWithdrawals = Marshal.AllocHGlobal(withdrawalsLen * Marshal.SizeOf<CWithdrawalV1>());
-                for (var i = 0; i < withdrawalsLen; ++i)
+                var withdrawals = payloadData.ExecutionPayload.Withdrawals ?? throw new Exception("Withdrawals is null");
+                IntPtr convWithdrawals = Marshal.AllocHGlobal(withdrawals.Length * Marshal.SizeOf<CWithdrawalV1>());
+                for (var i = 0; i < withdrawals.Length; ++i)
                 {
                     var withdrawal = new CWithdrawalV1 { };
 
-                    withdrawal.index = payload.Data.ExecutionPayload.Withdrawals[i].Index;
-                    withdrawal.validator_index = payload.Data.ExecutionPayload.Withdrawals[i].ValidatorIndex;
-                    fixed (byte* sourcePtr = payload.Data.ExecutionPayload.Withdrawals[i].Address.Bytes) { Buffer.MemoryCopy(sourcePtr, withdrawal.address, 20, 20); }
-                    withdrawal.amount = (ulong)payload.Data.ExecutionPayload.Withdrawals[i].AmountInGwei;
+                    withdrawal.index = withdrawals[i].Index;
+                    withdrawal.validator_index = withdrawals[i].ValidatorIndex;
+                    fixed (byte* sourcePtr = withdrawals[i].Address.Bytes) { Buffer.MemoryCopy(sourcePtr, withdrawal.address, 20, 20); }
+                    withdrawal.amount = (ulong)withdrawals[i].AmountInGwei;
 
                     Marshal.StructureToPtr(withdrawal, IntPtr.Add(convWithdrawals, i * Marshal.SizeOf<CWithdrawalV1>()), false);
                 }
 
                 exPayload.withdrawals = (CWithdrawalV1*)convWithdrawals;
-                exPayload.withdrawals_len = (ulong)withdrawalsLen;
+                exPayload.withdrawals_len = (ulong)withdrawals.Length;
             }
 
-            exPayload.blob_gas_used = (ulong)payload.Data.ExecutionPayload.BlobGasUsed;
-            exPayload.excess_blob_gas = (ulong)payload.Data.ExecutionPayload.ExcessBlobGas;
+            exPayload.blob_gas_used = (ulong)(payloadData.ExecutionPayload.BlobGasUsed ?? throw new Exception("BlobGasUsed is null"));
+            exPayload.excess_blob_gas = (ulong)(payloadData.ExecutionPayload.ExcessBlobGas ?? throw new Exception("ExcessBlobGas is null"));
 
             response.execution_payload = exPayload;
 
-            fixed (byte* sourcePtr = payload.Data.BlockValue.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, response.block_value, 32, 32); }
+            fixed (byte* sourcePtr = payloadData.BlockValue.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, response.block_value, 32, 32); }
 
             var blobsBundle = new CBlobsBundleV1 { };
 
             {
-                var commitmentsLen = payload.Data.BlobsBundle.Commitments.Length;
+                var commitmentsLen = payloadData.BlobsBundle.Commitments.Length;
                 var commitments = Marshal.AllocHGlobal(commitmentsLen * Marshal.SizeOf<IntPtr>());
 
                 for (var i = 0; i < commitmentsLen; ++i)
                 {
                     var commitment = Marshal.AllocHGlobal(48);
-                    fixed (byte* sourcePtr = payload.Data.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)commitment, 48, 48); }
+                    fixed (byte* sourcePtr = payloadData.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)commitment, 48, 48); }
                     Marshal.StructureToPtr(commitment, IntPtr.Add(commitments, i * Marshal.SizeOf<IntPtr>()), false);
                 }
 
@@ -1581,13 +1598,13 @@ public class GrandineEngineApi
             }
 
             {
-                var proofsLen = payload.Data.BlobsBundle.Commitments.Length;
+                var proofsLen = payloadData.BlobsBundle.Commitments.Length;
                 var proofs = Marshal.AllocHGlobal(proofsLen * Marshal.SizeOf<IntPtr>());
 
                 for (var i = 0; i < proofsLen; ++i)
                 {
                     var proof = Marshal.AllocHGlobal(48);
-                    fixed (byte* sourcePtr = payload.Data.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)proof, 48, 48); }
+                    fixed (byte* sourcePtr = payloadData.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)proof, 48, 48); }
                     Marshal.StructureToPtr(proof, IntPtr.Add(proofs, i * Marshal.SizeOf<IntPtr>()), false);
                 }
 
@@ -1596,13 +1613,13 @@ public class GrandineEngineApi
             }
 
             {
-                var blobsLen = payload.Data.BlobsBundle.Commitments.Length;
+                var blobsLen = payloadData.BlobsBundle.Commitments.Length;
                 var blobs = Marshal.AllocHGlobal(blobsLen * Marshal.SizeOf<IntPtr>());
 
                 for (var i = 0; i < blobsLen; ++i)
                 {
                     var blob = Marshal.AllocHGlobal(4096 * 32);
-                    fixed (byte* sourcePtr = payload.Data.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)blob, 4096 * 32, 4096 * 32); }
+                    fixed (byte* sourcePtr = payloadData.BlobsBundle.Commitments[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)blob, 4096 * 32, 4096 * 32); }
                     Marshal.StructureToPtr(blob, IntPtr.Add(blobs, i * Marshal.SizeOf<IntPtr>()), false);
                 }
 
@@ -1612,24 +1629,24 @@ public class GrandineEngineApi
 
             response.blobs_bundle = blobsBundle;
 
-            response.should_override_builder = payload.Data.ShouldOverrideBuilder;
+            response.should_override_builder = payloadData.ShouldOverrideBuilder;
 
             var executionRequests = new CExecutionRequests { };
 
             {
-                var requestsLen = payload.Data.ExecutionRequests.Length;
-                var requests = Marshal.AllocHGlobal(requestsLen * Marshal.SizeOf<CRequest>());
+                var array = payloadData.ExecutionRequests ?? throw new Exception("Execution requests is null");
+                var requests = Marshal.AllocHGlobal(array.Length * Marshal.SizeOf<CRequest>());
 
-                for (var i = 0; i < requestsLen; ++i)
+                for (var i = 0; i < array.Length; ++i)
                 {
-                    var bytesLen = payload.Data.ExecutionRequests[i].Length;
+                    var bytesLen = array[i].Length;
                     var bytes = Marshal.AllocHGlobal(bytesLen);
-                    fixed (byte* sourcePtr = payload.Data.ExecutionRequests[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)bytes, bytesLen, bytesLen); }
+                    fixed (byte* sourcePtr = array[i]) { Buffer.MemoryCopy(sourcePtr, (byte*)bytes, bytesLen, bytesLen); }
                     Marshal.StructureToPtr(new CRequest { bytes = (byte*)bytes, bytes_len = (ulong)bytesLen }, IntPtr.Add(requests, i * Marshal.SizeOf<CRequest>()), false);
                 }
 
                 executionRequests.requests = (CRequest*)requests;
-                executionRequests.requests_len = (ulong)requestsLen;
+                executionRequests.requests_len = (ulong)array.Length;
             }
 
             response.execution_requests = executionRequests;

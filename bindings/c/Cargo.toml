@@ -20,6 +20,7 @@ runtime = { workspace = true, features = [
     "network-sepolia",
     "network-shadow",
     "network-holesky",
+    "network-hoodi",
 ] }
 libc = "0.2.2"
 log = { workspace = true }
