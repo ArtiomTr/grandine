@@ -20,46 +20,46 @@ using System.Text;
 namespace Grandine.NethermindPlugin;
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-internal delegate CResultCPayloadStatusV1 EngineNewPayloadV1Delegate(CExecutionPayloadV1 payload);
+internal delegate CResult<CPayloadStatusV1> EngineNewPayloadV1Delegate(CExecutionPayloadV1 payload);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-internal delegate CResultCPayloadStatusV1 EngineNewPayloadV2Delegate(CExecutionPayloadV2 payload);
+internal delegate CResult<CPayloadStatusV1> EngineNewPayloadV2Delegate(CExecutionPayloadV2 payload);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-unsafe internal delegate CResultCPayloadStatusV1 EngineNewPayloadV3Delegate(CExecutionPayloadV3 payload, byte** versionedHashes, ulong versionedHashesLen, byte* parentBeaconBlockRoot);
+unsafe internal delegate CResult<CPayloadStatusV1> EngineNewPayloadV3Delegate(CExecutionPayloadV3 payload, byte** versionedHashes, ulong versionedHashesLen, byte* parentBeaconBlockRoot);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-unsafe internal delegate CResultCPayloadStatusV1 EngineNewPayloadV4Delegate(CExecutionPayloadV3 payload, byte** versionedHashes, ulong versionedHashesLen, byte* parentBeaconBlockRoot, CExecutionRequests executionRequests);
+unsafe internal delegate CResult<CPayloadStatusV1> EngineNewPayloadV4Delegate(CExecutionPayloadV3 payload, byte** versionedHashes, ulong versionedHashesLen, byte* parentBeaconBlockRoot, CExecutionRequests executionRequests);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-internal delegate CResultCForkChoiceUpdatedResponse EngineForkchoiceUpdatedV1Delegate(CForkChoiceStateV1 state, COptionCPayloadAttributesV1 attributes);
+internal delegate CResult<CForkChoiceUpdatedResponse> EngineForkchoiceUpdatedV1Delegate(CForkChoiceStateV1 state, COption<CPayloadAttributesV1> attributes);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-internal delegate CResultCForkChoiceUpdatedResponse EngineForkchoiceUpdatedV2Delegate(CForkChoiceStateV1 state, COptionCPayloadAttributesV2 attributes);
+internal delegate CResult<CForkChoiceUpdatedResponse> EngineForkchoiceUpdatedV2Delegate(CForkChoiceStateV1 state, COption<CPayloadAttributesV2> attributes);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-internal delegate CResultCForkChoiceUpdatedResponse EngineForkchoiceUpdatedV3Delegate(CForkChoiceStateV1 state, COptionCPayloadAttributesV3 attributes);
+internal delegate CResult<CForkChoiceUpdatedResponse> EngineForkchoiceUpdatedV3Delegate(CForkChoiceStateV1 state, COption<CPayloadAttributesV3> attributes);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-unsafe internal delegate CResultCExecutionPayloadV1 EngineGetPayloadV1Delegate(byte *payloadId);
+unsafe internal delegate CResult<CExecutionPayloadV1> EngineGetPayloadV1Delegate(byte *payloadId);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-unsafe internal delegate CResultCEngineGetPayloadV2Response EngineGetPayloadV2Delegate(byte* payloadId);
+unsafe internal delegate CResult<CEngineGetPayloadV2Response> EngineGetPayloadV2Delegate(byte* payloadId);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-unsafe internal delegate CResultCEngineGetPayloadV3Response EngineGetPayloadV3Delegate(byte* payloadId);
+unsafe internal delegate CResult<CEngineGetPayloadV3Response> EngineGetPayloadV3Delegate(byte* payloadId);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-unsafe internal delegate CResultCEngineGetPayloadV4Response EngineGetPayloadV4Delegate(byte* payloadId);
+unsafe internal delegate CResult<CEngineGetPayloadV4Response> EngineGetPayloadV4Delegate(byte* payloadId);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-unsafe internal delegate CResultCEngineGetPayloadV5Response EngineGetPayloadV5Delegate(byte* payloadId);
+unsafe internal delegate CResult<CEngineGetPayloadV5Response> EngineGetPayloadV5Delegate(byte* payloadId);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-unsafe internal delegate CResultCVecCOptionCBlobAndProofV1 EngineGetBlobsV1Delegate(byte** versionedHashes, ulong versionedHashesLen);
+unsafe internal delegate CResult<CVec<COption<CBlobAndProofV1>>> EngineGetBlobsV1Delegate(byte** versionedHashes, ulong versionedHashesLen);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
-unsafe internal delegate CResultCOptionCVecCBlobAndProofV2 EngineGetBlobsV2Delegate(byte** versionedHashes, ulong versionedHashesLen);
+unsafe internal delegate CResult<COption<CVec<CBlobAndProofV2>>> EngineGetBlobsV2Delegate(byte** versionedHashes, ulong versionedHashesLen);
 
 [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
 unsafe internal delegate void FreeDelegate(void* ptr);
@@ -127,20 +127,20 @@ public class GrandineEngineApi
 
             _adapter = new CEmbedAdapter
             {
-                engine_new_payload_v1 = (delegate* unmanaged[Cdecl]<CExecutionPayloadV1, CResultCPayloadStatusV1>)engine_newPayloadV1Ptr,
-                engine_new_payload_v2 = (delegate* unmanaged[Cdecl]<CExecutionPayloadV2, CResultCPayloadStatusV1>)engine_newPayloadV2Ptr,
-                engine_new_payload_v3 = (delegate* unmanaged[Cdecl]<CExecutionPayloadV3, byte**, ulong, byte*, CResultCPayloadStatusV1>)engine_newPayloadV3Ptr,
-                engine_new_payload_v4 = (delegate* unmanaged[Cdecl]<CExecutionPayloadV3, byte**, ulong, byte*, CExecutionRequests, CResultCPayloadStatusV1>)engine_newPayloadV4Ptr,
-                engine_forkchoice_updated_v1 = (delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COptionCPayloadAttributesV1, CResultCForkChoiceUpdatedResponse>)engine_forkchoiceUpdatedV1Ptr,
-                engine_forkchoice_updated_v2 = (delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COptionCPayloadAttributesV2, CResultCForkChoiceUpdatedResponse>)engine_forkchoiceUpdatedV2Ptr,
-                engine_forkchoice_updated_v3 = (delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COptionCPayloadAttributesV3, CResultCForkChoiceUpdatedResponse>)engine_forkchoiceUpdatedV3Ptr,
-                engine_get_payload_v1 = (delegate* unmanaged[Cdecl]<byte*, CResultCExecutionPayloadV1>)engine_getPayloadV1Ptr,
-                engine_get_payload_v2 = (delegate* unmanaged[Cdecl]<byte*, CResultCEngineGetPayloadV2Response>)engine_getPayloadV2Ptr,
-                engine_get_payload_v3 = (delegate* unmanaged[Cdecl]<byte*, CResultCEngineGetPayloadV3Response>)engine_getPayloadV3Ptr,
-                engine_get_payload_v4 = (delegate* unmanaged[Cdecl]<byte*, CResultCEngineGetPayloadV4Response>)engine_getPayloadV4Ptr,
-                engine_get_payload_v5 = (delegate* unmanaged[Cdecl]<byte*, CResultCEngineGetPayloadV5Response>)engine_getPayloadV5Ptr,
-                engine_get_blobs_v1 = (delegate* unmanaged[Cdecl]<byte**, ulong, CResultCVecCOptionCBlobAndProofV1>)engine_getBlobsV1Ptr,
-                engine_get_blobs_v2 = (delegate* unmanaged[Cdecl]<byte**, ulong, CResultCOptionCVecCBlobAndProofV2>)engine_getBlobsV2Ptr,
+                engine_new_payload_v1 = (delegate* unmanaged[Cdecl]<CExecutionPayloadV1, CResult<CPayloadStatusV1>>)engine_newPayloadV1Ptr,
+                engine_new_payload_v2 = (delegate* unmanaged[Cdecl]<CExecutionPayloadV2, CResult<CPayloadStatusV1>>)engine_newPayloadV2Ptr,
+                engine_new_payload_v3 = (delegate* unmanaged[Cdecl]<CExecutionPayloadV3, byte**, ulong, byte*, CResult<CPayloadStatusV1>>)engine_newPayloadV3Ptr,
+                engine_new_payload_v4 = (delegate* unmanaged[Cdecl]<CExecutionPayloadV3, byte**, ulong, byte*, CExecutionRequests, CResult<CPayloadStatusV1>>)engine_newPayloadV4Ptr,
+                engine_forkchoice_updated_v1 = (delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COption<CPayloadAttributesV1>, CResult<CForkChoiceUpdatedResponse>>)engine_forkchoiceUpdatedV1Ptr,
+                engine_forkchoice_updated_v2 = (delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COption<CPayloadAttributesV2>, CResult<CForkChoiceUpdatedResponse>>)engine_forkchoiceUpdatedV2Ptr,
+                engine_forkchoice_updated_v3 = (delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COption<CPayloadAttributesV3>, CResult<CForkChoiceUpdatedResponse>>)engine_forkchoiceUpdatedV3Ptr,
+                engine_get_payload_v1 = (delegate* unmanaged[Cdecl]<byte*, CResult<CExecutionPayloadV1>>)engine_getPayloadV1Ptr,
+                engine_get_payload_v2 = (delegate* unmanaged[Cdecl]<byte*, CResult<CEngineGetPayloadV2Response>>)engine_getPayloadV2Ptr,
+                engine_get_payload_v3 = (delegate* unmanaged[Cdecl]<byte*, CResult<CEngineGetPayloadV3Response>>)engine_getPayloadV3Ptr,
+                engine_get_payload_v4 = (delegate* unmanaged[Cdecl]<byte*, CResult<CEngineGetPayloadV4Response>>)engine_getPayloadV4Ptr,
+                engine_get_payload_v5 = (delegate* unmanaged[Cdecl]<byte*, CResult<CEngineGetPayloadV5Response>>)engine_getPayloadV5Ptr,
+                engine_get_blobs_v1 = (delegate* unmanaged[Cdecl]<byte**, ulong, CResult<CVec<COption<CBlobAndProofV1>>>>)engine_getBlobsV1Ptr,
+                engine_get_blobs_v2 = (delegate* unmanaged[Cdecl]<byte**, ulong, CResult<COption<CVec<CBlobAndProofV2>>>>)engine_getBlobsV2Ptr,
                 free = (delegate* unmanaged[Cdecl]<void*, void>)freePtr,
             };
         }
@@ -154,7 +154,7 @@ public class GrandineEngineApi
         Marshal.FreeHGlobal((IntPtr)ptr);
     }
 
-    unsafe CResultCPayloadStatusV1 EngineNewPayloadV1(CExecutionPayloadV1 payload)
+    unsafe CResult<CPayloadStatusV1> EngineNewPayloadV1(CExecutionPayloadV1 payload)
     {
         _logger.Warn("================================================================= engine_newPayloadV1 =================================================================");
 
@@ -220,12 +220,12 @@ public class GrandineEngineApi
                 }
             }
 
-            return new CResultCPayloadStatusV1
+            return new CResult<CPayloadStatusV1>
             {
                 value = new CPayloadStatusV1
                 {
                     status = status,
-                    latest_valid_hash = new COptionCH256
+                    latest_valid_hash = new COption<CH256>
                     {
                         is_something = payloadStatus.Data.LatestValidHash != null,
                         value = latestValidHash,
@@ -236,14 +236,14 @@ public class GrandineEngineApi
         }
         catch (Exception)
         {
-            return new CResultCPayloadStatusV1
+            return new CResult<CPayloadStatusV1>
             {
                 error = 1
             };
         };
     }
 
-    unsafe CResultCPayloadStatusV1 EngineNewPayloadV2(CExecutionPayloadV2 payload)
+    unsafe CResult<CPayloadStatusV1> EngineNewPayloadV2(CExecutionPayloadV2 payload)
     {
         _logger.Warn("================================================================= engine_newPayloadV2 =================================================================");
 
@@ -321,12 +321,12 @@ public class GrandineEngineApi
                 }
             }
 
-            return new CResultCPayloadStatusV1
+            return new CResult<CPayloadStatusV1>
             {
                 value = new CPayloadStatusV1
                 {
                     status = status,
-                    latest_valid_hash = new COptionCH256
+                    latest_valid_hash = new COption<CH256>
                     {
                         is_something = payloadStatus.Data.LatestValidHash != null,
                         value = latestValidHash,
@@ -337,14 +337,14 @@ public class GrandineEngineApi
         }
         catch (Exception)
         {
-            return new CResultCPayloadStatusV1
+            return new CResult<CPayloadStatusV1>
             {
                 error = 1
             };
         };
     }
 
-    unsafe CResultCPayloadStatusV1 EngineNewPayloadV3(CExecutionPayloadV3 payload, byte** versionedHashes, ulong versionedHashesLen, byte* parentBeaconBlockRoot)
+    unsafe CResult<CPayloadStatusV1> EngineNewPayloadV3(CExecutionPayloadV3 payload, byte** versionedHashes, ulong versionedHashesLen, byte* parentBeaconBlockRoot)
     {
         _logger.Warn("================================================================= engine_newPayloadV3 =================================================================");
 
@@ -433,12 +433,12 @@ public class GrandineEngineApi
                 }
             }
 
-            return new CResultCPayloadStatusV1
+            return new CResult<CPayloadStatusV1>
             {
                 value = new CPayloadStatusV1
                 {
                     status = status,
-                    latest_valid_hash = new COptionCH256
+                    latest_valid_hash = new COption<CH256>
                     {
                         is_something = payloadStatus.Data.LatestValidHash != null,
                         value = latestValidHash,
@@ -449,14 +449,14 @@ public class GrandineEngineApi
         }
         catch (Exception)
         {
-            return new CResultCPayloadStatusV1
+            return new CResult<CPayloadStatusV1>
             {
                 error = 1
             };
         };
     }
 
-    unsafe CResultCPayloadStatusV1 EngineNewPayloadV4(CExecutionPayloadV3 payload, byte** versionedHashes, ulong versionedHashesLen, byte* parentBeaconBlockRoot, CExecutionRequests executionRequests)
+    unsafe CResult<CPayloadStatusV1> EngineNewPayloadV4(CExecutionPayloadV3 payload, byte** versionedHashes, ulong versionedHashesLen, byte* parentBeaconBlockRoot, CExecutionRequests executionRequests)
     {
         _logger.Warn("================================================================= engine_newPayloadV4 =================================================================");
 
@@ -552,12 +552,12 @@ public class GrandineEngineApi
                 }
             }
 
-            return new CResultCPayloadStatusV1
+            return new CResult<CPayloadStatusV1>
             {
                 value = new CPayloadStatusV1
                 {
                     status = status,
-                    latest_valid_hash = new COptionCH256
+                    latest_valid_hash = new COption<CH256>
                     {
                         is_something = payloadStatus.Data.LatestValidHash != null,
                         value = latestValidHash,
@@ -568,14 +568,14 @@ public class GrandineEngineApi
         }
         catch (Exception)
         {
-            return new CResultCPayloadStatusV1
+            return new CResult<CPayloadStatusV1>
             {
                 error = 1
             };
         }
     }
 
-    unsafe CResultCForkChoiceUpdatedResponse EngineForkchoiceUpdatedV1(CForkChoiceStateV1 state, COptionCPayloadAttributesV1 payload)
+    unsafe CResult<CForkChoiceUpdatedResponse> EngineForkchoiceUpdatedV1(CForkChoiceStateV1 state, COption<CPayloadAttributesV1> payload)
     {
         _logger.Warn("================================================================= engine_forkchoiceUpdatedV1 =================================================================");
         try {
@@ -649,20 +649,20 @@ public class GrandineEngineApi
                 }
             }
 
-            return new CResultCForkChoiceUpdatedResponse
+            return new CResult<CForkChoiceUpdatedResponse>
             {
                 value = new CForkChoiceUpdatedResponse
                 {
                     payload_status = new CPayloadStatusV1
                     {
                         status = status,
-                        latest_valid_hash = new COptionCH256
+                        latest_valid_hash = new COption<CH256>
                         {
                             is_something = forkchoiceUpdatedResult.Data.PayloadStatus.LatestValidHash != null,
                             value = latestValidHash,
                         },
                     },
-                    payload_id = new COptionCH64
+                    payload_id = new COption<CH64>
                     {
                         is_something = forkchoiceUpdatedResult.Data.PayloadId != null,
                         value = payloadId,
@@ -673,14 +673,14 @@ public class GrandineEngineApi
         } catch (Exception e) {
             _logger.Error("Exception " + e);
        
-            return new CResultCForkChoiceUpdatedResponse
+            return new CResult<CForkChoiceUpdatedResponse>
             {
                 error = 1
             };
         };
     }
 
-    unsafe CResultCForkChoiceUpdatedResponse EngineForkchoiceUpdatedV2(CForkChoiceStateV1 state, COptionCPayloadAttributesV2 payload)
+    unsafe CResult<CForkChoiceUpdatedResponse> EngineForkchoiceUpdatedV2(CForkChoiceStateV1 state, COption<CPayloadAttributesV2> payload)
     {
         _logger.Warn("================================================================= engine_forkchoiceUpdatedV2 =================================================================");
         try {
@@ -766,20 +766,20 @@ public class GrandineEngineApi
                 }
             }
 
-            return new CResultCForkChoiceUpdatedResponse
+            return new CResult<CForkChoiceUpdatedResponse>
             {
                 value = new CForkChoiceUpdatedResponse
                 {
                     payload_status = new CPayloadStatusV1
                     {
                         status = status,
-                        latest_valid_hash = new COptionCH256
+                        latest_valid_hash = new COption<CH256>
                         {
                             is_something = forkchoiceUpdatedResult.Data.PayloadStatus.LatestValidHash != null,
                             value = latestValidHash,
                         },
                     },
-                    payload_id = new COptionCH64
+                    payload_id = new COption<CH64>
                     {
                         is_something = forkchoiceUpdatedResult.Data.PayloadId != null,
                         value = payloadId,
@@ -790,14 +790,14 @@ public class GrandineEngineApi
         } catch (Exception e) {
             _logger.Error("Exception " + e);
        
-            return new CResultCForkChoiceUpdatedResponse
+            return new CResult<CForkChoiceUpdatedResponse>
             {
                 error = 1
             };
         };
     }
 
-    unsafe CResultCForkChoiceUpdatedResponse EngineForkchoiceUpdatedV3(CForkChoiceStateV1 state, COptionCPayloadAttributesV3 payload)
+    unsafe CResult<CForkChoiceUpdatedResponse> EngineForkchoiceUpdatedV3(CForkChoiceStateV1 state, COption<CPayloadAttributesV3> payload)
     {
         _logger.Warn("================================================================= engine_forkchoiceUpdatedV3 =================================================================");
         try {
@@ -884,20 +884,20 @@ public class GrandineEngineApi
                 }
             }
 
-            return new CResultCForkChoiceUpdatedResponse
+            return new CResult<CForkChoiceUpdatedResponse>
             {
                 value = new CForkChoiceUpdatedResponse
                 {
                     payload_status = new CPayloadStatusV1
                     {
                         status = status,
-                        latest_valid_hash = new COptionCH256
+                        latest_valid_hash = new COption<CH256>
                         {
                             is_something = forkchoiceUpdatedResult.Data.PayloadStatus.LatestValidHash != null,
                             value = latestValidHash,
                         },
                     },
-                    payload_id = new COptionCH64
+                    payload_id = new COption<CH64>
                     {
                         is_something = forkchoiceUpdatedResult.Data.PayloadId != null,
                         value = payloadId,
@@ -908,14 +908,14 @@ public class GrandineEngineApi
         } catch (Exception e) {
             _logger.Error("Exception " + e);
        
-            return new CResultCForkChoiceUpdatedResponse
+            return new CResult<CForkChoiceUpdatedResponse>
             {
                 error = 1
             };
         };
     }
 
-    unsafe CResultCExecutionPayloadV1 EngineGetPayloadV1(byte* payloadId)
+    unsafe CResult<CExecutionPayloadV1> EngineGetPayloadV1(byte* payloadId)
     {
         _logger.Warn("================================================================= engine_getPayloadV1 =================================================================");
 
@@ -991,7 +991,7 @@ public class GrandineEngineApi
                 exPayload.transactions_len = (ulong)transactionsLen;
             }
 
-            return new CResultCExecutionPayloadV1
+            return new CResult<CExecutionPayloadV1>
             {
                 error = 0,
                 value = exPayload,
@@ -1001,14 +1001,14 @@ public class GrandineEngineApi
         {
             _logger.Error("Exception " + e);
 
-            return new CResultCExecutionPayloadV1
+            return new CResult<CExecutionPayloadV1>
             {
                 error = 1
             };
         }
     }
 
-    unsafe CResultCEngineGetPayloadV2Response EngineGetPayloadV2(byte* payloadId)
+    unsafe CResult<CEngineGetPayloadV2Response> EngineGetPayloadV2(byte* payloadId)
     {
         _logger.Warn("================================================================= engine_getPayloadV2 =================================================================");
 
@@ -1107,7 +1107,7 @@ public class GrandineEngineApi
 
             fixed (byte* sourcePtr = payloadData.BlockValue.ToBigEndian()) { Buffer.MemoryCopy(sourcePtr, response.block_value, 32, 32); }
 
-            return new CResultCEngineGetPayloadV2Response
+            return new CResult<CEngineGetPayloadV2Response>
             {
                 error = 0,
                 value = response,
@@ -1117,14 +1117,14 @@ public class GrandineEngineApi
         {
             _logger.Error("Exception " + e);
 
-            return new CResultCEngineGetPayloadV2Response
+            return new CResult<CEngineGetPayloadV2Response>
             {
                 error = 1
             };
         }
     }
 
-    unsafe CResultCEngineGetPayloadV3Response EngineGetPayloadV3(byte* payloadId)
+    unsafe CResult<CEngineGetPayloadV3Response> EngineGetPayloadV3(byte* payloadId)
     {
         _logger.Warn("================================================================= engine_getPayloadV3 =================================================================");
 
@@ -1275,7 +1275,7 @@ public class GrandineEngineApi
 
             response.should_override_builder = payloadData.ShouldOverrideBuilder;
 
-            return new CResultCEngineGetPayloadV3Response
+            return new CResult<CEngineGetPayloadV3Response>
             {
                 error = 0,
                 value = response,
@@ -1285,14 +1285,14 @@ public class GrandineEngineApi
         {
             _logger.Error("Exception " + e);
 
-            return new CResultCEngineGetPayloadV3Response
+            return new CResult<CEngineGetPayloadV3Response>
             {
                 error = 1
             };
         }
     }
 
-    unsafe CResultCEngineGetPayloadV4Response EngineGetPayloadV4(byte* payloadId)
+    unsafe CResult<CEngineGetPayloadV4Response> EngineGetPayloadV4(byte* payloadId)
     {
         _logger.Warn("================================================================= engine_getPayloadV4 =================================================================");
 
@@ -1463,7 +1463,7 @@ public class GrandineEngineApi
 
             response.execution_requests = executionRequests;
 
-            return new CResultCEngineGetPayloadV4Response
+            return new CResult<CEngineGetPayloadV4Response>
             {
                 error = 0,
                 value = response,
@@ -1473,14 +1473,14 @@ public class GrandineEngineApi
         {
             _logger.Error("Exception " + e);
 
-            return new CResultCEngineGetPayloadV4Response
+            return new CResult<CEngineGetPayloadV4Response>
             {
                 error = 1
             };
         }
     }
 
-    unsafe CResultCEngineGetPayloadV5Response EngineGetPayloadV5(byte* payloadId)
+    unsafe CResult<CEngineGetPayloadV5Response> EngineGetPayloadV5(byte* payloadId)
     {
         _logger.Warn("================================================================= engine_getPayloadV5 =================================================================");
 
@@ -1651,7 +1651,7 @@ public class GrandineEngineApi
 
             response.execution_requests = executionRequests;
 
-            return new CResultCEngineGetPayloadV5Response
+            return new CResult<CEngineGetPayloadV5Response>
             {
                 error = 0,
                 value = response,
@@ -1661,14 +1661,14 @@ public class GrandineEngineApi
         {
             _logger.Error("Exception " + e);
 
-            return new CResultCEngineGetPayloadV5Response
+            return new CResult<CEngineGetPayloadV5Response>
             {
                 error = 1
             };
         }
     }
 
-    unsafe CResultCVecCOptionCBlobAndProofV1 EngineGetBlobsV1(byte** versionedHashes, ulong versionedHashesLen)
+    unsafe CResult<CVec<COption<CBlobAndProofV1>>> EngineGetBlobsV1(byte** versionedHashes, ulong versionedHashesLen)
     {
         _logger.Warn("================================================================= engine_getBlobsV1 =================================================================");
         try {
@@ -1686,7 +1686,7 @@ public class GrandineEngineApi
 
             var blobArray = blobs.Data.Select(blob => {
                 if (blob == null) {
-                    return new COptionCBlobAndProofV1
+                    return new COption<CBlobAndProofV1>
                     {
                         is_something = false,
                     };
@@ -1707,7 +1707,7 @@ public class GrandineEngineApi
                 }
                 IntPtr convBlob = Marshal.AllocHGlobal(blob.Blob.Length);
                 Marshal.Copy(blob.Blob, 0, convBlob, blob.Blob.Length);
-                return new COptionCBlobAndProofV1
+                return new COption<CBlobAndProofV1>
                 {
                     is_something = true,
                     value = new CBlobAndProofV1
@@ -1718,30 +1718,30 @@ public class GrandineEngineApi
                 };
             }).ToArray();
 
-            IntPtr res = Marshal.AllocHGlobal(blobArray.Length * Marshal.SizeOf<COptionCBlobAndProofV1>());
+            IntPtr res = Marshal.AllocHGlobal(blobArray.Length * Marshal.SizeOf<COption<CBlobAndProofV1>>());
             for (var i = 0; i < blobArray.Length; ++i) {
-                Marshal.StructureToPtr(blobArray[i], IntPtr.Add(res, i * Marshal.SizeOf<COptionCBlobAndProofV1>()), false);
+                Marshal.StructureToPtr(blobArray[i], IntPtr.Add(res, i * Marshal.SizeOf<COption<CBlobAndProofV1>>()), false);
             };
 
-            return new CResultCVecCOptionCBlobAndProofV1
+            return new CResult<CVec<COption<CBlobAndProofV1>>>
             {
                 error = 0,
-                value = new CVecCOptionCBlobAndProofV1 {
-                    data = (COptionCBlobAndProofV1*)res,
+                value = new CVec<COption<CBlobAndProofV1>> {
+                    data = (COption<CBlobAndProofV1>*)res,
                     data_len = (ulong)blobArray.Length,
                 }
             };
         } catch (Exception e)
         {
             _logger.Error("Exception: " + e);
-            return new CResultCVecCOptionCBlobAndProofV1
+            return new CResult<CVec<COption<CBlobAndProofV1>>>
             {
                 error = 1
             };
         }
     }
 
-    unsafe CResultCOptionCVecCBlobAndProofV2 EngineGetBlobsV2(byte** versionedHashes, ulong versionedHashesLen) {
+    unsafe CResult<COption<CVec<CBlobAndProofV2>>> EngineGetBlobsV2(byte** versionedHashes, ulong versionedHashesLen) {
         _logger.Warn("================================================================= engine_getBlobsV2 =================================================================");
         
         try {
@@ -1759,10 +1759,10 @@ public class GrandineEngineApi
 
             if (blobs.Data == null)
             {
-                return new CResultCOptionCVecCBlobAndProofV2
+                return new CResult<COption<CVec<CBlobAndProofV2>>>
                 {
                     error = 0,
-                    value = new COptionCVecCBlobAndProofV2
+                    value = new COption<CVec<CBlobAndProofV2>>
                     {
                         is_something = false,
                     }
@@ -1789,13 +1789,13 @@ public class GrandineEngineApi
                 Marshal.StructureToPtr(new CBlobAndProofV2 { proof = (CH384*)proofs, blob = (byte*)blob }, IntPtr.Add(result, i * Marshal.SizeOf<CBlobAndProofV2>()), false);
             }
 
-            return new CResultCOptionCVecCBlobAndProofV2
+            return new CResult<COption<CVec<CBlobAndProofV2>>>
             {
                 error = 0,
-                value = new COptionCVecCBlobAndProofV2
+                value = new COption<CVec<CBlobAndProofV2>>
                 {
                     is_something = true,
-                    value = new CVecCBlobAndProofV2
+                    value = new CVec<CBlobAndProofV2>
                     {
                         data = (CBlobAndProofV2*)result,
                         data_len = (ulong)blobsArray.Length
@@ -1805,7 +1805,7 @@ public class GrandineEngineApi
         } catch (Exception e)
         {
             _logger.Error("Exception: " + e);
-            return new CResultCOptionCVecCBlobAndProofV2
+            return new CResult<COption<CVec<CBlobAndProofV2>>>
             {
                 error = 1
             };

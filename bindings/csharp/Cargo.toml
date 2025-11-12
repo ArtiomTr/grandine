@@ -6,5 +6,5 @@ edition = { workspace = true }
 path = "_stub.rs"
 
 [build-dependencies]
-csbindgen = "1.9.3"
+csbindgen = { git = "https://github.com/ArtiomTr/csbindgen.git" }
 toml = "0.5"

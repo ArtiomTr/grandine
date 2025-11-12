@@ -28,45 +28,24 @@ namespace Grandine.Native
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct CResultCPayloadStatusV1
+    public unsafe partial struct CResult<T>
     {
-        public CPayloadStatusV1 value;
+        public T value;
         public ulong error;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct CResultCForkChoiceUpdatedResponse
+    public unsafe partial struct COption<T>
     {
-        public CForkChoiceUpdatedResponse value;
-        public ulong error;
+        [MarshalAs(UnmanagedType.U1)] public bool is_something;
+        public T value;
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct CResultCExecutionPayloadV1
+    public unsafe partial struct CVec<T>
     {
-        public CExecutionPayloadV1 value;
-        public ulong error;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct CResultCEngineGetPayloadV2Response
-    {
-        public CEngineGetPayloadV2Response value;
-        public ulong error;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct CResultCEngineGetPayloadV3Response
-    {
-        public CEngineGetPayloadV3Response value;
-        public ulong error;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct CResultCEngineGetPayloadV4Response
-    {
-        public CEngineGetPayloadV4Response value;
-        public ulong error;
+        public T* data;
+        public ulong data_len;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -170,45 +149,10 @@ namespace Grandine.Native
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct COptionCH256
-    {
-        [MarshalAs(UnmanagedType.U1)] public bool is_something;
-        public CH256 value;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct COptionCH64
-    {
-        [MarshalAs(UnmanagedType.U1)] public bool is_something;
-        public CH64 value;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct COptionCPayloadAttributesV1
-    {
-        [MarshalAs(UnmanagedType.U1)] public bool is_something;
-        public CPayloadAttributesV1 value;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct COptionCPayloadAttributesV2
-    {
-        [MarshalAs(UnmanagedType.U1)] public bool is_something;
-        public CPayloadAttributesV2 value;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct COptionCPayloadAttributesV3
-    {
-        [MarshalAs(UnmanagedType.U1)] public bool is_something;
-        public CPayloadAttributesV3 value;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
     public unsafe partial struct CPayloadStatusV1
     {
         public CPayloadValidationStatus status;
-        public COptionCH256 latest_valid_hash;
+        public COption<CH256> latest_valid_hash;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -258,7 +202,7 @@ namespace Grandine.Native
     public unsafe partial struct CForkChoiceUpdatedResponse
     {
         public CPayloadStatusV1 payload_status;
-        public COptionCH64 payload_id;
+        public COption<CH64> payload_id;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -287,48 +231,6 @@ namespace Grandine.Native
     {
         public CH384 proof;
         public byte* blob;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct COptionCBlobAndProofV1
-    {
-        [MarshalAs(UnmanagedType.U1)] public bool is_something;
-        public CBlobAndProofV1 value;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct CVecCOptionCBlobAndProofV1
-    {
-        public COptionCBlobAndProofV1* data;
-        public ulong data_len;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct CResultCVecCOptionCBlobAndProofV1
-    {
-        public CVecCOptionCBlobAndProofV1 value;
-        public ulong error;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct CVecCBlobAndProofV2
-    {
-        public CBlobAndProofV2* data;
-        public ulong data_len;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct COptionCVecCBlobAndProofV2
-    {
-        [MarshalAs(UnmanagedType.U1)] public bool is_something;
-        public CVecCBlobAndProofV2 value;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct CResultCOptionCVecCBlobAndProofV2
-    {
-        public COptionCVecCBlobAndProofV2 value;
-        public ulong error;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -379,29 +281,22 @@ namespace Grandine.Native
     }
 
     [StructLayout(LayoutKind.Sequential)]
-    public unsafe partial struct CResultCEngineGetPayloadV5Response
-    {
-        public CEngineGetPayloadV5Response value;
-        public ulong error;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
     public unsafe partial struct CEmbedAdapter
     {
-        public delegate* unmanaged[Cdecl]<CExecutionPayloadV1, CResultCPayloadStatusV1> engine_new_payload_v1;
-        public delegate* unmanaged[Cdecl]<CExecutionPayloadV2, CResultCPayloadStatusV1> engine_new_payload_v2;
-        public delegate* unmanaged[Cdecl]<CExecutionPayloadV3, byte**, ulong, byte*, CResultCPayloadStatusV1> engine_new_payload_v3;
-        public delegate* unmanaged[Cdecl]<CExecutionPayloadV3, byte**, ulong, byte*, CExecutionRequests, CResultCPayloadStatusV1> engine_new_payload_v4;
-        public delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COptionCPayloadAttributesV1, CResultCForkChoiceUpdatedResponse> engine_forkchoice_updated_v1;
-        public delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COptionCPayloadAttributesV2, CResultCForkChoiceUpdatedResponse> engine_forkchoice_updated_v2;
-        public delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COptionCPayloadAttributesV3, CResultCForkChoiceUpdatedResponse> engine_forkchoice_updated_v3;
-        public delegate* unmanaged[Cdecl]<byte*, CResultCExecutionPayloadV1> engine_get_payload_v1;
-        public delegate* unmanaged[Cdecl]<byte*, CResultCEngineGetPayloadV2Response> engine_get_payload_v2;
-        public delegate* unmanaged[Cdecl]<byte*, CResultCEngineGetPayloadV3Response> engine_get_payload_v3;
-        public delegate* unmanaged[Cdecl]<byte*, CResultCEngineGetPayloadV4Response> engine_get_payload_v4;
-        public delegate* unmanaged[Cdecl]<byte*, CResultCEngineGetPayloadV5Response> engine_get_payload_v5;
-        public delegate* unmanaged[Cdecl]<byte**, ulong, CResultCVecCOptionCBlobAndProofV1> engine_get_blobs_v1;
-        public delegate* unmanaged[Cdecl]<byte**, ulong, CResultCOptionCVecCBlobAndProofV2> engine_get_blobs_v2;
+        public delegate* unmanaged[Cdecl]<CExecutionPayloadV1, CResult<CPayloadStatusV1>> engine_new_payload_v1;
+        public delegate* unmanaged[Cdecl]<CExecutionPayloadV2, CResult<CPayloadStatusV1>> engine_new_payload_v2;
+        public delegate* unmanaged[Cdecl]<CExecutionPayloadV3, byte**, ulong, byte*, CResult<CPayloadStatusV1>> engine_new_payload_v3;
+        public delegate* unmanaged[Cdecl]<CExecutionPayloadV3, byte**, ulong, byte*, CExecutionRequests, CResult<CPayloadStatusV1>> engine_new_payload_v4;
+        public delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COption<CPayloadAttributesV1>, CResult<CForkChoiceUpdatedResponse>> engine_forkchoice_updated_v1;
+        public delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COption<CPayloadAttributesV2>, CResult<CForkChoiceUpdatedResponse>> engine_forkchoice_updated_v2;
+        public delegate* unmanaged[Cdecl]<CForkChoiceStateV1, COption<CPayloadAttributesV3>, CResult<CForkChoiceUpdatedResponse>> engine_forkchoice_updated_v3;
+        public delegate* unmanaged[Cdecl]<byte*, CResult<CExecutionPayloadV1>> engine_get_payload_v1;
+        public delegate* unmanaged[Cdecl]<byte*, CResult<CEngineGetPayloadV2Response>> engine_get_payload_v2;
+        public delegate* unmanaged[Cdecl]<byte*, CResult<CEngineGetPayloadV3Response>> engine_get_payload_v3;
+        public delegate* unmanaged[Cdecl]<byte*, CResult<CEngineGetPayloadV4Response>> engine_get_payload_v4;
+        public delegate* unmanaged[Cdecl]<byte*, CResult<CEngineGetPayloadV5Response>> engine_get_payload_v5;
+        public delegate* unmanaged[Cdecl]<byte**, ulong, CResult<CVec<COption<CBlobAndProofV1>>>> engine_get_blobs_v1;
+        public delegate* unmanaged[Cdecl]<byte**, ulong, CResult<COption<CVec<CBlobAndProofV2>>>> engine_get_blobs_v2;
         public delegate* unmanaged[Cdecl]<void*, void> free;
     }
 

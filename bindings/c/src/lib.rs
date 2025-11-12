@@ -15,6 +15,7 @@ use primitive_types::{H384, U256};
 use runtime::{grandine_args::GrandineArgs, run};
 use ssz::{ByteList, ByteVector, ContiguousList, ContiguousVector, SszReadDefault, SszWrite};
 use std::ffi::c_void;
+use std::fmt::Debug;
 use std::{ffi::CStr, sync::Arc};
 use try_from_iterator::TryFromIterator;
 use typenum::marker_traits::Unsigned;
@@ -27,161 +28,117 @@ use types::{
 use web3::types::{BlockNumber, H160, H256, H64};
 use web3::types::{Filter, Log, U64};
 
-macro_rules! impl_c_vec {
-    ($type_name:ident, $inner:ty) => {
-        impl $type_name {
-            fn convert(&self, free: unsafe extern "C" fn(ptr: *const c_void)) -> Vec<$inner> {
-                let output =
-                    unsafe { std::slice::from_raw_parts(self.data, self.data_len as usize) }
-                        .to_vec();
-                unsafe { (free)(self.data as *const c_void) };
-                output
-            }
+#[repr(C)]
+struct CResult<T> {
+    value: T,
+    error: u64,
+}
 
-            fn map_convert<V>(
-                &self,
-                mapper: impl FnMut(&$inner) -> V,
-                free: unsafe extern "C" fn(ptr: *const c_void),
-            ) -> Vec<V> {
-                let output =
-                    unsafe { std::slice::from_raw_parts(self.data, self.data_len as usize) }
-                        .iter()
-                        .map(mapper)
-                        .collect::<Vec<_>>();
-                unsafe { (free)(self.data as *const c_void) };
-                output
-            }
+impl<T> Into<Result<T>> for CResult<T> {
+    fn into(self) -> Result<T> {
+        if self.error == 0 {
+            Ok(self.value)
+        } else {
+            anyhow::bail!("failed with error code {}",self.error)
         }
+    }
+}
 
-        impl Default for $type_name {
-            fn default() -> Self {
-                Self {
-                    data: std::ptr::null(),
-                    data_len: 0,
-                }
-            }
+#[repr(C)]
+struct COption<T> {
+    is_something: bool,
+    value: T,
+}
+
+impl<T> COption<T> {
+    pub fn some(value: T) -> Self {
+        Self { is_something: true, value }
+    }
+}
+
+impl<T: Default> COption<T> {
+    pub fn none() -> Self {
+        Self { is_something: false, value: Default::default() }
+    }
+}
+
+impl<T: Clone> Clone for COption<T> {
+    fn clone(&self) -> Self {
+        Self { is_something: self.is_something.clone(), value: self.value.clone() }
+    }
+}
+
+impl<T: Debug> Debug for COption<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("COption").field("is_something", &self.is_something).field("value", &self.value).finish()
+    }
+}
+
+impl<T> Into<Option<T>> for COption<T> {
+    fn into(self) -> Option<T> {
+        if self.is_something {
+            Some(self.value)
+        } else {
+            None
         }
+    }
+}
 
-        impl Into<$type_name> for &Vec<$inner> {
-            fn into(self) -> $type_name {
-                $type_name {
-                    data: self.as_ptr(),
-                    data_len: self.len() as u64,
-                }
-            }
+impl<T: Default> From<Option<T>> for COption<T> {
+    fn from(value: Option<T>) -> Self {
+        match value {
+            Some(value) => COption::some(value),
+            None => COption::none(),
         }
-    };
+    }
 }
 
-macro_rules! impl_c_result {
-    ($type_name:ident, $inner: ty) => {
-        impl Into<Result<$inner>> for $type_name {
-            fn into(self) -> Result<$inner> {
-                if self.error == 0 {
-                    Ok(self.value)
-                } else {
-                    anyhow::bail!("failed with error code {}", self.error)
-                }
-            }
+#[repr(C)]
+struct CVec<T> {
+    data: *const T,
+    data_len: u64,
+}
+
+impl<T: Clone> CVec<T> {
+    fn convert(&self, free: unsafe extern "C" fn(ptr: *const c_void)) -> Vec<T> {
+        let output =
+            unsafe { std::slice::from_raw_parts(self.data, self.data_len as usize) }
+                .to_vec();
+        unsafe { (free)(self.data as *const c_void) };
+        output
+    }
+}
+
+impl<T> CVec<T> {
+    fn map_convert<V>(
+        &self,
+        mapper: impl FnMut(&T) -> V,
+        free: unsafe extern "C" fn(ptr: *const c_void),
+    ) -> Vec<V> {
+        let output =
+            unsafe { std::slice::from_raw_parts(self.data, self.data_len as usize) }
+                .iter()
+                .map(mapper)
+                .collect::<Vec<_>>();
+        unsafe { (free)(self.data as *const c_void) };
+        output
+    }
+}
+
+impl<T> Default for CVec<T> {
+    fn default() -> Self {
+        Self {
+            data: std::ptr::null(),
+            data_len: 0,
         }
-    };
-}
-#[derive(Debug, Clone)]
-#[repr(C)]
-struct CResultU64 {
-    value: u64,
-    error: u64,
+    }
 }
 
-impl_c_result!(CResultU64, u64);
-
-#[derive(Debug)]
-#[repr(C)]
-struct CResultCOptionCEth1Block {
-    value: COptionCEth1Block,
-    error: u64,
-}
-impl_c_result!(CResultCOptionCEth1Block, COptionCEth1Block);
-
-#[derive(Debug)]
-#[repr(C)]
-struct CResultCPayloadStatusV1 {
-    value: CPayloadStatusV1,
-    error: u64,
-}
-impl_c_result!(CResultCPayloadStatusV1, CPayloadStatusV1);
-
-#[derive(Debug)]
-#[repr(C)]
-struct CResultCForkChoiceUpdatedResponse {
-    value: CForkChoiceUpdatedResponse,
-    error: u64,
-}
-impl_c_result!(
-    CResultCForkChoiceUpdatedResponse,
-    CForkChoiceUpdatedResponse
-);
-
-#[derive(Debug)]
-#[repr(C)]
-struct CResultCExecutionPayloadV1 {
-    value: CExecutionPayloadV1,
-    error: u64,
-}
-impl_c_result!(CResultCExecutionPayloadV1, CExecutionPayloadV1);
-
-#[derive(Debug)]
-#[repr(C)]
-struct CResultCEngineGetPayloadV2Response {
-    value: CEngineGetPayloadV2Response,
-    error: u64,
-}
-impl_c_result!(
-    CResultCEngineGetPayloadV2Response,
-    CEngineGetPayloadV2Response
-);
-
-#[derive(Debug)]
-#[repr(C)]
-struct CResultCEngineGetPayloadV3Response {
-    value: CEngineGetPayloadV3Response,
-    error: u64,
-}
-impl_c_result!(
-    CResultCEngineGetPayloadV3Response,
-    CEngineGetPayloadV3Response
-);
-
-#[derive(Debug)]
-#[repr(C)]
-struct CResultCEngineGetPayloadV4Response {
-    value: CEngineGetPayloadV4Response,
-    error: u64,
-}
-impl_c_result!(
-    CResultCEngineGetPayloadV4Response,
-    CEngineGetPayloadV4Response
-);
-
-#[derive(Debug, Default)]
-#[repr(C)]
-struct CEth1Block {
-    hash: [u8; 32],
-    parent_hash: [u8; 32],
-    number: u64,
-    timestamp: u64,
-    total_difficulty: [u8; 32],
-}
-
-impl Into<Eth1Block> for CEth1Block {
-    fn into(self) -> Eth1Block {
-        Eth1Block {
-            hash: self.hash.into(),
-            parent_hash: self.parent_hash.into(),
-            number: self.number,
-            timestamp: self.timestamp,
-            total_difficulty: Uint256::from_be_bytes(self.total_difficulty),
-            deposit_events: Default::default(),
+impl<T> Into<CVec<T>> for &Vec<T> {
+    fn into(self) -> CVec<T> {
+        CVec::<T> {
+            data: self.as_ptr(),
+            data_len: self.len() as u64,
         }
     }
 }
@@ -699,94 +656,6 @@ impl Into<H256> for CH256 {
     }
 }
 
-macro_rules! impl_c_option {
-    ($type_name:ident, $inner:ty) => {
-        impl Into<Option<$inner>> for $type_name {
-            fn into(self) -> Option<$inner> {
-                if self.is_something {
-                    Some(self.value)
-                } else {
-                    None
-                }
-            }
-        }
-
-        impl From<Option<$inner>> for $type_name {
-            fn from(value: Option<$inner>) -> Self {
-                match value {
-                    Some(value) => $type_name {
-                        is_something: true,
-                        value,
-                    },
-                    None => $type_name {
-                        is_something: false,
-                        value: Default::default(),
-                    },
-                }
-            }
-        }
-    };
-}
-
-#[derive(Clone, Debug)]
-#[repr(C)]
-pub struct COptionCH256 {
-    is_something: bool,
-    value: CH256,
-}
-
-impl_c_option!(COptionCH256, CH256);
-
-#[derive(Clone, Debug)]
-#[repr(C)]
-pub struct COptionCH64 {
-    is_something: bool,
-    value: CH64,
-}
-
-impl_c_option!(COptionCH64, CH64);
-
-#[derive(Clone, Debug)]
-#[repr(C)]
-pub struct COptionU64 {
-    is_something: bool,
-    value: u64,
-}
-
-impl_c_option!(COptionU64, u64);
-
-#[derive(Debug)]
-#[repr(C)]
-pub struct COptionCVecCH160 {
-    is_something: bool,
-    value: CVecCH160,
-}
-
-impl_c_option!(COptionCVecCH160, CVecCH160);
-
-#[derive(Clone, Debug)]
-#[repr(C)]
-pub struct COptionCVecCH256 {
-    is_something: bool,
-    value: CVecCH256,
-}
-impl_c_option!(COptionCVecCH256, CVecCH256);
-
-#[derive(Clone, Debug)]
-#[repr(C)]
-pub struct COptionCVecCOptionCVecCH256 {
-    is_something: bool,
-    value: CVecCOptionCVecCH256,
-}
-impl_c_option!(COptionCVecCOptionCVecCH256, CVecCOptionCVecCH256);
-
-#[derive(Clone, Debug, Default)]
-#[repr(C)]
-pub struct COptionCStr {
-    is_something: bool,
-    value: CCharPtr,
-}
-
 #[derive(Clone, Debug)]
 struct CCharPtr(*const c_char);
 
@@ -795,54 +664,11 @@ impl Default for CCharPtr {
         Self(std::ptr::null())
     }
 }
-
-impl_c_option!(COptionCStr, CCharPtr);
-
-#[derive(Clone, Debug)]
-#[repr(C)]
-pub struct COptionBool {
-    is_something: bool,
-    value: bool,
-}
-impl_c_option!(COptionBool, bool);
-
-#[derive(Debug)]
-#[repr(C)]
-pub struct COptionCEth1Block {
-    is_something: bool,
-    value: CEth1Block,
-}
-impl_c_option!(COptionCEth1Block, CEth1Block);
-
-#[derive(Debug)]
-#[repr(C)]
-pub struct COptionCPayloadAttributesV1 {
-    is_something: bool,
-    value: CPayloadAttributesV1,
-}
-impl_c_option!(COptionCPayloadAttributesV1, CPayloadAttributesV1);
-
-#[derive(Debug)]
-#[repr(C)]
-pub struct COptionCPayloadAttributesV2 {
-    is_something: bool,
-    value: CPayloadAttributesV2,
-}
-impl_c_option!(COptionCPayloadAttributesV2, CPayloadAttributesV2);
-
-#[derive(Debug)]
-#[repr(C)]
-pub struct COptionCPayloadAttributesV3 {
-    is_something: bool,
-    value: CPayloadAttributesV3,
-}
-impl_c_option!(COptionCPayloadAttributesV3, CPayloadAttributesV3);
-
 #[derive(Debug)]
 #[repr(C)]
 pub struct CPayloadStatusV1 {
     status: CPayloadValidationStatus,
-    latest_valid_hash: COptionCH256,
+    latest_valid_hash: COption<CH256>,
     // validation_error: COption<*const c_char>, FIXME
 }
 
@@ -1006,7 +832,7 @@ impl Into<H64> for CH64 {
 #[repr(C)]
 pub struct CForkChoiceUpdatedResponse {
     payload_status: CPayloadStatusV1,
-    payload_id: COptionCH64,
+    payload_id: COption<CH64>,
 }
 
 impl Into<eth1_api::RawForkChoiceUpdatedResponse> for CForkChoiceUpdatedResponse {
@@ -1110,7 +936,7 @@ impl Default for CBlobAndProofV1 {
     }
 }
 
-impl COptionCBlobAndProofV1 {
+impl COption<CBlobAndProofV1> {
     pub fn into_with_free(
         &self,
         free: unsafe extern "C" fn(ptr: *const c_void),
@@ -1135,62 +961,6 @@ impl COptionCBlobAndProofV1 {
         }
     }
 }
-
-#[derive(Clone, Debug)]
-#[repr(C)]
-pub struct COptionCBlobAndProofV1 {
-    is_something: bool,
-    value: CBlobAndProofV1,
-}
-
-impl_c_option!(COptionCBlobAndProofV1, CBlobAndProofV1);
-
-#[derive(Debug)]
-#[repr(C)]
-struct CVecCOptionCBlobAndProofV1 {
-    data: *const COptionCBlobAndProofV1,
-    data_len: u64,
-}
-
-impl_c_vec!(CVecCOptionCBlobAndProofV1, COptionCBlobAndProofV1);
-
-#[derive(Debug)]
-#[repr(C)]
-struct CResultCVecCOptionCBlobAndProofV1 {
-    value: CVecCOptionCBlobAndProofV1,
-    error: u64,
-}
-impl_c_result!(
-    CResultCVecCOptionCBlobAndProofV1,
-    CVecCOptionCBlobAndProofV1
-);
-
-#[repr(C)]
-struct CVecCBlobAndProofV2 {
-    data: *const CBlobAndProofV2,
-    data_len: u64,
-}
-
-impl_c_vec!(CVecCBlobAndProofV2, CBlobAndProofV2);
-
-#[repr(C)]
-struct COptionCVecCBlobAndProofV2 {
-    is_something: bool,
-    value: CVecCBlobAndProofV2,
-}
-
-impl_c_option!(COptionCVecCBlobAndProofV2, CVecCBlobAndProofV2);
-
-#[repr(C)]
-struct CResultCOptionCVecCBlobAndProofV2 {
-    value: COptionCVecCBlobAndProofV2,
-    error: u64,
-}
-
-impl_c_result!(
-    CResultCOptionCVecCBlobAndProofV2,
-    COptionCVecCBlobAndProofV2
-);
 
 impl CExecutionRequests {
     fn from(value: ExecutionRequests<Mainnet>) -> (Self, Vec<u8>, Vec<u8>, Vec<u8>, Vec<CRequest>) {
@@ -1500,17 +1270,6 @@ pub struct CEngineGetPayloadV5Response {
     execution_requests: CExecutionRequests,
 }
 
-#[derive(Debug)]
-#[repr(C)]
-struct CResultCEngineGetPayloadV5Response {
-    value: CEngineGetPayloadV5Response,
-    error: u64,
-}
-impl_c_result!(
-    CResultCEngineGetPayloadV5Response,
-    CEngineGetPayloadV5Response
-);
-
 impl CEngineGetPayloadV5Response {
     fn into_with_free(
         self,
@@ -1526,200 +1285,59 @@ impl CEngineGetPayloadV5Response {
     }
 }
 
-#[repr(C)]
-pub enum CBlockNumber {
-    /// Finalized block
-    Finalized,
-    /// Safe block
-    Safe,
-    /// Latest block
-    Latest,
-    /// Earliest block (genesis)
-    Earliest,
-    /// Pending block (not yet part of the blockchain)
-    Pending,
-    /// Block by number from canon chain
-    Number(u64),
-}
-
 #[derive(Clone, Debug, Default)]
 #[repr(C)]
 struct CH160([u8; 20]);
 
 #[repr(C)]
-pub struct CFilter {
-    from_block: COptionU64,
-    to_block: COptionU64,
-    address: COptionCVecCH160,
-    topics: COptionCVecCOptionCVecCH256,
-    limit: COptionU64,
-}
-
-fn block_number_into_u64(b: BlockNumber) -> u64 {
-    match b {
-        BlockNumber::Safe => u64::MAX - 3,
-        BlockNumber::Finalized => u64::MAX - 2,
-        BlockNumber::Latest => u64::MAX - 1,
-        BlockNumber::Pending => u64::MAX,
-        BlockNumber::Earliest => 0,
-        BlockNumber::Number(number) => number.as_u64(),
-    }
-}
-
-// impl CFilter {
-//     fn from(
-//         value: Filter,
-//     ) -> (
-//         Self,
-//         Option<Vec<CH160>>,
-//         Vec<Vec<CH256>>,
-//         Option<Vec<COptionCVecCH256>>,
-//     ) {
-//         let address = value.address.map(|v| {
-//             let v: Vec<H160> = v.0.into();
-//             let v = v.into_iter().map(|c| CH160(c.0)).collect::<Vec<_>>();
-//             let cv: CVecCH160 = (&v).into();
-
-//             (cv, v)
-//         });
-
-//         let (address, vec) = if let Some((a, v)) = address {
-//             (Some(a), Some(v))
-//         } else {
-//             (None, None)
-//         };
-
-//         let mut allocated_topics = Vec::new();
-
-//         let topics = value.topics.map(|v| {
-//             let vec = v
-//                 .into_iter()
-//                 .map(|v| {
-//                     if let Some(v) = v {
-//                         let v: Vec<H256> = v.0.into();
-//                         let v = v.iter().map(|v| CH256(v.0)).collect::<Vec<_>>();
-//                         allocated_topics.push(v);
-
-//                         COptionCVecCH256 {
-//                             is_something: true,
-//                             value: allocated_topics.last().unwrap().into(),
-//                         }
-//                     } else {
-//                         COptionCVecCH256 {
-//                             is_something: false,
-//                             value: Default::default(),
-//                         }
-//                     }
-//                 })
-//                 .collect::<Vec<COptionCVecCH256>>();
-//             let cvec: CVecCOptionCVecCH256 = (&vec).into();
-
-//             (cvec, vec)
-//         });
-
-//         let (topics, vec2) = if let Some((t, v)) = topics {
-//             (Some(t), Some(v))
-//         } else {
-//             (None, None)
-//         };
-
-//         (
-//             CFilter {
-//                 from_block: value.from_block.map(block_number_into_u64).into(),
-//                 to_block: value.to_block.map(block_number_into_u64).into(),
-//                 address: address.into(),
-//                 topics: topics.into(),
-//                 limit: value.limit.map(|v| v as u64).into(),
-//             },
-//             vec,
-//             allocated_topics,
-//             vec2,
-//         )
-//     }
-// }
-
-#[derive(Debug)]
-#[repr(C)]
-struct CVecCH160 {
-    data: *const CH160,
-    data_len: u64,
-}
-
-impl_c_vec!(CVecCH160, CH160);
-
-#[derive(Clone, Debug)]
-#[repr(C)]
-struct CVecCH256 {
-    data: *const CH256,
-    data_len: u64,
-}
-impl_c_vec!(CVecCH256, CH256);
-
-#[derive(Clone, Debug)]
-#[repr(C)]
-struct CVecCOptionCVecCH256 {
-    data: *const COptionCVecCH256,
-    data_len: u64,
-}
-impl_c_vec!(CVecCOptionCVecCH256, COptionCVecCH256);
-
-#[derive(Debug)]
-#[repr(C)]
-struct CVecU8 {
-    data: *const u8,
-    data_len: u64,
-}
-impl_c_vec!(CVecU8, u8);
-
-#[repr(C)]
 pub struct CEmbedAdapter {
     engine_new_payload_v1:
-        unsafe extern "C" fn(payload: CExecutionPayloadV1) -> CResultCPayloadStatusV1,
+        unsafe extern "C" fn(payload: CExecutionPayloadV1) -> CResult<CPayloadStatusV1>,
     engine_new_payload_v2:
-        unsafe extern "C" fn(payload: CExecutionPayloadV2) -> CResultCPayloadStatusV1,
+        unsafe extern "C" fn(payload: CExecutionPayloadV2) -> CResult<CPayloadStatusV1>,
     engine_new_payload_v3: unsafe extern "C" fn(
         payload: CExecutionPayloadV3,
         versioned_hashes: *const *const u8,
         versioned_hashes_len: u64,
         parent_beacon_block_root: *const u8,
-    ) -> CResultCPayloadStatusV1,
+    ) -> CResult<CPayloadStatusV1>,
     engine_new_payload_v4: unsafe extern "C" fn(
         payload: CExecutionPayloadV3,
         versioned_hashes: *const *const u8,
         versioned_hashes_len: u64,
         parent_beacon_block_root: *const u8,
         execution_requests: CExecutionRequests,
-    ) -> CResultCPayloadStatusV1,
+    ) -> CResult<CPayloadStatusV1>,
     engine_forkchoice_updated_v1: unsafe extern "C" fn(
         state: CForkChoiceStateV1,
-        payload: COptionCPayloadAttributesV1,
-    ) -> CResultCForkChoiceUpdatedResponse,
+        payload: COption<CPayloadAttributesV1>,
+    ) -> CResult<CForkChoiceUpdatedResponse>,
     engine_forkchoice_updated_v2: unsafe extern "C" fn(
         state: CForkChoiceStateV1,
-        payload: COptionCPayloadAttributesV2,
-    ) -> CResultCForkChoiceUpdatedResponse,
+        payload: COption<CPayloadAttributesV2>,
+    ) -> CResult<CForkChoiceUpdatedResponse>,
     engine_forkchoice_updated_v3: unsafe extern "C" fn(
         state: CForkChoiceStateV1,
-        payload: COptionCPayloadAttributesV3,
-    ) -> CResultCForkChoiceUpdatedResponse,
+        payload: COption<CPayloadAttributesV3>,
+    ) -> CResult<CForkChoiceUpdatedResponse>,
     engine_get_payload_v1:
-        unsafe extern "C" fn(payload_id: *const u8) -> CResultCExecutionPayloadV1,
+        unsafe extern "C" fn(payload_id: *const u8) -> CResult<CExecutionPayloadV1>,
     engine_get_payload_v2:
-        unsafe extern "C" fn(payload_id: *const u8) -> CResultCEngineGetPayloadV2Response,
+        unsafe extern "C" fn(payload_id: *const u8) -> CResult<CEngineGetPayloadV2Response>,
     engine_get_payload_v3:
-        unsafe extern "C" fn(payload_id: *const u8) -> CResultCEngineGetPayloadV3Response,
+        unsafe extern "C" fn(payload_id: *const u8) -> CResult<CEngineGetPayloadV3Response>,
     engine_get_payload_v4:
-        unsafe extern "C" fn(payload_id: *const u8) -> CResultCEngineGetPayloadV4Response,
+        unsafe extern "C" fn(payload_id: *const u8) -> CResult<CEngineGetPayloadV4Response>,
     engine_get_payload_v5:
-        unsafe extern "C" fn(payload_id: *const u8) -> CResultCEngineGetPayloadV5Response,
+        unsafe extern "C" fn(payload_id: *const u8) -> CResult<CEngineGetPayloadV5Response>,
     engine_get_blobs_v1: unsafe extern "C" fn(
         versioned_hashes: *const *const u8,
         versioned_hashes_len: u64,
-    ) -> CResultCVecCOptionCBlobAndProofV1,
+    ) -> CResult<CVec<COption<CBlobAndProofV1>>>,
     engine_get_blobs_v2: unsafe extern "C" fn(
         versioned_hashes: *const *const u8,
         versioned_hashes_len: u64,
-    ) -> CResultCOptionCVecCBlobAndProofV2,
+    ) -> CResult<COption<CVec<CBlobAndProofV2>>>,
     free: unsafe extern "C" fn(ptr: *const core::ffi::c_void),
 }
 
@@ -1866,14 +1484,14 @@ impl eth1_api::EmbedAdapter for CEmbedAdapter {
         let payload = payload.map(CPayloadAttributesV2::convert);
         let (payload, vec) = match payload {
             Some((value, vec)) => (
-                COptionCPayloadAttributesV2 {
+                COption::<CPayloadAttributesV2> {
                     is_something: true,
                     value,
                 },
                 Some(vec),
             ),
             None => (
-                COptionCPayloadAttributesV2 {
+                COption::<CPayloadAttributesV2> {
                     is_something: false,
                     value: Default::default(),
                 },
@@ -1898,14 +1516,14 @@ impl eth1_api::EmbedAdapter for CEmbedAdapter {
         let payload = payload.map(CPayloadAttributesV3::convert);
         let (payload, vec) = match payload {
             Some((value, vec)) => (
-                COptionCPayloadAttributesV3 {
+                COption::<CPayloadAttributesV3> {
                     is_something: true,
                     value,
                 },
                 Some(vec),
             ),
             None => (
-                COptionCPayloadAttributesV3 {
+                COption::<CPayloadAttributesV3> {
                     is_something: false,
                     value: Default::default(),
                 },
@@ -2009,7 +1627,7 @@ impl eth1_api::EmbedAdapter for CEmbedAdapter {
 
         let output: Result<_, _> = raw_output.into();
         let output = output.map(|value| {
-            let value: Option<CVecCBlobAndProofV2> = value.into();
+            let value: Option<CVec<CBlobAndProofV2>> = value.into();
             value.map(|blobs| {
                 blobs.map_convert(
                     |item| -> BlobAndProofV2<Mainnet> { item.into_with_free(self.free) },
