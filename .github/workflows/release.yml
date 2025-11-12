@@ -286,7 +286,7 @@ jobs:
   publish:
     name: Draft release
     if: github.event_name == 'push' && github.event.ref != 'refs/heads/develop'
-    needs: [build, pack_nethermind]
+    needs: [version, build, pack_nethermind]
     env:
       GRANDINE_VERSION: ${{ needs.version.outputs.version }}
       NETHERMIND_VERSION: ${{ needs.version.outputs.nethermind }}
