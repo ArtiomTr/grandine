@@ -311,3 +311,5 @@ jobs:
           files: build/**
           draft: true
           tag_name: ${{ env.GRANDINE_VERSION }}
+          preserve_order: true
+          fail_on_unmatched_files: true
