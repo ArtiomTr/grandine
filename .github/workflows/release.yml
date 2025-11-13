@@ -299,6 +299,9 @@ jobs:
           pattern: grandine-*
           path: build
 
+      - name: List artifacts
+        run: apt-get update && apt-get install tree && tree -L 2 build
+
         # this step can't be done in pack_nethermind, as then we would have zip inside zip in artifacts
       - name: Archive grandine-nethermind versions
         shell: bash
