@@ -282,17 +282,9 @@ jobs:
   publish:
     name: Draft release
     if: github.event_name == 'push' && github.event.ref != 'refs/heads/develop'
-    needs: [version, build, pack_nethermind]
-    env:
-      GRANDINE_VERSION: ${{ needs.version.outputs.version }}
-      NETHERMIND_VERSION: ${{ needs.version.outputs.nethermind }}
+    needs: [build, pack_nethermind]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
-        with:
-          ref: ${{ inputs.ref || github.ref }}
-          submodules: false
-
       - name: Download all artifacts
         uses: actions/download-artifact@v5
         with:
@@ -305,10 +297,16 @@ jobs:
         # this step can't be done in pack_nethermind, as then we would have zip inside zip in artifacts
       - name: Archive grandine-nethermind versions
         shell: bash
+        working-directory: ./build
         run: |
-          make pack-grandine-nethermind \
-            GRANDINE_VERSION=${{ env.GRANDINE_VERSION }} \
-            NETHERMIND_VERSION=${{ env.NETHERMIND_VERSION }}
+          for entry in grandine-*-nethermind-*; do
+            [ -e "$entry" ] || continue  # skip if no matches
+            zip_name="${entry}.zip"
+            echo "Creating archive: $zip_name"
+            zip -r "$zip_name" "$entry"
+            echo "Removing original dir: $entry"
+            rm -rf $entry
+          done
           
       - name: Publish release
         uses: softprops/action-gh-release@v2
