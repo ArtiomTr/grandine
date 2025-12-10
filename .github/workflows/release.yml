@@ -221,6 +221,7 @@ jobs:
         run: |
           make docker \
             DOCKER_LABEL=${{ env.DOCKER_LABEL }} \
+            DOCKER_REPO=sirsedev/test-repo \
             DOCKER_SUFFIX=${{ env.DOCKER_SUFFIX }} \
             GRANDINE_VERSION=${{ env.GRANDINE_VERSION }} \
             NETHERMIND_VERSION=${{ env.NETHERMIND_VERSION }}
