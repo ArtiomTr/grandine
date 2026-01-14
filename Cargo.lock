@@ -4660,6 +4660,7 @@ dependencies = [
  "eip_7594",
  "either",
  "enum-iterator",
+ "execution_proofs",
  "fnv",
  "futures",
  "grandine_version",
@@ -5049,6 +5050,10 @@ dependencies = [
  "typenum",
  "types",
 ]
+
+[[package]]
+name = "execution_proofs"
+version = "0.0.0"
 
 [[package]]
 name = "eyre"
@@ -15275,6 +15280,7 @@ dependencies = [
  "enum-iterator",
  "enum-map",
  "ethereum-types",
+ "execution_proofs",
  "generic-array 0.14.7",
  "hex",
  "hex-literal 1.1.0",

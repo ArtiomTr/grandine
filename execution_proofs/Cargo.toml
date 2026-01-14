@@ -1,0 +1,9 @@
+[package]
+name = "execution_proofs"
+edition = { workspace = true }
+authors = ["Grandine <info@grandine.io>"]
+
+[lints]
+workspace = true
+
+[dependencies]

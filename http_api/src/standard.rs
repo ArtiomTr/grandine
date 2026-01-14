@@ -2145,6 +2145,11 @@ pub async fn submit_pool_bls_to_execution_change(
     Ok(())
 }
 
+/// `POST /eth/v1/beacon/pool/execution_proofs`
+pub async fn submit_pool_execution_proofs() {
+    todo!();
+}
+
 /// `GET /eth/v1/config/fork_schedule`
 pub async fn fork_schedule<P: Preset>(
     State(chain_config): State<Arc<ChainConfig>>,

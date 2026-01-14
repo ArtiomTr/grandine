@@ -1191,6 +1191,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "execution_proofs"
+version = "0.0.0"
+
+[[package]]
 name = "features"
 version = "0.0.0"
 dependencies = [
@@ -3910,6 +3914,7 @@ dependencies = [
  "enum-iterator",
  "enum-map",
  "ethereum-types",
+ "execution_proofs",
  "generic-array",
  "hex",
  "hex-literal 1.0.0",

@@ -3,6 +3,7 @@ use std::{borrow::Cow, collections::BTreeMap};
 
 use derive_more::Constructor;
 use enum_iterator::Sequence as _;
+use execution_proofs::DEFAULT_MIN_PROOFS_REQUIRED;
 use hex_literal::hex;
 use itertools::Itertools as _;
 use nonzero_ext::nonzero;
@@ -203,6 +204,16 @@ pub struct Config {
     #[serde(skip_serializing)]
     pub blacklisted_blocks: Vec<H256>,
 
+    // zkVM
+    #[serde(skip)]
+    pub zkvm_enabled: bool,
+    #[serde(skip)]
+    pub zkvm_min_proofs_required: usize,
+
+    // zkVM networking
+    #[serde(skip)]
+    pub min_epochs_for_execution_proof_requests: u64,
+
     // Derived
     #[serde(skip)]
     pub max_data_columns_by_root_request: OnceCell<usize>,
@@ -329,6 +340,10 @@ impl Default for Config {
             blacklisted_blocks: vec![],
 
             max_data_columns_by_root_request: OnceCell::new(),
+
+            zkvm_enabled: false,
+            zkvm_min_proofs_required: DEFAULT_MIN_PROOFS_REQUIRED,
+            min_epochs_for_execution_proof_requests: 2,
 
             // Later phases and other unknown variables
             unknown: BTreeMap::new(),
@@ -979,6 +994,11 @@ impl Config {
     #[must_use]
     pub const fn is_peerdas_scheduled(&self) -> bool {
         self.fulu_fork_epoch != FAR_FUTURE_EPOCH
+    }
+
+    #[must_use]
+    pub const fn is_zkvm_enabled(&self) -> bool {
+        self.zkvm_enabled
     }
 
     #[must_use]

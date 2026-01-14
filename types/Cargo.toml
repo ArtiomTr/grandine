@@ -17,6 +17,7 @@ duplicate = { workspace = true }
 enum-iterator = { workspace = true }
 enum-map = { workspace = true }
 ethereum-types = { workspace = true }
+execution_proofs = { workspace = true }
 generic-array = { workspace = true }
 hex = { workspace = true }
 hex-literal = { workspace = true }
