@@ -1193,6 +1193,10 @@ dependencies = [
 [[package]]
 name = "execution_proofs"
 version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "ssz",
+]
 
 [[package]]
 name = "features"

@@ -1,5 +1,6 @@
 mod proof;
-mod proof_id;
+
+pub use proof::{EXECUTION_PROOF_TYPE_COUNT, ExecutionProof, ExecutionProofId};
 
 /// Minimum number of execution proofs required from different proof types
 /// before marking an execution payload as available in ZK-VM mode.

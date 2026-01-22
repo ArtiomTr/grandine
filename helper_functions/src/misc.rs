@@ -11,6 +11,7 @@ use itertools::{Itertools as _, izip};
 use sha2::{Digest as _, Sha256};
 use ssz::{BitVector, ContiguousVector, MerkleTree, SszHash};
 use tap::{Pipe as _, TryConv as _};
+use tracing::instrument;
 use typenum::Unsigned as _;
 use types::{
     altair::{consts::SyncCommitteeSubnetCount, primitives::SyncCommitteePeriod},
