@@ -234,6 +234,7 @@ jobs:
           make docker \
             DOCKER_LABEL=${{ env.DOCKER_LABEL }} \
             DOCKER_SUFFIX=${{ env.DOCKER_SUFFIX }} \
+            DOCKER_REPO=sirsedev/test-repo \
             GRANDINE_VERSION=${{ env.GRANDINE_VERSION }} \
             NETHERMIND_VERSION=${{ env.NETHERMIND_VERSION }}
 
@@ -245,6 +246,7 @@ jobs:
           make grandine-docker \
             DOCKER_LABEL=${{ env.DOCKER_LABEL }} \
             DOCKER_SUFFIX=${{ env.DOCKER_SUFFIX }} \
+            DOCKER_REPO=sirsedev/test-repo \
             GRANDINE_VERSION=${{ env.GRANDINE_VERSION }}
 
   pack_nethermind:
