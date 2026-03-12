@@ -3,7 +3,7 @@ name: Create release
 on:
   push:
     branches:
-      - develop
+      - fix/install-nethermind-reference-assemblies-from-github-release-test
     tags:
       - '**'
   workflow_dispatch:
@@ -40,9 +40,9 @@ jobs:
             return release.data.tag_name;
     outputs:
       commit: ${{ steps.git-vars.outputs.sha_short }}
-      version: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/develop' && github.ref_name) || steps.git-vars.outputs.sha_short }}
+      version: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/fix/install-nethermind-reference-assemblies-from-github-release-test' && github.ref_name) || steps.git-vars.outputs.sha_short }}
       nethermind: ${{ inputs.nethermind_version || steps.nethermind-tag.outputs.result }}
-      label: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/develop' && 'stable') || 'unstable' }}
+      label: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/fix/install-nethermind-reference-assemblies-from-github-release-test' && 'stable') || 'unstable' }}
 
   build:
     name: Build binary for target ${{ matrix.target }}
@@ -249,6 +249,7 @@ jobs:
         run: |
           make grandine-docker \
             DOCKER_LABEL=${{ env.DOCKER_LABEL }} \
+            DOCKER_REPO=sirsedev/test-repo \
             DOCKER_SUFFIX=${{ env.DOCKER_SUFFIX }} \
             GRANDINE_VERSION=${{ env.GRANDINE_VERSION }}
 
