@@ -3,7 +3,7 @@ name: Create release
 on:
   push:
     branches:
-      - fix/nethermind-reference-assemblies-test
+      - fix/nethermind-reference-assemblies-test-2
     tags:
       - '**'
   workflow_dispatch:
@@ -58,7 +58,7 @@ jobs:
             ];
 
             if (
-              (context.eventName == 'push' && context.ref != 'refs/heads/fix/nethermind-reference-assemblies-test') ||
+              (context.eventName == 'push' && context.ref != 'refs/heads/fix/nethermind-reference-assemblies-test-2') ||
               context.eventName == 'workflow_dispatch') {
 
               // add production targets, if we're building stable release, or build is requested manually
@@ -88,9 +88,9 @@ jobs:
 
     outputs:
       commit: ${{ steps.git-vars.outputs.sha_short }}
-      version: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/fix/nethermind-reference-assemblies-test' && github.ref_name) || steps.git-vars.outputs.sha_short }}
+      version: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/fix/nethermind-reference-assemblies-test-2' && github.ref_name) || steps.git-vars.outputs.sha_short }}
       nethermind: ${{ inputs.nethermind_version || steps.nethermind-tag.outputs.result }}
-      label: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/fix/nethermind-reference-assemblies-test' && 'stable') || 'unstable' }}
+      label: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/fix/nethermind-reference-assemblies-test-2' && 'stable') || 'unstable' }}
       matrix: ${{ steps.matrix-vars.outputs.result }}
 
   build:

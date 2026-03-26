@@ -58,7 +58,6 @@ public class GrandineClient : IAsyncDisposable
 {
     private static bool initialized = false;
 
-    private readonly EngineNewPayloadV1Delegate engineNewPayloadV1;
     private readonly EngineNewPayloadV2Delegate engineNewPayloadV2;
     private readonly EngineNewPayloadV3Delegate engineNewPayloadV3;
     private readonly EngineNewPayloadV4Delegate engineNewPayloadV4;
