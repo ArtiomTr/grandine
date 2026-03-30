@@ -28,6 +28,7 @@ use crate::{
     altair::consts::SyncCommitteeSubnetCount,
     bellatrix::primitives::Transaction,
     capella::containers::{SignedBlsToExecutionChange, Withdrawal},
+    collections::Ptc,
     config::Config,
     deneb::{
         consts::BytesPerFieldElement,
@@ -107,6 +108,15 @@ pub trait Preset: Copy + Eq + Ord + Hash + Default + Debug + Send + Sync + 'stat
                     ValidatorIndex,
                     UnhashedBundleSize<ValidatorIndex>,
                 > + Debug
+                            + Send
+                            + Sync,
+            >,
+        > + Add<
+            U2,
+            Output: Mul<
+                Self::SlotsPerEpoch,
+                Output: PersistentVectorElements<Ptc<Self>, UnhashedBundleSize<Ptc<Self>>>
+                            + Debug
                             + Send
                             + Sync,
             >,
@@ -609,6 +619,9 @@ pub type SlotsPerHistoricalRoot<P> =
 
 pub type ProposerLookaheadLength<P> =
     Prod<Sum<<P as Preset>::MinSeedLookahead, U1>, <P as Preset>::SlotsPerEpoch>;
+
+pub type PtcWindowLength<P> =
+    Prod<Sum<<P as Preset>::MinSeedLookahead, U2>, <P as Preset>::SlotsPerEpoch>;
 
 pub type BuilderPendingPaymentsLength<P> = Prod<<P as Preset>::SlotsPerEpoch, U2>;
 
