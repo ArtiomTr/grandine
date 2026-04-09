@@ -25,9 +25,10 @@ pub use crate::{
     type_level::{
         BitVectorBits, ByteVectorBytes, BytesToDepth, ContiguousVectorElements, FitsInU64,
         MerkleBits, MerkleElements, MinimumBundleSize, PersistentVectorElements, ProofSize,
-        UnhashedBundleSize,
+        IncompletePersistentVectorElements, UnhashedBundleSize,
     },
     uint256::Uint256,
+    incomplete_persistent_vector::IncompletePersistentVector,
     zero_default::ZeroDefault,
 };
 
@@ -55,6 +56,7 @@ mod shared;
 mod size;
 mod type_level;
 mod uint256;
+mod incomplete_persistent_vector;
 mod zero_default;
 
 #[cfg(test)]
