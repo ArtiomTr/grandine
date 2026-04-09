@@ -9,7 +9,7 @@ use anyhow::Result;
 use bls::{SignatureBytes, traits::SignatureBytes as _};
 use itertools::Itertools as _;
 use pubkey_cache::PubkeyCache;
-use ssz::{BitVector, PersistentList, PersistentVector};
+use ssz::{BitVector, IncompletePersistentVector, PersistentList, PersistentVector};
 use std_ext::ArcExt as _;
 use try_from_iterator::TryFromIterator as _;
 use typenum::Unsigned as _;
@@ -907,7 +907,7 @@ pub fn upgrade_to_gloas<P: Preset>(
         builder_pending_withdrawals: PersistentList::default(),
         latest_block_hash: latest_execution_payload_header.block_hash,
         payload_expected_withdrawals: PersistentList::default(),
-        ptc_window: PersistentVector::default(),
+        ptc_window: IncompletePersistentVector::default(),
         // Cache
         cache,
     };
