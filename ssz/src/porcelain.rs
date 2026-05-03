@@ -86,3 +86,11 @@ pub trait SszHash {
 
     fn hash_tree_root(&self) -> H256;
 }
+
+pub trait SszDiff {
+    type Diff: SszWrite + SszReadDefault;
+
+    fn diff(&self, other: &Self) -> Self::Diff;
+
+    fn apply(&mut self, diff: &Self::Diff);
+}

@@ -20,7 +20,7 @@ pub use crate::{
     merkle_tree::{MerkleTree, ProofWithLength, mix_in_length},
     persistent_list::PersistentList,
     persistent_vector::PersistentVector,
-    porcelain::{SszHash, SszRead, SszReadDefault, SszSize, SszWrite},
+    porcelain::{SszDiff, SszHash, SszRead, SszReadDefault, SszSize, SszWrite},
     shared::{read_offset_unchecked, subslice, write_offset},
     size::Size,
     type_level::{

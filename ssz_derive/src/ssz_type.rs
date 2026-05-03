@@ -10,7 +10,7 @@ use proc_macro2::{Span, TokenStream};
 use quote::{ToTokens as _, TokenStreamExt as _, format_ident, quote};
 use syn::{
     Error, Expr, Generics, Ident, ImplGenerics, ImplItemFn, ImplItemType, Member, Path,
-    TypeGenerics, TypeParam, WhereClause, WherePredicate, parse_quote,
+    TypeGenerics, TypeParam, Visibility, WhereClause, WherePredicate, parse_quote,
     punctuated::Punctuated,
     token::{Comma, Where},
 };
@@ -27,6 +27,7 @@ use crate::{crate_path, ssz_field::SszField};
 // generic. We accept types of all shapes and validate them ourselves in `SszType::all_fields`.
 #[darling(attributes(ssz))]
 pub struct SszType {
+    vis: Visibility,
     ident: Ident,
     generics: Generics,
     data: Data<(), SszField>,
@@ -39,6 +40,8 @@ pub struct SszType {
     bound: Option<Punctuated<WherePredicate, Comma>>,
     bound_for_read: Option<Punctuated<WherePredicate, Comma>>,
     // Attributes defined using `darling::util::Flag` cannot be set to `false`.
+    #[darling(default)]
+    derive_diff: bool,
     #[darling(default = "default_to_true")]
     derive_hash: bool,
     #[darling(default = "default_to_true")]
@@ -103,6 +106,26 @@ impl SszType {
             });
         }
 
+        if self.derive_diff {
+            let (impl_generics, where_clause) = self.split_for_diff_impl(&ssz)?;
+            let diff_struct = self.diff_struct(&ssz)?;
+            let diff_type_impl = self.diff_type_impl(&ssz)?;
+            let diff_fn_impl = self.diff_fn_impl(&ssz)?;
+            let apply_fn_impl = self.apply_fn_impl(&ssz)?;
+
+            impls.append_all(quote! {
+                #diff_struct
+
+                impl #impl_generics #ssz::SszDiff for #ident #ty_generics #where_clause {
+                    #diff_type_impl
+
+                    #diff_fn_impl
+
+                    #apply_fn_impl
+                }
+            });
+        }
+
         if self.derive_hash {
             let packing_factor_type_impl = self.packing_factor_type_impl(&ssz)?;
             let hash_tree_root_fn_impl = self.hash_tree_root_fn_impl(&ssz)?;
@@ -122,13 +145,14 @@ impl SszType {
     fn validate(&self) -> Result<(), Error> {
         let Self {
             derive_hash,
+            derive_diff,
             derive_read,
             derive_size,
             derive_write,
             ..
         } = *self;
 
-        if !(derive_hash || derive_read || derive_size || derive_write) {
+        if !(derive_diff || derive_hash || derive_read || derive_size || derive_write) {
             return Err(Error::new(
                 Span::call_site(),
                 "at least one impl must be derived",
@@ -151,6 +175,29 @@ impl SszType {
             .or_else(|| where_clause.cloned());
 
         (impl_generics, ty_generics, where_clause)
+    }
+
+    fn split_for_diff_impl(
+        &self,
+        ssz: &Path,
+    ) -> Result<(ImplGenerics<'_>, Option<WhereClause>), Error> {
+        let (impl_generics, _, where_clause) = self.generics.split_for_impl();
+
+        let mut where_clause = self
+            .bound
+            .clone()
+            .map(|predicates| WhereClause {
+                where_token: Where::default(),
+                predicates,
+            })
+            .or_else(|| where_clause.cloned())
+            .unwrap_or_else(|| parse_quote! { where });
+
+        where_clause
+            .predicates
+            .extend(self.ssz_diff_predicates(ssz)?);
+
+        Ok((impl_generics, Some(where_clause)))
     }
 
     fn split_for_read_impl(&self) -> (Generics, Option<WhereClause>) {
@@ -475,6 +522,122 @@ impl SszType {
                 #root
             }
         })
+    }
+
+    fn diff_struct(&self, ssz: &Path) -> Result<TokenStream, Error> {
+        let vis = &self.vis;
+        let diff_ident = self.diff_ident();
+        let diff_generics = self.diff_generics(ssz)?;
+        let fields = self.unskipped_fields()?.collect_vec();
+        let field_defs = fields.iter().map(|(member, ssz_field)| {
+            let ty = &ssz_field.ty;
+
+            match member {
+                Member::Named(ident) => quote! { pub #ident: <#ty as #ssz::SszDiff>::Diff, },
+                Member::Unnamed(_) => quote! { pub <#ty as #ssz::SszDiff>::Diff, },
+            }
+        });
+
+        let internal_attr = self.internal.then(|| quote! { #[ssz(internal)] });
+
+        let struct_def = if fields
+            .iter()
+            .all(|(member, _)| matches!(member, Member::Named(_)))
+        {
+            quote! {
+                #vis struct #diff_ident #diff_generics {
+                    #(#field_defs)*
+                }
+            }
+        } else {
+            quote! {
+                #vis struct #diff_ident #diff_generics(#(#field_defs)*);
+            }
+        };
+
+        Ok(quote! {
+            #[derive(#ssz::Ssz)]
+            #[ssz(derive_hash = false, derive_diff = false)]
+            #internal_attr
+            #struct_def
+        })
+    }
+
+    fn diff_type_impl(&self, _ssz: &Path) -> Result<ImplItemType, Error> {
+        let diff_ident = self.diff_ident();
+        let (_, ty_generics, _) = self.generics.split_for_impl();
+
+        Ok(parse_quote! { type Diff = #diff_ident #ty_generics; })
+    }
+
+    fn diff_fn_impl(&self, ssz: &Path) -> Result<ImplItemFn, Error> {
+        let diff_ident = self.diff_ident();
+        let fields = self.unskipped_fields()?.collect_vec();
+        let field_exprs = fields.iter().map(|(member, _)| match member {
+            Member::Named(ident) => quote! {
+                #ident: #ssz::SszDiff::diff(&self.#ident, &other.#ident),
+            },
+            Member::Unnamed(index) => quote! {
+                #ssz::SszDiff::diff(&self.#index, &other.#index),
+            },
+        });
+
+        let diff_expr = if fields
+            .iter()
+            .all(|(member, _)| matches!(member, Member::Named(_)))
+        {
+            quote! { #diff_ident { #(#field_exprs)* } }
+        } else {
+            quote! { #diff_ident(#(#field_exprs)*) }
+        };
+
+        Ok(parse_quote! {
+            fn diff(&self, other: &Self) -> Self::Diff {
+                #diff_expr
+            }
+        })
+    }
+
+    fn apply_fn_impl(&self, ssz: &Path) -> Result<ImplItemFn, Error> {
+        let stmts = self.unskipped_fields()?.map(|(member, _)| match member {
+            Member::Named(ident) => quote! {
+                #ssz::SszDiff::apply(&mut self.#ident, &diff.#ident);
+            },
+            Member::Unnamed(index) => quote! {
+                #ssz::SszDiff::apply(&mut self.#index, &diff.#index);
+            },
+        });
+
+        Ok(parse_quote! {
+            fn apply(&mut self, diff: &Self::Diff) {
+                #(#stmts)*
+            }
+        })
+    }
+
+    fn diff_ident(&self) -> Ident {
+        format_ident!("{}Diff", self.ident)
+    }
+
+    fn diff_generics(&self, ssz: &Path) -> Result<Generics, Error> {
+        let mut generics = self.generics.clone();
+
+        generics
+            .make_where_clause()
+            .predicates
+            .extend(self.ssz_diff_predicates(ssz)?);
+
+        Ok(generics)
+    }
+
+    fn ssz_diff_predicates(&self, ssz: &Path) -> Result<Vec<WherePredicate>, Error> {
+        Ok(self
+            .unskipped_fields()?
+            .map(|(_, ssz_field)| {
+                let ty = &ssz_field.ty;
+                parse_quote! { #ty: #ssz::SszDiff }
+            })
+            .collect())
     }
 
     fn single_unskipped_field(&self) -> Result<(Member, &SszField), Error> {
