@@ -5,12 +5,30 @@ use typenum::{U2, U4, U8, U32};
 use crate::{
     consts::Endianness,
     error::ReadError,
-    porcelain::{SszHash, SszRead, SszSize, SszWrite},
+    porcelain::{SszHash, SszDiff, SszRead, SszSize, SszWrite},
     size::Size,
 };
 
 #[cfg(test)]
 use typenum::U16;
+
+macro_rules! impl_ssz_diff_by_replacement {
+    ($ty:ty) => {
+        impl SszDiff for $ty {
+            type Diff = Self;
+
+            #[inline]
+            fn diff(&self, other: &Self) -> Self::Diff {
+                *other
+            }
+
+            #[inline]
+            fn apply(&mut self, diff: &Self::Diff) {
+                *self = *diff;
+            }
+        }
+    }
+}
 
 impl SszSize for bool {
     const SIZE: Size = Size::Fixed {
@@ -47,6 +65,8 @@ impl SszHash for bool {
     }
 }
 
+impl_ssz_diff_by_replacement!(bool);
+
 impl SszSize for u8 {
     const SIZE: Size = Size::Fixed {
         size: size_of::<Self>(),
@@ -77,6 +97,8 @@ impl SszHash for u8 {
         hash
     }
 }
+
+impl_ssz_diff_by_replacement!(u8);
 
 #[cfg(test)]
 impl SszSize for u16 {
@@ -113,6 +135,9 @@ impl SszHash for u16 {
     }
 }
 
+#[cfg(test)]
+impl_ssz_diff_by_replacement!(u16);
+
 impl SszSize for u32 {
     const SIZE: Size = Size::Fixed {
         size: size_of::<Self>(),
@@ -143,6 +168,8 @@ impl SszHash for u32 {
         hash
     }
 }
+
+impl_ssz_diff_by_replacement!(u32);
 
 impl SszSize for u64 {
     const SIZE: Size = Size::Fixed {
@@ -177,6 +204,8 @@ impl SszHash for u64 {
     }
 }
 
+impl_ssz_diff_by_replacement!(u64);
+
 impl SszSize for u128 {
     const SIZE: Size = Size::Fixed {
         size: size_of::<Self>(),
@@ -207,3 +236,5 @@ impl SszHash for u128 {
         hash
     }
 }
+
+impl_ssz_diff_by_replacement!(u128);
