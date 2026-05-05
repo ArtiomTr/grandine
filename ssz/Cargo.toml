@@ -34,7 +34,12 @@ try_from_iterator = { workspace = true }
 typenum = { workspace = true }
 
 [dev-dependencies]
+criterion = { workspace = true }
 duplicate = { workspace = true }
 spec_test_utils = { workspace = true }
 test-case = { workspace = true }
 test-generator = { workspace = true }
+
+[[bench]]
+name = "diff"
+harness = false

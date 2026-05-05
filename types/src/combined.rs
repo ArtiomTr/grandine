@@ -2,14 +2,15 @@ use bls::SignatureBytes;
 use derive_more::From;
 use duplicate::duplicate_item;
 use enum_iterator::Sequence as _;
+use qbsdiff::{Bsdiff, Bspatch};
 use serde::{Deserialize, Serialize};
 use ssz::{
-    BitVector, ContiguousList, H256, Hc, Offset, ReadError, Size, SszHash, SszRead, SszReadDefault,
-    SszSize, SszWrite, WriteError,
+    BitVector, ContiguousList, H256, Hc, Offset, ReadError, Size, Ssz, SszDiff, SszHash, SszRead,
+    SszReadDefault, SszSize, SszWrite, WriteError,
 };
 use static_assertions::{assert_not_impl_any, const_assert_eq};
 use thiserror::Error;
-use typenum::U1;
+use typenum::{U1, U134217728};
 use variant_count::VariantCount;
 
 use crate::{
@@ -48,6 +49,7 @@ use crate::{
             SignedBlindedBeaconBlock as CapellaSignedBlindedBeaconBlock,
         },
     },
+    collections::Validators,
     config::Config,
     deneb::{
         beacon_state::BeaconState as DenebBeaconState,
@@ -228,7 +230,88 @@ impl<P: Preset> SszHash for BeaconState<P> {
     }
 }
 
+impl<P: Preset> SszDiff for BeaconState<P> {
+    type Diff = BeaconStateDiff<P>;
+
+    fn diff(&self, other: &Self) -> Self::Diff {
+        let source_bytes = self
+            .to_ssz()
+            .expect("BeaconState SSZ serialization should not fail");
+        let mut other_without_validator_changes = other.clone();
+
+        other_without_validator_changes.replace_validators(self.validators().clone());
+
+        let target_bytes = other_without_validator_changes
+            .to_ssz()
+            .expect("BeaconState SSZ serialization should not fail");
+
+        BeaconStateDiff {
+            validators: other.validators().clone(),
+            other_fields: BinaryDiff::new(&source_bytes, &target_bytes),
+        }
+    }
+
+    fn apply(&mut self, diff: &Self::Diff) {
+        let source_bytes = self
+            .to_ssz()
+            .expect("BeaconState SSZ serialization should not fail");
+        let target_bytes = diff.other_fields.apply(&source_bytes);
+        let mut target = Self::from_ssz_at_phase(self.phase(), &target_bytes)
+            .expect("BeaconState binary diff should produce valid SSZ");
+
+        target.replace_validators(diff.validators.clone());
+        *self = target;
+    }
+}
+
+type BinaryDiffBytes = ContiguousList<u8, U134217728>;
+
+#[derive(Clone, PartialEq, Eq, Debug, Ssz)]
+#[ssz(derive_hash = false)]
+pub struct BeaconStateDiff<P: Preset> {
+    validators: Validators<P>,
+    other_fields: BinaryDiff,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug, Default, Ssz)]
+#[ssz(derive_hash = false)]
+struct BinaryDiff {
+    patch: BinaryDiffBytes,
+}
+
+impl BinaryDiff {
+    fn new(source: &[u8], target: &[u8]) -> Self {
+        let mut patch = Vec::new();
+
+        Bsdiff::new(source, target)
+            .compare(std::io::Cursor::new(&mut patch))
+            .expect("qbsdiff should produce a BeaconState binary diff");
+
+        Self {
+            patch: patch
+                .try_into()
+                .expect("BeaconState binary diff is too large"),
+        }
+    }
+
+    fn apply(&self, source: &[u8]) -> Vec<u8> {
+        let patch = Bspatch::new(&self.patch)
+            .expect("BeaconState binary diff should be a valid qbsdiff patch");
+        let mut target = Vec::with_capacity(patch.hint_target_size() as usize);
+
+        patch
+            .apply(source, std::io::Cursor::new(&mut target))
+            .expect("BeaconState binary diff should apply cleanly");
+
+        target
+    }
+}
+
 impl<P: Preset> BeaconState<P> {
+    fn replace_validators(&mut self, validators: Validators<P>) {
+        *self.validators_mut() = validators;
+    }
+
     pub fn with_execution_payload_header(
         mut self,
         execution_payload_header: Option<ExecutionPayloadHeader<P>>,

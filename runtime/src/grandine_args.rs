@@ -332,6 +332,9 @@ struct BeaconNodeOptions {
     #[clap(long, conflicts_with("prune_storage"))]
     archive_storage: bool,
 
+    /// Enable new archival storage mode.
+    new_archival_storage: bool,
+
     /// Enable prune storage mode, where only a single checkpoint state and block are stored in the database
     /// [default: disabled]
     #[clap(long, conflicts_with("archive_storage"))]
@@ -1055,6 +1058,7 @@ impl GrandineArgs {
             eth1_database_size,
             archival_epoch_interval,
             archive_storage,
+            new_archival_storage,
             prune_storage,
             unfinalized_states_in_memory,
             reconstruction_delay,
@@ -1437,6 +1441,8 @@ impl GrandineArgs {
             StorageMode::Prune
         } else if archive_storage {
             StorageMode::Archive
+        } else if new_archival_storage {
+            StorageMode::ArchiveNew
         } else {
             StorageMode::Standard {
                 custom_data_availability_window: data_availability_window,

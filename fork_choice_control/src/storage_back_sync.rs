@@ -22,8 +22,7 @@ use types::{
 use crate::{
     Storage,
     storage::{
-        BlockRootBySlot, Error, FinalizedBlockByRoot, SlotByStateRoot, StateByBlockRoot, get,
-        serialize,
+        BlockRootBySlot, Error, FinalizedBlockByRoot, SlotByStateRoot, get, serialize,
     },
 };
 
@@ -84,7 +83,22 @@ impl<P: Preset> Storage<P> {
         let mut states_in_batch = 0;
 
         if start_slot == anchor_block_slot {
-            batch.push(serialize(StateByBlockRoot(anchor_block_root), &state)?);
+            self.append_archival_state_to_batch(
+                &mut batch,
+                state.clone_arc(),
+                anchor_block_root,
+                finalized_validators.len_usize(),
+            )?;
+
+            if fork_choice_store::Storage::storage_mode(self).is_new_archive()
+                && misc::is_epoch_start::<P>(start_slot)
+            {
+                self.append_state_points_to_batch(
+                    &mut batch,
+                    vec![(Self::epoch_at_slot(start_slot), state.clone_arc())],
+                    finalized_validators.len_usize(),
+                )?;
+            }
         }
 
         for slot in (start_slot + 1)..=end_slot {
@@ -107,20 +121,38 @@ impl<P: Preset> Storage<P> {
             batch.push(serialize(SlotByStateRoot(state.hash_tree_root()), slot)?);
 
             let state_epoch = Self::epoch_at_slot(slot);
-            let append_state = misc::is_epoch_start::<P>(slot)
+            let is_epoch_start = misc::is_epoch_start::<P>(slot);
+            let append_state_point =
+                fork_choice_store::Storage::storage_mode(self).is_new_archive() && is_epoch_start;
+            let append_state = is_epoch_start
                 && state_epoch.is_multiple_of(self.archival_epoch_interval.into());
 
             if let Some(block) = previous_block.as_ref()
-                && append_state
+                && (append_state || append_state_point)
             {
                 debug_with_peers!("back-synced state in {slot} is ready for storage");
 
                 let block_root = block.message().hash_tree_root();
 
-                batch.push(serialize(StateByBlockRoot(block_root), &state)?);
-                batch.push(serialize(ARCHIVER_CHECKPOINT_KEY, slot)?);
+                if append_state {
+                    self.append_archival_state_to_batch(
+                        &mut batch,
+                        state.clone_arc(),
+                        block_root,
+                        finalized_validators.len_usize(),
+                    )?;
+                    batch.push(serialize(ARCHIVER_CHECKPOINT_KEY, slot)?);
+                }
 
-                states_in_batch += 1;
+                if append_state_point {
+                    self.append_state_points_to_batch(
+                        &mut batch,
+                        vec![(state_epoch, state.clone_arc())],
+                        finalized_validators.len_usize(),
+                    )?;
+                }
+
+                states_in_batch += u64::from(append_state || append_state_point);
 
                 if states_in_batch == ARCHIVED_STATES_BEFORE_FLUSH {
                     info_with_peers!("archiving back-sync data up to {slot} slot");

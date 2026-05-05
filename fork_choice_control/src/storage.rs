@@ -1,5 +1,5 @@
 use core::{cell::OnceCell, marker::PhantomData, num::NonZeroU64};
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 
 use anyhow::{Context as _, Error as AnyhowError, Result, bail, ensure};
 use bls::PublicKeyBytes;
@@ -13,7 +13,7 @@ use logging::{debug_with_peers, info_with_peers, warn_with_peers};
 use nonzero_ext::nonzero;
 use pubkey_cache::PubkeyCache;
 use reqwest::Client;
-use ssz::{PersistentList, Ssz, SszRead, SszReadDefault, SszWrite};
+use ssz::{PersistentList, Ssz, SszDiff, SszRead, SszReadDefault, SszWrite};
 use std_ext::ArcExt as _;
 use thiserror::Error;
 use tracing::info;
@@ -22,7 +22,7 @@ use try_from_iterator::TryFromIterator;
 use typenum::Unsigned as _;
 use types::{
     Validators,
-    combined::{BeaconState, DataColumnSidecar, SignedBeaconBlock},
+    combined::{BeaconState, BeaconStateDiff, DataColumnSidecar, SignedBeaconBlock},
     config::Config,
     deneb::{
         containers::{BlobIdentifier, BlobSidecar},
@@ -273,6 +273,7 @@ impl<P: Preset> Storage<P> {
         let mut checkpoint_state_appended = false;
         let mut archival_state_appended = false;
         let mut batch = vec![];
+        let mut state_points = vec![];
 
         let finalized_validators = store.finalized_validators();
 
@@ -363,18 +364,30 @@ impl<P: Preset> Storage<P> {
                 {
                     info_with_peers!("saving state in slot {state_slot}");
 
-                    batch.push(serialize(
-                        StateByBlockRoot(block_root),
-                        prepare_state(
-                            state.get_or_init(|| chain_link.state(store)).clone_arc(),
-                            finalized_validators.len_usize(),
-                        ),
-                    )?);
+                    self.append_archival_state_to_batch(
+                        &mut batch,
+                        state.get_or_init(|| chain_link.state(store)).clone_arc(),
+                        block_root,
+                        finalized_validators.len_usize(),
+                    )?;
 
                     archival_state_appended = true;
                     update_finalized_validators = true;
                 }
+
+                if self.storage_mode.is_new_archive() && is_epoch_start {
+                    state_points.push((state_epoch, state.get_or_init(|| chain_link.state(store)).clone_arc()));
+                    update_finalized_validators = true;
+                }
             }
+        }
+
+        if self.storage_mode.is_new_archive() {
+            self.append_state_points_to_batch(
+                &mut batch,
+                state_points,
+                finalized_validators.len_usize(),
+            )?;
         }
 
         if update_finalized_validators {
@@ -426,19 +439,35 @@ impl<P: Preset> Storage<P> {
         let mut slots = vec![];
         let mut batch = vec![];
         let mut update_finalized_validators = false;
+        let mut state_points = vec![];
 
         for (state, block_root) in states_with_block_roots {
             if !self.contains_key(StateByBlockRoot(block_root))? {
+                let state_slot = state.slot();
                 let archival_state = state.clone_arc();
 
-                slots.push(state.slot());
-                batch.push(serialize(
-                    StateByBlockRoot(block_root),
-                    prepare_state(archival_state, finalized_validators.len_usize()),
-                )?);
+                slots.push(state_slot);
+                self.append_archival_state_to_batch(
+                    &mut batch,
+                    state,
+                    block_root,
+                    finalized_validators.len_usize(),
+                )?;
+
+                if self.storage_mode.is_new_archive() && misc::is_epoch_start::<P>(state_slot) {
+                    state_points.push((Self::epoch_at_slot(state_slot), archival_state));
+                }
 
                 update_finalized_validators = true;
             }
+        }
+
+        if self.storage_mode.is_new_archive() {
+            self.append_state_points_to_batch(
+                &mut batch,
+                state_points,
+                finalized_validators.len_usize(),
+            )?;
         }
 
         if update_finalized_validators {
@@ -914,6 +943,14 @@ impl<P: Preset> Storage<P> {
         start_from_slot: Slot,
         finalized_validators: Option<&Validators<P>>,
     ) -> Result<OptionalStateStorage<'_, P>> {
+        if self.storage_mode.is_new_archive() {
+            if let Some(state_storage) =
+                self.load_state_by_state_point(start_from_slot, finalized_validators)?
+            {
+                return Ok(OptionalStateStorage::Full(state_storage));
+            }
+        }
+
         let results = self
             .database
             .iterator_descending(..=BlockRootBySlot(start_from_slot).to_string())?;
@@ -959,6 +996,178 @@ impl<P: Preset> Storage<P> {
         Ok(OptionalStateStorage::UnfinalizedOnly(
             self.blocks_by_roots(block_roots),
         ))
+    }
+
+    pub(crate) fn append_archival_state_to_batch(
+        &self,
+        batch: &mut Vec<(String, Vec<u8>)>,
+        state: Arc<BeaconState<P>>,
+        block_root: H256,
+        finalized_validator_list_len: usize,
+    ) -> Result<()> {
+        let archival_state = prepare_state(state, finalized_validator_list_len);
+
+        batch.push(serialize(
+            StateByBlockRoot(block_root),
+            archival_state.clone_arc(),
+        )?);
+
+        Ok(())
+    }
+
+    fn append_state_points_to_batch(
+        &self,
+        batch: &mut Vec<(String, Vec<u8>)>,
+        mut state_points: Vec<(Epoch, Arc<BeaconState<P>>)>,
+        finalized_validator_list_len: usize,
+    ) -> Result<()> {
+        if state_points.is_empty() {
+            return Ok(());
+        }
+
+        state_points.sort_by_key(|(epoch, _)| *epoch);
+
+        let mut cached_state_points = BTreeMap::new();
+
+        for (epoch, state) in state_points {
+            let prepared_state = prepare_state(state, finalized_validator_list_len);
+
+            if Self::state_point_is_snapshot(epoch) {
+                batch.push(serialize(StatePoint(epoch), prepared_state.clone_arc())?);
+            } else {
+                let base_epoch = Self::state_point_base_epoch(epoch)
+                    .expect("non-snapshot state points should have a base epoch");
+
+                let base_state = if let Some(state) = cached_state_points.get(&base_epoch) {
+                    state.clone_arc()
+                } else {
+                    self.load_state_point_state(base_epoch)?.ok_or(Error::StatePointNotFound {
+                        state_epoch: base_epoch,
+                    })?
+                };
+
+                batch.push(serialize(StatePoint(epoch), base_state.diff(&prepared_state))?);
+            }
+
+            cached_state_points.insert(epoch, prepared_state);
+        }
+
+        Ok(())
+    }
+
+    const fn state_point_is_snapshot(epoch: Epoch) -> bool {
+        epoch % 128 == 0
+    }
+
+    const fn state_point_base_epoch(epoch: Epoch) -> Option<Epoch> {
+        if Self::state_point_is_snapshot(epoch) {
+            None
+        } else if epoch % 32 == 0 {
+            Some(epoch - (epoch % 128))
+        } else {
+            Some(epoch - (epoch % 32))
+        }
+    }
+
+    fn latest_state_point_epoch_at_or_before(&self, epoch: Epoch) -> Result<Option<Epoch>> {
+        let results = self
+            .database
+            .iterator_descending(..=StatePoint(epoch).to_string())?;
+
+        itertools::process_results(results, |pairs| {
+            pairs
+                .take_while(|(key_bytes, _)| StatePoint::has_prefix(key_bytes))
+                .map(|(key_bytes, _)| StatePoint::try_from(key_bytes).map(|state_point| state_point.0))
+                .next()
+                .transpose()
+        })?
+        .map_err(Into::into)
+    }
+
+    fn load_state_point_state(&self, epoch: Epoch) -> Result<Option<Arc<BeaconState<P>>>> {
+        if Self::state_point_is_snapshot(epoch) {
+            return self.get(StatePoint(epoch));
+        }
+
+        let Some(diff) = self.get::<BeaconStateDiff<P>>(StatePoint(epoch))? else {
+            return Ok(None);
+        };
+
+        let Some(base_epoch) = Self::state_point_base_epoch(epoch) else {
+            return Ok(None);
+        };
+
+        let Some(mut state) = self.load_state_point_state(base_epoch)? else {
+            return Ok(None);
+        };
+
+        state.make_mut().apply(&diff);
+
+        Ok(Some(state))
+    }
+
+    fn load_state_by_state_point(
+        &self,
+        start_from_slot: Slot,
+        finalized_validators: Option<&Validators<P>>,
+    ) -> Result<Option<StateStorage<'_, P>>> {
+        let requested_epoch = misc::compute_epoch_at_slot::<P>(start_from_slot);
+
+        let Some(state_epoch) = self.latest_state_point_epoch_at_or_before(requested_epoch)? else {
+            return Ok(None);
+        };
+
+        let Some(mut state_snapshot) = self.load_state_point_state(state_epoch)? else {
+            return Ok(None);
+        };
+
+        self.restore_validators_to_state(&mut state_snapshot, finalized_validators)?;
+
+        let state_slot = state_snapshot.slot();
+
+        ensure!(
+            misc::is_epoch_start::<P>(state_slot),
+            Error::PersistedSlotCannotContainAnchor { slot: state_slot },
+        );
+
+        let Some(block_root) = self.block_root_by_slot(state_slot)? else {
+            return Ok(None);
+        };
+
+        let Some(block) = self.finalized_block_by_root(block_root)? else {
+            return Ok(None);
+        };
+
+        let results = self
+            .database
+            .iterator_descending(..=BlockRootBySlot(start_from_slot).to_string())?;
+
+        let results = itertools::process_results(results, |iter| {
+            iter.take_while(|(key_bytes, _)| BlockRootBySlot::has_prefix(key_bytes))
+                .map(|(key_bytes, value_bytes)| {
+                    Ok((
+                        BlockRootBySlot::try_from(key_bytes)?.0,
+                        H256::from_ssz_default(value_bytes)?,
+                    ))
+                })
+                .try_collect::<Vec<_>>()
+        })??;
+
+        let mut block_roots = vec![];
+
+        for (slot, block_root) in results {
+            if slot <= state_slot {
+                break;
+            }
+
+            block_roots.push(block_root);
+        }
+
+        Ok(Some((
+            Arc::new(state_snapshot),
+            block,
+            self.blocks_by_roots(block_roots),
+        )))
     }
 
     fn load_block_checkpoint(&self) -> Result<Option<BlockCheckpoint<P>>> {
@@ -1022,7 +1231,11 @@ impl<P: Preset> Storage<P> {
     ) -> Result<()> {
         let mut disk_validators = None;
 
-        for (index, validator) in state.validators_mut().into_iter().enumerate() {
+        let validator_count = state.validators().len_usize();
+
+        for index in 0..validator_count {
+            let mut validator = state.validators_mut().get_mut(index as u64)?;
+
             if validator.pubkey.is_zero() {
                 // restore validator pubkey, by taking pubkey from the finalized validators list
                 let finalized_validator_pubkey = match finalized_validators {
@@ -1275,6 +1488,31 @@ impl PrefixableKey for BlockRootBySlot {
 }
 
 #[derive(Display)]
+#[display("{}{_0:020}", Self::PREFIX)]
+pub struct StatePoint(pub Slot);
+
+impl TryFrom<Cow<'_, [u8]>> for StatePoint {
+    type Error = AnyhowError;
+
+    fn try_from(bytes: Cow<[u8]>) -> Result<Self> {
+        let payload = bytes
+            .strip_prefix(Self::PREFIX.as_bytes())
+            .ok_or_else(|| Error::IncorrectPrefix {
+                bytes: bytes.to_vec(),
+            })?;
+
+        let string = core::str::from_utf8(payload)?;
+        let slot = string.parse()?;
+
+        Ok(Self(slot))
+    }
+}
+
+impl PrefixableKey for StatePoint {
+    const PREFIX: &'static str = "sp";
+}
+
+#[derive(Display)]
 #[display("{}{_0:x}", Self::PREFIX)]
 pub struct FinalizedBlockByRoot(pub H256);
 
@@ -1384,6 +1622,8 @@ pub enum Error {
     BlockNotFound { block_root: H256 },
     #[error("state not found in storage: {state_slot}")]
     StateNotFound { state_slot: Slot },
+    #[error("state point not found in storage for epoch {state_epoch}")]
+    StatePointNotFound { state_epoch: Epoch },
     #[error(
         "checkpoint block root does not match state checkpoint \
          (requested: {requested:?}, computed: {computed:?})"
@@ -1447,14 +1687,16 @@ fn prepare_state<P: Preset>(
     mut state: Arc<BeaconState<P>>,
     finalized_validator_list_len: usize,
 ) -> Arc<BeaconState<P>> {
-    for validator in state
-        .make_mut()
-        .validators_mut()
-        .into_iter()
-        .take(finalized_validator_list_len)
-    {
+    let beacon_state = state.make_mut();
+    let validator_count = finalized_validator_list_len.min(beacon_state.validators().len_usize());
+
+    for index in 0..validator_count {
         // pubkey never changes, so we can restore it later from finalized validator list
-        validator.pubkey = PublicKeyBytes::zero();
+        beacon_state
+            .validators_mut()
+            .get_mut(index as u64)
+            .expect("validator index should be in bounds due to validator_count above")
+            .pubkey = PublicKeyBytes::zero();
     }
 
     state
@@ -1466,6 +1708,7 @@ mod tests {
     use database::DatabaseMode;
     use tempfile::TempDir;
     use types::{
+        phase0::beacon_state::BeaconState as Phase0BeaconState,
         phase0::containers::{
             BeaconBlock as Phase0BeaconBlock, SignedBeaconBlock as Phase0SignedBeaconBlock,
         },
@@ -1483,6 +1726,16 @@ mod tests {
             .into(),
             ..Phase0SignedBeaconBlock::default()
         })
+    }
+
+    fn state_with_slot(slot: Slot) -> Arc<BeaconState<Mainnet>> {
+        Arc::new(
+            Phase0BeaconState {
+                slot,
+                ..Phase0BeaconState::default()
+            }
+            .into(),
+        )
     }
 
     #[test]
@@ -1724,6 +1977,115 @@ mod tests {
         assert_eq!(
             storage.block_root_before_or_at_slot(9)?,
             Some(H256::repeat_byte(6)),
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_load_state_by_iteration_falls_back_in_new_archive_mode() -> Result<()> {
+        let database = Database::in_memory();
+        let block = block_with_slot(5);
+
+        database.put_batch(vec![
+            serialize(BlockRootBySlot(5), H256::repeat_byte(5))?,
+            serialize(UnfinalizedBlockByRoot(H256::repeat_byte(5)), &block)?,
+        ])?;
+
+        let storage = Storage::<Mainnet>::new(
+            Arc::new(Config::mainnet()),
+            Arc::new(PubkeyCache::default()),
+            database,
+            nonzero!(64_u64),
+            StorageMode::ArchiveNew,
+        );
+
+        assert!(matches!(
+            storage.load_state_by_iteration(5, None)?,
+            OptionalStateStorage::UnfinalizedOnly(_),
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_append_states_saves_state_point_strategy_in_new_archive_mode() -> Result<()> {
+        let storage = Storage::<Mainnet>::new(
+            Arc::new(Config::mainnet()),
+            Arc::new(PubkeyCache::default()),
+            Database::in_memory(),
+            nonzero!(64_u64),
+            StorageMode::ArchiveNew,
+        );
+
+        let state_128 = state_with_slot(128 * 32);
+        let state_160 = state_with_slot(160 * 32);
+        let state_161 = state_with_slot(161 * 32);
+        let finalized_validators = state_128.validators().clone();
+
+        storage.append_states(
+            vec![
+                (state_128, H256::repeat_byte(1)),
+                (state_160, H256::repeat_byte(2)),
+                (state_161, H256::repeat_byte(3)),
+            ]
+            .into_iter(),
+            &finalized_validators,
+        )?;
+
+        assert!(matches!(
+            storage.get::<Arc<BeaconState<Mainnet>>>(StatePoint(128))?,
+            Some(_),
+        ));
+        assert!(matches!(
+            storage.get::<BeaconStateDiff<Mainnet>>(StatePoint(160))?,
+            Some(_),
+        ));
+        assert!(matches!(
+            storage.get::<BeaconStateDiff<Mainnet>>(StatePoint(161))?,
+            Some(_),
+        ));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_stored_state_loads_from_state_point_in_new_archive_mode() -> Result<()> {
+        let storage = Storage::<Mainnet>::new(
+            Arc::new(Config::mainnet()),
+            Arc::new(PubkeyCache::default()),
+            Database::in_memory(),
+            nonzero!(64_u64),
+            StorageMode::ArchiveNew,
+        );
+
+        let state_128 = state_with_slot(128 * 32);
+        let state_160 = state_with_slot(160 * 32);
+        let state_161 = state_with_slot(161 * 32);
+        let finalized_validators = state_128.validators().clone();
+        let block_root = H256::repeat_byte(3);
+        let block = block_with_slot(161 * 32);
+
+        storage.append_states(
+            vec![
+                (state_128, H256::repeat_byte(1)),
+                (state_160, H256::repeat_byte(2)),
+                (state_161, block_root),
+            ]
+            .into_iter(),
+            &finalized_validators,
+        )?;
+
+        storage.database.put_batch(vec![
+            serialize(BlockRootBySlot(161 * 32), block_root)?,
+            serialize(FinalizedBlockByRoot(block_root), &block)?,
+        ])?;
+
+        assert_eq!(
+            storage
+                .stored_state(161 * 32, Some(&finalized_validators))?
+                .map(|state| state.slot()),
+            Some(161 * 32),
         );
 
         Ok(())

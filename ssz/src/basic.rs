@@ -5,7 +5,7 @@ use typenum::{U2, U4, U8, U32};
 use crate::{
     consts::Endianness,
     error::ReadError,
-    porcelain::{SszHash, SszDiff, SszRead, SszSize, SszWrite},
+    porcelain::{SszDiff, SszHash, SszRead, SszSize, SszWrite},
     size::Size,
 };
 
@@ -27,7 +27,7 @@ macro_rules! impl_ssz_diff_by_replacement {
                 *self = *diff;
             }
         }
-    }
+    };
 }
 
 impl SszSize for bool {

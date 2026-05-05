@@ -267,6 +267,7 @@ pub enum StorageMode {
         custom_data_availability_window: Option<u64>,
     },
     Archive,
+    ArchiveNew,
 }
 
 impl Default for StorageMode {
@@ -286,7 +287,12 @@ impl StorageMode {
 
     #[must_use]
     pub const fn is_archive(self) -> bool {
-        matches!(self, Self::Archive)
+        matches!(self, Self::Archive | Self::ArchiveNew)
+    }
+
+    #[must_use]
+    pub const fn is_new_archive(self) -> bool {
+        matches!(self, Self::ArchiveNew)
     }
 
     pub fn min_epochs_for_blob_sidecars_requests(self, config: &Config) -> u64 {
@@ -295,7 +301,9 @@ impl StorageMode {
                 custom_data_availability_window,
             } => custom_data_availability_window
                 .unwrap_or(config.min_epochs_for_blob_sidecars_requests),
-            Self::Archive | Self::Prune => config.min_epochs_for_blob_sidecars_requests,
+            Self::Archive | Self::ArchiveNew | Self::Prune => {
+                config.min_epochs_for_blob_sidecars_requests
+            }
         }
     }
 
@@ -305,7 +313,9 @@ impl StorageMode {
                 custom_data_availability_window,
             } => custom_data_availability_window
                 .unwrap_or(config.min_epochs_for_data_column_sidecars_requests),
-            Self::Archive | Self::Prune => config.min_epochs_for_data_column_sidecars_requests,
+            Self::Archive | Self::ArchiveNew | Self::Prune => {
+                config.min_epochs_for_data_column_sidecars_requests
+            }
         }
     }
 }
