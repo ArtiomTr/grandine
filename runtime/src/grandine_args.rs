@@ -333,6 +333,7 @@ struct BeaconNodeOptions {
     archive_storage: bool,
 
     /// Enable new archival storage mode.
+    #[clap(long, conflicts_with_all = ["archive_storage", "prune_storage"])]
     new_archival_storage: bool,
 
     /// Enable prune storage mode, where only a single checkpoint state and block are stored in the database

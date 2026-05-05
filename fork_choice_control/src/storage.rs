@@ -1015,7 +1015,7 @@ impl<P: Preset> Storage<P> {
         Ok(())
     }
 
-    fn append_state_points_to_batch(
+    pub(crate) fn append_state_points_to_batch(
         &self,
         batch: &mut Vec<(String, Vec<u8>)>,
         mut state_points: Vec<(Epoch, Arc<BeaconState<P>>)>,
@@ -1027,7 +1027,7 @@ impl<P: Preset> Storage<P> {
 
         state_points.sort_by_key(|(epoch, _)| *epoch);
 
-        let mut cached_state_points = BTreeMap::new();
+        let mut cached_state_points: BTreeMap<Epoch, Arc<BeaconState<P>>> = BTreeMap::new();
 
         for (epoch, state) in state_points {
             let prepared_state = prepare_state(state, finalized_validator_list_len);
@@ -1121,7 +1121,7 @@ impl<P: Preset> Storage<P> {
             return Ok(None);
         };
 
-        self.restore_validators_to_state(&mut state_snapshot, finalized_validators)?;
+        self.restore_validators_to_state(state_snapshot.make_mut(), finalized_validators)?;
 
         let state_slot = state_snapshot.slot();
 
@@ -1144,13 +1144,13 @@ impl<P: Preset> Storage<P> {
 
         let results = itertools::process_results(results, |iter| {
             iter.take_while(|(key_bytes, _)| BlockRootBySlot::has_prefix(key_bytes))
-                .map(|(key_bytes, value_bytes)| {
+                .map(|(key_bytes, value_bytes)| -> Result<_> {
                     Ok((
                         BlockRootBySlot::try_from(key_bytes)?.0,
                         H256::from_ssz_default(value_bytes)?,
                     ))
                 })
-                .try_collect::<Vec<_>>()
+                .collect::<Result<Vec<_>>>()
         })??;
 
         let mut block_roots = vec![];
@@ -1164,7 +1164,7 @@ impl<P: Preset> Storage<P> {
         }
 
         Ok(Some((
-            Arc::new(state_snapshot),
+            state_snapshot,
             block,
             self.blocks_by_roots(block_roots),
         )))
@@ -1234,7 +1234,7 @@ impl<P: Preset> Storage<P> {
         let validator_count = state.validators().len_usize();
 
         for index in 0..validator_count {
-            let mut validator = state.validators_mut().get_mut(index as u64)?;
+            let validator = state.validators_mut().get_mut(index as u64)?;
 
             if validator.pubkey.is_zero() {
                 // restore validator pubkey, by taking pubkey from the finalized validators list
