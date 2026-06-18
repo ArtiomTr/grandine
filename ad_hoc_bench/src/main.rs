@@ -1,5 +1,10 @@
 use core::ops::RangeInclusive;
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Instant,
+};
 
 use allocator as _;
 use anyhow::Result;
@@ -9,14 +14,16 @@ use database::{Database, DatabaseMode};
 use eth2_cache_utils::{goerli, holesky, holesky_devnet, mainnet, medalla, withdrawal_devnet_4};
 use fork_choice_control::AdHocBenchController;
 use fork_choice_store::StoreConfig;
+use futures::executor::block_on;
 use itertools::Itertools as _;
 use logging::info_with_peers;
 use pubkey_cache::PubkeyCache;
 use rand::seq::SliceRandom as _;
 use types::{
-    combined::{BeaconState, SignedBeaconBlock},
+    combined::{BeaconState, DataColumnSidecar, SignedBeaconBlock},
     config::Config as ChainConfig,
     deneb::containers::BlobSidecar,
+    fulu::primitives::ColumnIndex,
     phase0::{
         consts::GENESIS_SLOT,
         primitives::{H256, Slot},
@@ -70,6 +77,9 @@ enum Blocks {
 
     #[clap(name = "mainnet-deneb-1024")]
     MainnetDeneb1024,
+
+    #[clap(name = "mainnet-fulu-1024")]
+    MainnetFulu1024,
 
     #[clap(name = "medalla-genesis-128")]
     MedallaGenesis128,
@@ -148,7 +158,8 @@ impl From<Blocks> for Chain {
             | Blocks::MainnetAltair1024
             | Blocks::MainnetAltair2048
             | Blocks::MainnetAltair8192
-            | Blocks::MainnetDeneb1024 => Self::Mainnet,
+            | Blocks::MainnetDeneb1024
+            | Blocks::MainnetFulu1024 => Self::Mainnet,
             Blocks::MedallaGenesis128
             | Blocks::MedallaGenesis1024
             | Blocks::MedallaRoughtime1024
@@ -215,6 +226,11 @@ impl From<Blocks> for BlockParameters {
                 first_slot: 9_481_344,
                 last_slot: 9_482_368,
                 slot_width: 7,
+            },
+            Blocks::MainnetFulu1024 => Self {
+                first_slot: 14_571_648,
+                last_slot: 14_572_672,
+                slot_width: 8,
             },
             Blocks::MedallaGenesis128 => Self {
                 first_slot: GENESIS_SLOT,
@@ -298,12 +314,14 @@ fn main() -> Result<()> {
             mainnet::beacon_state,
             mainnet::beacon_blocks,
             mainnet::blob_sidecars,
+            mainnet::data_column_sidecars,
         ),
         Chain::Medalla => run(
             ChainConfig::medalla(),
             options,
             medalla::beacon_state,
             medalla::beacon_blocks,
+            |_, _| BTreeMap::new(),
             |_, _| BTreeMap::new(),
         ),
         Chain::Goerli => run(
@@ -312,12 +330,14 @@ fn main() -> Result<()> {
             goerli::beacon_state,
             goerli::beacon_blocks,
             |_, _| BTreeMap::new(),
+            |_, _| BTreeMap::new(),
         ),
         Chain::Withdrawals => run(
             ChainConfig::withdrawal_devnet_4(),
             options,
             withdrawal_devnet_4::beacon_state,
             withdrawal_devnet_4::beacon_blocks,
+            |_, _| BTreeMap::new(),
             |_, _| BTreeMap::new(),
         ),
         Chain::Holesky => run(
@@ -326,12 +346,14 @@ fn main() -> Result<()> {
             holesky::beacon_state,
             holesky::beacon_blocks,
             holesky::blob_sidecars,
+            |_, _| BTreeMap::new(),
         ),
         Chain::HoleskyDevnet => run(
             ChainConfig::holesky_devnet(),
             options,
             holesky_devnet::beacon_state,
             holesky_devnet::beacon_blocks,
+            |_, _| BTreeMap::new(),
             |_, _| BTreeMap::new(),
         ),
     }?;
@@ -350,6 +372,10 @@ fn run<P: Preset>(
     beacon_state: impl FnOnce(Slot, usize) -> Arc<BeaconState<P>>,
     beacon_blocks: impl FnOnce(RangeInclusive<Slot>, usize) -> Vec<Arc<SignedBeaconBlock<P>>>,
     blob_sidecars: impl FnOnce(RangeInclusive<Slot>, usize) -> BTreeMap<Slot, Vec<Arc<BlobSidecar<P>>>>,
+    data_column_sidecars: impl FnOnce(
+        RangeInclusive<Slot>,
+        usize,
+    ) -> BTreeMap<Slot, Vec<Arc<DataColumnSidecar<P>>>>,
 ) -> Result<()> {
     #[cfg(not(target_os = "windows"))]
     print_jemalloc_stats()?;
@@ -377,6 +403,16 @@ fn run<P: Preset>(
 
     let mut blocks = beacon_blocks(first_slot..=last_slot, slot_width).into_iter();
     let mut blobs = blob_sidecars(first_slot..=last_slot, slot_width);
+    let mut data_columns = data_column_sidecars(first_slot..=last_slot, slot_width);
+
+    // The data column sidecars cached on disk only cover the columns this node would custody
+    // (PeerDAS). Tell the store to sample exactly those columns so that data availability is
+    // satisfied by the cached sidecars, mirroring how a real node checks its custody set.
+    let sampling_columns: HashSet<ColumnIndex> = data_columns
+        .values()
+        .flatten()
+        .map(|sidecar| sidecar.index())
+        .collect();
 
     let last_block_root = blocks
         .as_slice()
@@ -431,6 +467,15 @@ fn run<P: Preset>(
         futures::sink::drain(),
     );
 
+    if !sampling_columns.is_empty() {
+        info_with_peers!(
+            "sampling {} data columns per slot: {:?}",
+            sampling_columns.len(),
+            sampling_columns.iter().sorted().collect_vec(),
+        );
+        controller.on_store_sampling_columns(sampling_columns);
+    }
+
     controller.on_slot(last_slot);
     controller.wait_for_tasks();
 
@@ -452,6 +497,14 @@ fn run<P: Preset>(
     for chunk in &blocks.chunks(batch_size) {
         for block in chunk {
             let slot = block.message().slot();
+
+            // Make the block's data available before importing it, so the data availability check
+            // passes on the first attempt instead of delaying the block until sidecars arrive.
+            if let Some(block_columns) = data_columns.remove(&slot) {
+                for data_column_sidecar in block_columns {
+                    block_on(controller.on_api_data_column_sidecar(data_column_sidecar, None));
+                }
+            }
 
             controller.on_requested_block(block, None);
 

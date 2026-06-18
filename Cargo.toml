@@ -481,7 +481,7 @@ attestation_verifier = { path = 'attestation_verifier' }
 binary_utils = { path = 'binary_utils' }
 block_producer = { path = 'block_producer' }
 # Replace the line below with `bls = { path = 'bls', features = ['blst'] }` for `ad_hoc_bench` and other utilities
-bls = { path = 'bls' }
+bls = { path = 'bls', features = ['blst'] }
 bls-blst = { path = 'bls/bls-blst' }
 bls-core = { path = 'bls/bls-core' }
 bls-zkcrypto = { path = 'bls/bls-zkcrypto' }
@@ -515,7 +515,7 @@ http_api_utils = { path = 'http_api_utils' }
 interop = { path = 'interop' }
 keymanager = { path = 'keymanager' }
 # Replace the line below with `kzg_utils = { path = 'kzg_utils', features = ['blst'] }` for `ad_hoc_bench` and other utilities
-kzg_utils = { path = 'kzg_utils' }
+kzg_utils = { path = 'kzg_utils', features = ['blst'] }
 liveness_tracker = { path = 'liveness_tracker' }
 logging = { path = 'logging' }
 metrics = { path = 'metrics' }

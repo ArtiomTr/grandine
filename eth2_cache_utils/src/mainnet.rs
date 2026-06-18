@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use spec_test_utils::Case;
 use types::{
-    combined::{BeaconState, SignedBeaconBlock},
+    combined::{BeaconState, DataColumnSidecar, SignedBeaconBlock},
     config::Config,
     deneb::containers::BlobSidecar,
     phase0::{consts::GENESIS_SLOT, primitives::Slot},
@@ -72,6 +72,12 @@ pub static DENEB_BLOB_SIDECARS_FROM_32_SLOTS: LazyBlobSidecars<Mainnet> =
             .collect()
     });
 
+pub static FULU_BEACON_STATE: LazyBeaconState<Mainnet> =
+    LazyBeaconState::new(|| beacon_state(14_571_648, 8));
+
+pub static FULU_BEACON_BLOCKS_FROM_1024_SLOTS: LazyBeaconBlocks<Mainnet> =
+    LazyBeaconBlocks::new(1021, || beacon_blocks(14_571_648..=14_572_672, 8));
+
 #[must_use]
 pub fn beacon_blocks(
     slots: RangeInclusive<Slot>,
@@ -91,4 +97,12 @@ pub fn blob_sidecars(
     width: usize,
 ) -> BTreeMap<Slot, Vec<Arc<BlobSidecar<Mainnet>>>> {
     generic::blob_sidecars(&Config::mainnet(), CASE, slots, width)
+}
+
+#[must_use]
+pub fn data_column_sidecars(
+    slots: RangeInclusive<Slot>,
+    width: usize,
+) -> BTreeMap<Slot, Vec<Arc<DataColumnSidecar<Mainnet>>>> {
+    generic::data_column_sidecars(&Config::mainnet(), CASE, slots, width)
 }

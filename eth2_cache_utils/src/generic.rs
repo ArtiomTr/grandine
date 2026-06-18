@@ -8,7 +8,7 @@ use std::{
 use itertools::Itertools as _;
 use spec_test_utils::Case;
 use types::{
-    combined::{BeaconState, SignedBeaconBlock},
+    combined::{BeaconState, DataColumnSidecar, SignedBeaconBlock},
     config::Config,
     deneb::containers::BlobSidecar,
     phase0::primitives::Slot,
@@ -182,4 +182,28 @@ pub fn blob_sidecars<P: Preset>(
     }
 
     blobs
+}
+
+pub fn data_column_sidecars<P: Preset>(
+    config: &Config,
+    case: Case,
+    slots: RangeInclusive<Slot>,
+    width: usize,
+) -> BTreeMap<Slot, Vec<Arc<DataColumnSidecar<P>>>> {
+    let pattern = format!("data_column_sidecar_slot_{:?<width$}_*", "");
+    let low = format!("data_column_sidecar_slot_{:0width$}_*", slots.start());
+    let high = format!(
+        "data_column_sidecar_slot_{:0width$}_*",
+        slots.end().saturating_add(1)
+    );
+
+    // There can be several data column sidecars per slot (one per custodied column), so group
+    // them by the slot of the block they belong to.
+    case.glob(pattern)
+        .skip_while(|path| path < Path::new(low.as_str()))
+        .take_while(|path| path < Path::new(high.as_str()))
+        .map(|path| case.ssz_uncompressed::<_, Arc<DataColumnSidecar<P>>>(config, path))
+        .into_group_map_by(|sidecar| sidecar.slot())
+        .into_iter()
+        .collect()
 }
