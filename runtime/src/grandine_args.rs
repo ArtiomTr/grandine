@@ -31,7 +31,7 @@ use eth2_libp2p::{
     rpc::config::{InboundRateLimiterConfig, OutboundRateLimiterConfig},
 };
 use features::Feature;
-use fork_choice_control::{DEFAULT_ARCHIVAL_EPOCH_INTERVAL, DEFAULT_MAX_EVENTS};
+use fork_choice_control::{DEFAULT_ARCHIVAL_EPOCH_INTERVAL, DEFAULT_MAX_EVENTS, Hierarchy};
 use fork_choice_store::{DEFAULT_CACHE_LOCK_TIMEOUT_MILLIS, StoreConfig};
 use grandine_version::{APPLICATION_NAME, APPLICATION_VERSION};
 use helper_functions::misc;
@@ -66,7 +66,8 @@ use types::{
 use validator::{ValidatorApiConfig, ValidatorConfig};
 
 use crate::{
-    DEFAULT_ETH1_DB_SIZE, DEFAULT_ETH2_DB_SIZE, DEFAULT_LIBP2P_IPV4_PORT, DEFAULT_LIBP2P_IPV6_PORT,
+    DEFAULT_DATABASE_ZSTD_COMPRESSION_LEVEL, DEFAULT_ETH1_DB_SIZE, DEFAULT_ETH2_DB_SIZE,
+    DEFAULT_LIBP2P_IPV4_PORT, DEFAULT_LIBP2P_IPV6_PORT,
     DEFAULT_LIBP2P_QUIC_IPV4_PORT, DEFAULT_LIBP2P_QUIC_IPV6_PORT, DEFAULT_METRICS_PORT,
     DEFAULT_METRICS_UPDATE_INTERVAL_SECONDS, DEFAULT_REQUEST_TIMEOUT, DEFAULT_TARGET_PEERS,
     DEFAULT_TARGET_SUBNET_PEERS, DEFAULT_TIMEOUT, MetricsConfig, StorageConfig,
@@ -323,9 +324,13 @@ struct BeaconNodeOptions {
     #[clap(long)]
     network_dir: Option<PathBuf>,
 
-    /// Archival epoch interval
+    /// [DEPRECATED] Archival epoch interval. Use --storage-hierarchy instead.
     #[clap(long, default_value_t = DEFAULT_ARCHIVAL_EPOCH_INTERVAL)]
     archival_epoch_interval: NonZeroU64,
+
+    /// Storage hierarchy
+    #[clap(long, default_value_t = Hierarchy::default())]
+    storage_hierarchy: Hierarchy,
 
     /// Enable archival storage mode, where all blocks, states (every --archival-epoch-interval epochs) and blobs are stored in the database
     /// [default: disabled]
@@ -348,6 +353,11 @@ struct BeaconNodeOptions {
     /// Max size of the Eth1 database
     #[clap(long, default_value_t = DEFAULT_ETH1_DB_SIZE)]
     eth1_database_size: ByteSize,
+
+    /// zstd compression level used for hierarchical state diffs stored in the Eth2 database.
+    /// Higher values compress better at the cost of more CPU; only affects newly written diffs.
+    #[clap(long, default_value_t = DEFAULT_DATABASE_ZSTD_COMPRESSION_LEVEL)]
+    database_zstd_compression_level: i32,
 
     /// Default data column reconstruction delay in milliseconds for nodes serving more than half of the available data columns.
     #[clap(long, default_value_t = DEFAULT_RECONSTRUCTION_DELAY_MS)]
@@ -1053,7 +1063,9 @@ impl GrandineArgs {
             network_dir,
             database_size,
             eth1_database_size,
+            database_zstd_compression_level,
             archival_epoch_interval,
+            storage_hierarchy,
             archive_storage,
             prune_storage,
             unfinalized_states_in_memory,
@@ -1448,9 +1460,10 @@ impl GrandineArgs {
             db_size: database_size,
             directories: directories.clone_arc(),
             eth1_db_size: eth1_database_size,
-            archival_epoch_interval,
+            hierarchy: storage_hierarchy,
             reset_databases: force_reset_beacon_db,
             storage_mode,
+            zstd_compression_level: database_zstd_compression_level,
         };
 
         network_config_options.print_upnp_warning();

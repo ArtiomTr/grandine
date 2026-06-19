@@ -15,6 +15,7 @@ crossbeam-utils = { workspace = true }
 database = { workspace = true }
 derivative = { workspace = true }
 derive_more = { workspace = true }
+diff = { workspace = true }
 eth2_libp2p = { workspace = true }
 execution_engine = { workspace = true }
 features = { workspace = true }
@@ -23,6 +24,7 @@ fs-err = { workspace = true }
 futures = { workspace = true }
 genesis = { workspace = true }
 helper_functions = { workspace = true }
+hex = {workspace = true }
 http_api_utils = { workspace = true }
 itertools = { workspace = true }
 logging = { workspace = true }
@@ -34,6 +36,7 @@ panics = { workspace = true }
 parking_lot = { workspace = true }
 prometheus_metrics = { workspace = true }
 pubkey_cache = { workspace = true }
+rayon = { workspace = true }
 reqwest = { workspace = true }
 scc = { workspace = true }
 serde = { workspace = true }
@@ -67,3 +70,6 @@ unwrap_none = { workspace = true }
 
 [features]
 eth2-cache = []
+# Forwards the tracing instrumentation toggle to the core transition crates so
+# their spans are emitted (e.g. when building the `c_grandine` cdylib directly).
+tracing = ['transition_functions/tracing', 'helper_functions/tracing']

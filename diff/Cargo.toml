@@ -1,0 +1,32 @@
+[package]
+name = 'diff'
+edition = { workspace = true }
+authors = ["Grandine <info@grandine.io>"]
+
+[lints]
+workspace = true
+
+[dependencies]
+derivative = { workspace = true }
+bls = { workspace = true, features = ['blst'] }
+ssz = { workspace = true }
+std_ext = { workspace = true }
+typenum = { workspace = true }
+try_from_iterator = { workspace = true }
+types = { workspace = true }
+unsigned-varint = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+criterion = { workspace = true }
+flate2 = { workspace = true }
+lz4_flex = { workspace = true }
+qbsdiff = { workspace = true }
+reqwest = { workspace = true, features = ['blocking'] }
+types = { workspace = true }
+xdelta3 = { workspace = true }
+zstd = { workspace = true }
+
+[[bench]]
+name = 'beacon_state'
+harness = false

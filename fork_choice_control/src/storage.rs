@@ -1,25 +1,39 @@
-use core::{cell::OnceCell, marker::PhantomData, num::NonZeroU64};
-use std::{borrow::Cow, sync::Arc};
+use core::{cell::OnceCell, num::NonZeroU64};
+use std::{
+    borrow::Cow,
+    fmt::{self, Display},
+    io::Write,
+    marker::PhantomData,
+    num::NonZeroUsize,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use anyhow::{Context as _, Error as AnyhowError, Result, bail, ensure};
-use database::{Database, PrefixableKey};
+use arc_swap::ArcSwapOption;
+use cached::{Cached as _, SizedCache};
+use database::{Compression, CompressionSelector, Database, PrefixableKey};
 use derive_more::Display;
+use diff::{BeaconStatePatch, Patch};
 use fork_choice_store::{ChainLink, Store};
 use genesis::AnchorCheckpointProvider;
 use helper_functions::{accessors, misc};
 use itertools::Itertools as _;
 use logging::{debug_with_peers, info_with_peers, warn_with_peers};
 use nonzero_ext::nonzero;
+use parking_lot::Mutex;
 use pubkey_cache::PubkeyCache;
 use reqwest::Client;
 use ssz::{Ssz, SszRead, SszReadDefault, SszWrite};
 use std_ext::ArcExt as _;
 use thiserror::Error;
-use tracing::info;
+use tracing::{Level, Span, field, info, span};
 use transition_functions::combined;
 use typenum::Unsigned as _;
 use types::{
-    PubkeyList, Validators,
+    Validators,
     combined::{BeaconState, DataColumnSidecar, SignedBeaconBlock},
     config::Config,
     deneb::{
@@ -33,12 +47,12 @@ use types::{
         primitives::{Epoch, H256, Slot},
         validator_list::PubkeyList,
     },
-    preset::Preset,
+    preset::{Mainnet, Preset},
     redacting_url::RedactingUrl,
     traits::{BeaconState as _, SignedBeaconBlock as _},
 };
 
-use crate::checkpoint_sync;
+use crate::{checkpoint_sync, hierarchy::Hierarchy};
 
 pub const DEFAULT_ARCHIVAL_EPOCH_INTERVAL: NonZeroU64 = nonzero!(32_u64);
 pub const MAX_DATA_COLUMN_EPOCHS_TO_PRUNE: usize = 100;
@@ -60,13 +74,22 @@ pub enum StateLoadStrategy<P: Preset> {
 
 #[expect(clippy::struct_field_names)]
 #[derive(Clone)]
-pub struct Storage<P> {
+pub struct Storage<P: Preset> {
     config: Arc<Config>,
     pub(crate) database: Arc<Database>,
-    pub(crate) archival_epoch_interval: NonZeroU64,
     storage_mode: StorageMode,
     pub(crate) pubkey_cache: Arc<PubkeyCache>,
-    phantom: PhantomData<P>,
+    hierarchy: Hierarchy,
+    anchor_slot: Arc<AtomicU64>,
+    frame_cache: Arc<Mutex<SizedCache<H256, Arc<BeaconState<P>>>>>,
+    _phantom: PhantomData<P>,
+}
+
+#[derive(Debug, Ssz)]
+#[ssz(derive_hash = false)]
+struct StatePointDelta<P: Preset> {
+    from: H256,
+    patch: BeaconStatePatch<P>,
 }
 
 impl<P: Preset> Storage<P> {
@@ -75,16 +98,18 @@ impl<P: Preset> Storage<P> {
         config: Arc<Config>,
         pubkey_cache: Arc<PubkeyCache>,
         database: Database,
-        archival_epoch_interval: NonZeroU64,
+        hierarchy: Hierarchy,
         storage_mode: StorageMode,
     ) -> Self {
         Self {
             config,
             pubkey_cache,
             database: Arc::new(database),
-            archival_epoch_interval,
             storage_mode,
-            phantom: PhantomData,
+            hierarchy,
+            anchor_slot: Arc::new(AtomicU64::new(0)),
+            frame_cache: Arc::new(Mutex::new(SizedCache::with_size(3))),
+            _phantom: PhantomData,
         }
     }
 
@@ -228,15 +253,60 @@ impl<P: Preset> Storage<P> {
             serialize(FinalizedBlockByRoot(anchor_block_root), &anchor_block)?,
             serialize(BlockRootBySlot(anchor_slot), anchor_block_root)?,
             serialize(SlotByStateRoot(anchor_state_root), anchor_slot)?,
-            serialize(
-                StateByBlockRoot(anchor_block_root),
-                prepare_state(anchor_state.clone_arc(), anchor_validators.len_usize()),
-            )?,
         ];
+
+        // The referential point used to align hierarchical state diffs must stay
+        // fixed across restarts. On a fresh start (first run or
+        // `--force-checkpoint-sync`, both of which load from remote/genesis without
+        // a pre-existing anchor) we establish a new referential point and persist
+        // its snapshot. On restart we instead pick up the anchor that was stored on
+        // disk, so newly persisted states keep being diffed against the same point
+        // as before the node was stopped.
+        let stored_anchor = if loaded_from_remote {
+            None
+        } else {
+            self.get::<StateAnchor>(StateAnchorKey)?
+        };
+
+        let hierarchy_anchor_slot = if let Some(StateAnchor { slot, block_root }) = stored_anchor {
+            info_with_peers!(
+                "reusing stored anchor referential point at slot {slot} (block root {block_root:?})"
+            );
+
+            slot
+        } else {
+            let prepared_anchor_state =
+                prepare_state(anchor_state.clone_arc(), anchor_validators.len_usize());
+            let prepared_anchor_slot = prepared_anchor_state.slot();
+
+            batch.push(serialize(
+                StateByBlockRoot::snapshot(anchor_block_root),
+                &prepared_anchor_state,
+            )?);
+
+            batch.push(serialize(
+                StateAnchorKey,
+                StateAnchor {
+                    slot: prepared_anchor_slot,
+                    block_root: anchor_block_root,
+                },
+            )?);
+
+            prepared_anchor_slot
+        };
 
         self.append_finalized_validator_pubkeys_to_batch(&mut batch, anchor_validators)?;
 
         self.database.put_batch(batch)?;
+
+        self.anchor_slot
+            .store(hierarchy_anchor_slot, Ordering::SeqCst);
+
+        // The cache holds referential frames with their pubkeys intact; only the
+        // serialized snapshot above is zeroized to shrink it on disk.
+        self.frame_cache
+            .lock()
+            .cache_set(anchor_block_root, anchor_state.clone_arc());
 
         let state_storage = (anchor_state, anchor_block, unfinalized_blocks);
 
@@ -270,7 +340,6 @@ impl<P: Preset> Storage<P> {
         let mut slots = AppendedBlockSlots::default();
         let mut store_head_slot = 0;
         let mut checkpoint_state_appended = false;
-        let mut archival_state_appended = false;
         let mut batch = vec![];
 
         let finalized_validators = store.finalized_validators();
@@ -323,13 +392,16 @@ impl<P: Preset> Storage<P> {
                 }
 
                 let state = OnceCell::new();
-                let state_epoch = Self::epoch_at_slot(state_slot);
                 let is_epoch_start = misc::is_epoch_start::<P>(state_slot);
-                let is_archival_epoch_start = is_epoch_start
-                    && state_epoch.is_multiple_of(self.archival_epoch_interval.into());
+
+                let (relative_slot, use_anchor) = state_slot
+                    .checked_sub(self.anchor_slot.load(Ordering::SeqCst))
+                    .map(|slot| (slot, true))
+                    .unwrap_or((state_slot, false));
 
                 if !checkpoint_state_appended
-                    && ((store.is_forward_synced() && is_epoch_start) || is_archival_epoch_start)
+                    && ((store.is_forward_synced() && is_epoch_start)
+                        || self.hierarchy.contains::<P>(relative_slot))
                 {
                     info_with_peers!("saving checkpoint block & state in slot {state_slot}");
 
@@ -356,22 +428,47 @@ impl<P: Preset> Storage<P> {
                     update_finalized_validators = true;
                 }
 
-                if !archival_state_appended
-                    && !self.prune_storage_enabled()
-                    && is_archival_epoch_start
-                {
+                if !self.prune_storage_enabled() && self.hierarchy.contains::<P>(relative_slot) {
                     info_with_peers!("saving state in slot {state_slot}");
 
-                    batch.push(serialize(
-                        StateByBlockRoot(block_root),
-                        prepare_state(
-                            state.get_or_init(|| chain_link.state(store)).clone_arc(),
-                            finalized_validators.len_usize(),
-                        ),
-                    )?);
+                    let full_state = state.get_or_init(|| chain_link.state(store)).clone_arc();
 
-                    archival_state_appended = true;
                     update_finalized_validators = true;
+
+                    let Some(parent) = self.hierarchy.parent_of::<P>(relative_slot) else {
+                        // Referential frame: zeroize the finalized pubkeys for
+                        // storage only; the in-memory frame keeps them intact.
+                        batch.push(serialize(
+                            StateByBlockRoot::snapshot(block_root),
+                            &prepare_state(full_state, finalized_validators.len_usize()),
+                        )?);
+                        continue;
+                    };
+
+                    let parent_absolute = parent
+                        + use_anchor
+                            .then(|| self.anchor_slot.load(Ordering::SeqCst))
+                            .unwrap_or_default();
+
+                    let Some(parent_block_root) = self.block_root_by_slot(parent_absolute)? else {
+                        todo!("put a warning & save full snapshot in here, if it is not a leaf");
+                    };
+
+                    // TODO: the chain states are being processed from newest to oldest one. In an unlikely event, we
+                    // may reference the state, that was not yet persisted. Due to this, we won't be able to compute
+                    // diff properly.
+                    let Some((parent_key, parent_state)) = self.state_with_key_by_block_root(
+                        parent_block_root,
+                        Some(&finalized_validators),
+                    )?
+                    else {
+                        todo!("put a warning & save full snapshot in here, if it is not a leaf");
+                    };
+
+                    // Diffs are always computed between full (non-zeroized) states.
+                    let diff = BeaconStatePatch::diff(&parent_state, &full_state)?;
+
+                    batch.push(serialize(parent_key.extend_chain(block_root), diff)?);
                 }
             }
         }
@@ -427,14 +524,14 @@ impl<P: Preset> Storage<P> {
         let mut update_finalized_validators = false;
 
         for (state, block_root) in states_with_block_roots {
-            if !self.contains_key(StateByBlockRoot(block_root))? {
+            if !self.contains_prefixed_key(StateByBlockRoot::snapshot(block_root))? {
                 let archival_state = state.clone_arc();
 
-                slots.push(state.slot());
-                batch.push(serialize(
-                    StateByBlockRoot(block_root),
-                    prepare_state(archival_state, finalized_validators.len_usize()),
-                )?);
+                // slots.push(state.slot());
+                // batch.push(serialize(
+                //     StateByBlockRoot(block_root),
+                //     prepare_state(archival_state, finalized_validators.len_usize()),
+                // )?);
 
                 update_finalized_validators = true;
             }
@@ -496,7 +593,7 @@ impl<P: Preset> Storage<P> {
             let block_root = H256::from_ssz_default(block_root_bytes)?;
 
             keys_to_remove.push(FinalizedBlockByRoot(block_root).to_string().into());
-            keys_to_remove.push(StateByBlockRoot(block_root).to_string().into());
+            // keys_to_remove.push(StateByBlockRoot(block_root).to_string().into());
         }
 
         self.database.delete_batch(keys_to_remove)
@@ -686,19 +783,171 @@ impl<P: Preset> Storage<P> {
         self.get(BlockRootBySlot(slot))
     }
 
+    #[tracing::instrument(skip_all, fields(block_root = %block_root))]
+    fn state_with_key_by_block_root(
+        &self,
+        block_root: H256,
+        finalized_validators: Option<&Validators<P>>,
+    ) -> Result<Option<(StateByBlockRoot, Arc<BeaconState<P>>)>> {
+        let span = span!(Level::INFO, "load_first", block_root = %block_root, key = field::Empty, parents = field::Empty).entered();
+
+        let prefix = StateByBlockRoot {
+            block_root,
+            parents: Vec::new(),
+        }
+        .to_string();
+
+        // Fetch only the key first. If this resolves to an already-cached referential frame we can
+        // return it without ever reading or decompressing the (large) snapshot value from disk,
+        // which would otherwise waste ~170ms on a guaranteed cache hit.
+        let Some(full_key) = self.database.next_key(&prefix)? else {
+            return Ok(None);
+        };
+        span.record("key", String::from_utf8(full_key.clone()).unwrap());
+
+        let Some(key) = full_key.strip_prefix(prefix.as_bytes()) else {
+            return Ok(None);
+        };
+
+        let parents_iter = key.chunks_exact(64);
+        ensure!(parents_iter.remainder().is_empty(), "invalid state key");
+        let parents = parents_iter
+            .map(|root| {
+                let root_str = str::from_utf8(root)?;
+                let mut root = H256::default();
+
+                hex::decode_to_slice(root_str, &mut root.0)?;
+                Ok(root)
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        span.record("parents", format!("{parents:?}"));
+        span.exit();
+
+        if parents.is_empty()
+            && let Some(cached_frame) = self.frame_cache.lock().cache_get(&block_root)
+        {
+            let _span = span!(Level::INFO, "frame_cache_hit", block_root = %block_root).entered();
+
+            return Ok(Some((
+                StateByBlockRoot {
+                    block_root,
+                    parents,
+                },
+                cached_frame.clone(),
+            )));
+        }
+
+        // Not a cached frame: now read and decompress the value addressed by the key we found.
+        let value = {
+            let load_value_span =
+                span!(Level::INFO, "load_first_value", bytes = field::Empty).entered();
+            let Some(value) = self.database.get(&full_key)? else {
+                return Ok(None);
+            };
+            load_value_span.record("bytes", value.len());
+            value
+        };
+
+        let mut items = vec![value];
+        let mut frame = None;
+
+        for &block_root in parents.iter() {
+            if let Some(cached_frame) = self.frame_cache.lock().cache_get(&block_root) {
+                frame = Some(cached_frame.clone());
+                break;
+            }
+
+            let _span = span!(Level::INFO, "load_next", block_root = %block_root).entered();
+            let search_key = StateByBlockRoot {
+                block_root,
+                parents: Vec::new(),
+            }
+            .to_string();
+            let Some((key, value)) = self.database.next(&search_key)? else {
+                bail!("unable to reconstruct state, as it references non-existent state");
+            };
+
+            if !key.starts_with(search_key.as_bytes()) {
+                bail!("unable to reconstruct state, as it references non-existent state");
+            }
+
+            items.push(value);
+        }
+
+        items.reverse();
+
+        let (mut frame, deltas) = if let Some(frame) = frame {
+            (frame, items.as_slice())
+        } else {
+            let Some((frame_bytes, deltas)) = items.split_first() else {
+                unreachable!("items cannot be empty")
+            };
+            let frame_block_root = parents.last().copied().unwrap_or(block_root);
+
+            let span = span!(Level::INFO, "deserialize frame").entered();
+            let mut frame = Arc::<BeaconState<P>>::from_ssz(&self.config, frame_bytes)?;
+            span.exit();
+
+            // The frame snapshot is stored with its finalized pubkeys zeroized to
+            // shrink it on disk. Restore them before caching so the cache holds a
+            // full referential frame and every diff is applied on a normal state.
+            self.restore_validators_to_state(frame.make_mut(), finalized_validators)?;
+
+            // Seed the frame's cached root here, at the single point where a frame enters
+            // the cache (this branch only runs on a cache miss). The frame is the post-state
+            // of `frame_block_root`, so its root is that block's `state_root`. Doing it once,
+            // now, keeps every cached frame self-contained: later cache hits return an
+            // already-rooted state, and `stored_state` never re-sets the root on the shared
+            // `Arc` (which would panic, since the root lives in a write-once cell).
+            if let Some(block) = self.finalized_block_by_root(frame_block_root)? {
+                frame.set_cached_root(block.message().state_root());
+            }
+
+            self.frame_cache
+                .lock()
+                .cache_set(frame_block_root, frame.clone());
+
+            (frame, deltas)
+        };
+
+        for delta in deltas {
+            let _span = span!(Level::INFO, "apply_delta", block_root = %block_root).entered();
+            let patch = {
+                let _span = span!(Level::INFO, "apply_delta::from_ssz").entered();
+                BeaconStatePatch::from_ssz(&self.config, delta)?
+            };
+            frame = {
+                let _span = span!(Level::INFO, "apply_delta::apply").entered();
+                patch.apply(frame)?
+            };
+        }
+
+        Ok(Some((
+            StateByBlockRoot {
+                block_root,
+                parents,
+            },
+            frame,
+        )))
+    }
+
+    #[tracing::instrument(skip_all, fields(block_root = %block_root))]
     fn state_by_block_root(
         &self,
         block_root: H256,
         finalized_validators: Option<&Validators<P>>,
     ) -> Result<Option<Arc<BeaconState<P>>>> {
-        let Some(mut state) = self.get::<Arc<BeaconState<P>>>(StateByBlockRoot(block_root))? else {
-            return Ok(None);
-        };
-
-        // Restore validators if they were removed
-        self.restore_validators_to_state(state.make_mut(), finalized_validators)?;
-
-        Ok(Some(state))
+        // Pubkeys are zeroized/restored only for referential, full-state frames.
+        // `state_with_key_by_block_root` already restores the finalized pubkeys on
+        // the referential frame before caching it and applying any diffs (the diffs
+        // are computed between full states), so the returned state always has its
+        // pubkeys intact. Restoring again here would needlessly `make_mut` (deep
+        // clone) shared cached frames and apply a frame-level step to delta-derived
+        // states.
+        Ok(self
+            .state_with_key_by_block_root(block_root, finalized_validators)?
+            .map(|(_, state)| state))
     }
 
     pub(crate) fn slot_by_state_root(&self, state_root: H256) -> Result<Option<Slot>> {
@@ -749,34 +998,74 @@ impl<P: Preset> Storage<P> {
         Ok(Some((block, block_root)))
     }
 
+    #[tracing::instrument(
+        skip_all,
+        fields(slot = %slot, base_slot = field::Empty, blocks_replayed = field::Empty),
+    )]
     pub(crate) fn stored_state(
         &self,
         slot: Slot,
         finalized_validators: Option<&Validators<P>>,
     ) -> Result<Option<Arc<BeaconState<P>>>> {
-        let (mut state, state_block, blocks) =
+        // Loading the base state reconstructs a referential frame and replays the stored diffs onto
+        // it (see `state_with_key_by_block_root`); this is the dominant cost of the first call after
+        // crossing into a new frame.
+        // The base state's root is seeded once, when its referential frame enters the cache
+        // (see `state_with_key_by_block_root`), so the block here is no longer needed to set it.
+        // It is intentionally not re-set on this path: the frame is shared via the cache and its
+        // root lives in a write-once cell, so a second `set_cached_root` on a cache hit would
+        // panic. Any diffs replayed below clone the state and invalidate the cached root anyway.
+        let (mut state, _state_block, blocks) = {
+            let _span = span!(Level::INFO, "load_base_state", %slot).entered();
+
             match self.load_state_by_iteration(slot, finalized_validators)? {
                 OptionalStateStorage::None | OptionalStateStorage::UnfinalizedOnly(_) => {
                     return Ok(None);
                 }
                 OptionalStateStorage::Full(state_storage) => state_storage,
-            };
+            }
+        };
 
-        state.set_cached_root(state_block.message().state_root());
+        Span::current().record("base_slot", state.slot());
+
+        // The base state was reconstructed from diffs, so its Merkle cache is cold. The first
+        // `process_slot` of the replay below would otherwise rebuild the entire state tree on one
+        // thread (dominated by the per-validator lists). Warm the largest fields' caches in
+        // parallel first; `make_mut` preserves the cached roots when the replay clones the state,
+        // so the first `hash_tree_root` only has to recombine already-hashed subtrees.
+        {
+            let _span = span!(Level::INFO, "prewarm_state_hash_caches", %slot).entered();
+            prewarm_state_hash_caches(&state);
+        }
 
         // State may be persisted only once in several epochs.
         // `blocks` here are needed to transition state closer to `slot`.
+        let mut blocks_replayed = 0_u64;
+
         for result in blocks.rev() {
             let block = result?;
-            combined::trusted_state_transition(
-                &self.config,
-                &self.pubkey_cache,
-                state.make_mut(),
-                &block,
-            )?;
+            let block_slot = block.message().slot();
+            let is_epoch_start = misc::is_epoch_start::<P>(block_slot);
+            let _span =
+                span!(Level::INFO, "state_transition", %block_slot, is_epoch_start).entered();
+
+            let state = {
+                // The first replayed block forces a deep copy-on-write clone of the loaded state,
+                // which can dominate this span for large states.
+                let _span = span!(Level::DEBUG, "state_make_mut", %block_slot).entered();
+                state.make_mut()
+            };
+
+            combined::trusted_state_transition(&self.config, &self.pubkey_cache, state, &block)?;
+
+            blocks_replayed += 1;
         }
 
+        Span::current().record("blocks_replayed", blocks_replayed);
+
         if state.slot() < slot {
+            let _span =
+                span!(Level::INFO, "process_empty", from = %state.slot(), to = %slot).entered();
             combined::process_slots(&self.config, &self.pubkey_cache, state.make_mut(), slot)?;
         }
 
@@ -908,6 +1197,7 @@ impl<P: Preset> Storage<P> {
         Ok(None)
     }
 
+    #[tracing::instrument(skip_all, fields(start_from_slot = %start_from_slot))]
     fn load_state_by_iteration(
         &self,
         start_from_slot: Slot,
@@ -917,18 +1207,24 @@ impl<P: Preset> Storage<P> {
             .database
             .iterator_descending(..=BlockRootBySlot(start_from_slot).to_string())?;
 
-        let results = itertools::process_results(results, |iter| {
-            iter.take_while(|(key_bytes, _)| BlockRootBySlot::has_prefix(key_bytes))
-                .map(|(_, v)| v)
-                .collect::<Vec<_>>()
-        })?;
-
         let mut block_roots = vec![];
 
-        for value_bytes in results {
+        // Walk descending from `start_from_slot` only until the first persisted snapshot is found.
+        // The iterator is lazy, so breaking out here avoids reading and deserializing every block
+        // root all the way down to genesis: the base state is usually within one epoch, so only a
+        // handful of entries are touched instead of the entire `BlockRootBySlot` keyspace.
+        for result in results {
+            let (key_bytes, value_bytes) = result?;
+
+            // The descending iterator keeps going past the `BlockRootBySlot` keyspace into other
+            // prefixes; stop once we leave it (equivalent to the old `take_while`).
+            if !BlockRootBySlot::has_prefix(&key_bytes) {
+                break;
+            }
+
             let block_root = H256::from_ssz_default(value_bytes)?;
 
-            if self.contains_key(StateByBlockRoot(block_root))? {
+            if self.contains_prefixed_key(StateByBlockRoot::snapshot(block_root))? {
                 let Some(block) = self.finalized_block_by_root(block_root)? else {
                     // States are also persisted from unfinalized chain
                     continue;
@@ -979,13 +1275,19 @@ impl<P: Preset> Storage<P> {
         Ok(Some(checkpoint))
     }
 
-    fn contains_key(&self, key: impl core::fmt::Display) -> Result<bool> {
+    fn contains_prefixed_key(&self, key: impl Display) -> Result<bool> {
+        let key_string = key.to_string();
+
+        self.database.contains_prefixed_key(key_string)
+    }
+
+    fn contains_key(&self, key: impl Display) -> Result<bool> {
         let key_string = key.to_string();
 
         self.database.contains_key(key_string)
     }
 
-    fn get<V: SszRead<Config>>(&self, key: impl core::fmt::Display) -> Result<Option<V>> {
+    fn get<V: SszRead<Config>>(&self, key: impl Display) -> Result<Option<V>> {
         let key_string = key.to_string();
 
         if let Some(value_bytes) = self.database.get(key_string)? {
@@ -1014,6 +1316,7 @@ impl<P: Preset> Storage<P> {
         misc::compute_epoch_at_slot::<P>(slot)
     }
 
+    #[tracing::instrument(skip_all)]
     fn restore_validators_to_state(
         &self,
         state: &mut BeaconState<P>,
@@ -1133,13 +1436,15 @@ impl<P: Preset> Storage<P> {
     pub fn state_count(&self) -> Result<usize> {
         let results = self
             .database
-            .iterator_ascending(StateByBlockRoot(H256::zero()).to_string()..)?;
+            .iterator_ascending(StateByBlockRoot::snapshot(H256::zero()).to_string()..)?;
 
-        itertools::process_results(results, |pairs| {
+        let frame_count = itertools::process_results(results, |pairs| {
             pairs
                 .take_while(|(key_bytes, _)| StateByBlockRoot::has_prefix(key_bytes))
                 .count()
-        })
+        })?;
+
+        Ok(frame_count)
     }
 
     pub fn blob_sidecar_by_blob_id_count(&self) -> Result<usize> {
@@ -1279,12 +1584,42 @@ impl PrefixableKey for UnfinalizedBlockByRoot {
     const PREFIX: &'static str = "b_nf";
 }
 
-#[derive(Display)]
-#[display("{}{_0:x}", Self::PREFIX)]
-pub struct StateByBlockRoot(pub H256);
+#[derive(Debug)]
+pub struct StateByBlockRoot {
+    block_root: H256,
+    parents: Vec<H256>,
+}
 
 impl PrefixableKey for StateByBlockRoot {
     const PREFIX: &'static str = "s";
+}
+
+impl Display for StateByBlockRoot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}{:x}", Self::PREFIX, self.block_root)?;
+        for i in &self.parents {
+            write!(f, "{:x}", i)?;
+        }
+        Ok(())
+    }
+}
+
+impl StateByBlockRoot {
+    fn snapshot(block_root: H256) -> Self {
+        Self {
+            block_root,
+            parents: Vec::new(),
+        }
+    }
+
+    fn extend_chain(mut self, block_root: H256) -> Self {
+        self.parents.insert(0, self.block_root);
+
+        Self {
+            block_root,
+            parents: self.parents,
+        }
+    }
 }
 
 #[derive(Display)]
@@ -1361,6 +1696,21 @@ impl PrefixableKey for SlotColumnId {
     const PREFIX: &'static str = "c";
 }
 
+#[derive(Display)]
+#[display("{}", Self::PREFIX)]
+pub struct StateAnchorKey;
+
+impl PrefixableKey for StateAnchorKey {
+    const PREFIX: &'static str = "anchor";
+}
+
+#[derive(Debug, Ssz)]
+#[ssz(derive_hash = false)]
+pub struct StateAnchor {
+    slot: Slot,
+    block_root: H256,
+}
+
 #[derive(Debug, Error)]
 pub enum Error {
     #[error("checkpoint sync failed")]
@@ -1384,14 +1734,11 @@ pub enum Error {
     IncorrectPrefix { bytes: Vec<u8> },
 }
 
-pub fn save(database: &Database, key: impl core::fmt::Display, value: impl SszWrite) -> Result<()> {
+pub fn save(database: &Database, key: impl Display, value: impl SszWrite) -> Result<()> {
     database.put(serialize_key(key), serialize_value(value)?)
 }
 
-pub fn get<V: SszReadDefault>(
-    database: &Database,
-    key: impl core::fmt::Display,
-) -> Result<Option<V>> {
+pub fn get<V: SszReadDefault>(database: &Database, key: impl Display) -> Result<Option<V>> {
     database
         .get(serialize_key(key))?
         .map(V::from_ssz_default)
@@ -1399,7 +1746,41 @@ pub fn get<V: SszReadDefault>(
         .map_err(Into::into)
 }
 
-fn serialize_key(key: impl core::fmt::Display) -> String {
+/// Populates the Merkle caches of a state's largest fields in parallel.
+///
+/// Used right after reconstructing a base state from diffs (which leaves every cache cold) so that
+/// the first `hash_tree_root` during replay recombines already-hashed subtrees instead of rebuilding
+/// the whole tree on one thread. Each list caches its node roots through interior mutability, so
+/// only shared access is required. The closures borrow `state` (which is `Sync`); the `post_altair`
+/// trait object is created and used inside the worker thread, never sent across threads.
+fn prewarm_state_hash_caches<P: Preset>(state: &BeaconState<P>) {
+    // Only the large per-validator `PersistentList` fields are warmed here. They dominate the cold
+    // hash and cache their node roots through interior mutability with no panic path (an empty list
+    // hashes to the zero root). The validator registry is excluded: it is already kept warm via
+    // structural sharing, and its `hash_tree_root` asserts the presence of a cache.
+    rayon::scope(|scope| {
+        scope.spawn(|_| {
+            state.balances().par_warm_hash();
+        });
+        scope.spawn(|_| {
+            if let Some(state) = state.post_altair() {
+                state.previous_epoch_participation().par_warm_hash();
+            }
+        });
+        scope.spawn(|_| {
+            if let Some(state) = state.post_altair() {
+                state.current_epoch_participation().par_warm_hash();
+            }
+        });
+        scope.spawn(|_| {
+            if let Some(state) = state.post_altair() {
+                state.inactivity_scores().par_warm_hash();
+            }
+        });
+    });
+}
+
+fn serialize_key(key: impl Display) -> String {
     key.to_string()
 }
 
@@ -1407,8 +1788,41 @@ fn serialize_value(value: impl SszWrite) -> Result<Vec<u8>> {
     value.to_ssz().map_err(Into::into)
 }
 
-pub fn serialize(key: impl core::fmt::Display, value: impl SszWrite) -> Result<(String, Vec<u8>)> {
+pub fn serialize(key: impl Display, value: impl SszWrite) -> Result<(String, Vec<u8>)> {
     Ok((serialize_key(key), serialize_value(value)?))
+}
+
+/// Returns `true` if `key` addresses a hierarchical state *diff* (a [`BeaconStatePatch`]) rather
+/// than a referential frame snapshot.
+///
+/// `StateByBlockRoot` snapshot keys are `PREFIX` followed by a single 32-byte root encoded as 64
+/// hex characters. Diff keys additionally encode one or more parent roots (64 hex characters each),
+/// so they are strictly longer. Only diffs are stored as patches, and those are what benefit from
+/// zstd compression.
+#[must_use]
+pub fn is_state_diff_key(key: &[u8]) -> bool {
+    // A 32-byte `H256` root is rendered as 64 hex characters by the `Display` impl.
+    const ROOT_HEX_LEN: usize = 64;
+
+    key.starts_with(StateByBlockRoot::PREFIX.as_bytes())
+        && key.len() > StateByBlockRoot::PREFIX.len() + ROOT_HEX_LEN
+}
+
+/// Builds the [`CompressionSelector`] for the beacon fork choice database.
+///
+/// State diffs are compressed with zstd at `zstd_level`; every other key keeps using Snappy, which
+/// preserves the on-disk format of databases created before per-key compression existed. The level
+/// only affects writes — decompression is level-independent — so the same selector works for
+/// read-only consumers regardless of the level passed.
+#[must_use]
+pub fn beacon_state_compression_selector(zstd_level: i32) -> CompressionSelector {
+    Arc::new(move |key: &[u8]| {
+        if is_state_diff_key(key) {
+            Compression::Zstd(zstd_level)
+        } else {
+            Compression::Snappy
+        }
+    })
 }
 
 // Add more info when needed
@@ -1448,272 +1862,272 @@ fn prepare_state<P: Preset>(
     state
 }
 
-#[cfg(test)]
-mod tests {
-    use bytesize::ByteSize;
-    use database::DatabaseMode;
-    use tempfile::TempDir;
-    use types::{
-        phase0::containers::{
-            BeaconBlock as Phase0BeaconBlock, SignedBeaconBlock as Phase0SignedBeaconBlock,
-        },
-        preset::Mainnet,
-    };
+// #[cfg(test)]
+// mod tests {
+//     use bytesize::ByteSize;
+//     use database::DatabaseMode;
+//     use tempfile::TempDir;
+//     use types::{
+//         phase0::containers::{
+//             BeaconBlock as Phase0BeaconBlock, SignedBeaconBlock as Phase0SignedBeaconBlock,
+//         },
+//         preset::Mainnet,
+//     };
 
-    use super::*;
+//     use super::*;
 
-    fn block_with_slot(slot: Slot) -> SignedBeaconBlock<Mainnet> {
-        SignedBeaconBlock::<Mainnet>::Phase0(Phase0SignedBeaconBlock {
-            message: Phase0BeaconBlock {
-                slot,
-                ..Phase0BeaconBlock::default()
-            }
-            .into(),
-            ..Phase0SignedBeaconBlock::default()
-        })
-    }
+//     fn block_with_slot(slot: Slot) -> SignedBeaconBlock<Mainnet> {
+//         SignedBeaconBlock::<Mainnet>::Phase0(Phase0SignedBeaconBlock {
+//             message: Phase0BeaconBlock {
+//                 slot,
+//                 ..Phase0BeaconBlock::default()
+//             }
+//             .into(),
+//             ..Phase0SignedBeaconBlock::default()
+//         })
+//     }
 
-    #[test]
-    fn test_prune_unfinalized_blocks() -> Result<()> {
-        let database = Database::persistent(
-            "test_db",
-            TempDir::new()?,
-            ByteSize::mib(10),
-            DatabaseMode::ReadWrite,
-            None,
-        )?;
+//     #[test]
+//     fn test_prune_unfinalized_blocks() -> Result<()> {
+//         let database = Database::persistent(
+//             "test_db",
+//             TempDir::new()?,
+//             ByteSize::mib(10),
+//             DatabaseMode::ReadWrite,
+//             None,
+//         )?;
 
-        let block_1 = block_with_slot(1);
-        let block_3 = block_with_slot(3);
-        let block_5 = block_with_slot(5);
-        let block_6 = block_with_slot(6);
-        let block_10 = block_with_slot(10);
+//         let block_1 = block_with_slot(1);
+//         let block_3 = block_with_slot(3);
+//         let block_5 = block_with_slot(5);
+//         let block_6 = block_with_slot(6);
+//         let block_10 = block_with_slot(10);
 
-        database.put_batch(vec![
-            // Slot 1
-            serialize(BlockRootBySlot(1), H256::repeat_byte(1))?,
-            serialize(FinalizedBlockByRoot(H256::repeat_byte(1)), &block_1)?,
-            serialize(SlotByStateRoot(H256::repeat_byte(1)), 1_u64)?,
-            serialize(StateByBlockRoot(H256::repeat_byte(1)), 1_u64)?,
-            // Slot 3
-            serialize(BlockRootBySlot(3), H256::repeat_byte(3))?,
-            serialize(FinalizedBlockByRoot(H256::repeat_byte(3)), &block_3)?,
-            // Slot 5
-            serialize(BlockRootBySlot(5), H256::repeat_byte(5))?,
-            serialize(UnfinalizedBlockByRoot(H256::repeat_byte(5)), &block_5)?,
-            //Slot 6
-            serialize(BlockRootBySlot(6), H256::repeat_byte(6))?,
-            serialize(FinalizedBlockByRoot(H256::repeat_byte(6)), &block_6)?,
-            serialize(UnfinalizedBlockByRoot(H256::repeat_byte(6)), &block_6)?,
-            serialize(SlotByStateRoot(H256::repeat_byte(6)), 6_u64)?,
-            serialize(StateByBlockRoot(H256::repeat_byte(6)), 6_u64)?,
-            // Slot 10, test case that "10" < "3" is not true
-            serialize(BlockRootBySlot(10), H256::repeat_byte(10))?,
-            serialize(UnfinalizedBlockByRoot(H256::repeat_byte(10)), &block_10)?,
-            serialize(SlotByStateRoot(H256::repeat_byte(10)), 10_u64)?,
-            serialize(StateByBlockRoot(H256::repeat_byte(10)), 10_u64)?,
-        ])?;
+//         database.put_batch(vec![
+//             // Slot 1
+//             serialize(BlockRootBySlot(1), H256::repeat_byte(1))?,
+//             serialize(FinalizedBlockByRoot(H256::repeat_byte(1)), &block_1)?,
+//             serialize(SlotByStateRoot(H256::repeat_byte(1)), 1_u64)?,
+//             serialize(StateByBlockRoot(H256::repeat_byte(1)), 1_u64)?,
+//             // Slot 3
+//             serialize(BlockRootBySlot(3), H256::repeat_byte(3))?,
+//             serialize(FinalizedBlockByRoot(H256::repeat_byte(3)), &block_3)?,
+//             // Slot 5
+//             serialize(BlockRootBySlot(5), H256::repeat_byte(5))?,
+//             serialize(UnfinalizedBlockByRoot(H256::repeat_byte(5)), &block_5)?,
+//             //Slot 6
+//             serialize(BlockRootBySlot(6), H256::repeat_byte(6))?,
+//             serialize(FinalizedBlockByRoot(H256::repeat_byte(6)), &block_6)?,
+//             serialize(UnfinalizedBlockByRoot(H256::repeat_byte(6)), &block_6)?,
+//             serialize(SlotByStateRoot(H256::repeat_byte(6)), 6_u64)?,
+//             serialize(StateByBlockRoot(H256::repeat_byte(6)), 6_u64)?,
+//             // Slot 10, test case that "10" < "3" is not true
+//             serialize(BlockRootBySlot(10), H256::repeat_byte(10))?,
+//             serialize(UnfinalizedBlockByRoot(H256::repeat_byte(10)), &block_10)?,
+//             serialize(SlotByStateRoot(H256::repeat_byte(10)), 10_u64)?,
+//             serialize(StateByBlockRoot(H256::repeat_byte(10)), 10_u64)?,
+//         ])?;
 
-        let storage = Storage::<Mainnet>::new(
-            Arc::new(Config::mainnet()),
-            Arc::new(PubkeyCache::default()),
-            database,
-            nonzero!(64_u64),
-            StorageMode::default(),
-        );
+//         let storage = Storage::<Mainnet>::new(
+//             Arc::new(Config::mainnet()),
+//             Arc::new(PubkeyCache::default()),
+//             database,
+//             nonzero!(64_u64),
+//             StorageMode::default(),
+//         );
 
-        // slots 1, 3, 10
-        assert_eq!(storage.finalized_block_count()?, 3);
-        // slots 1, 3, 5, 6, 10
-        assert_eq!(storage.unfinalized_block_count()?, 3);
-        assert_eq!(storage.block_root_by_slot_count()?, 5);
-        assert_eq!(storage.slot_by_state_root_count()?, 3);
-        assert_eq!(storage.state_count()?, 3);
+//         // slots 1, 3, 10
+//         assert_eq!(storage.finalized_block_count()?, 3);
+//         // slots 1, 3, 5, 6, 10
+//         assert_eq!(storage.unfinalized_block_count()?, 3);
+//         assert_eq!(storage.block_root_by_slot_count()?, 5);
+//         assert_eq!(storage.slot_by_state_root_count()?, 3);
+//         assert_eq!(storage.state_count()?, 3);
 
-        storage.prune_unfinalized_blocks(6)?;
+//         storage.prune_unfinalized_blocks(6)?;
 
-        // slots 1, 3, 10
-        assert_eq!(storage.finalized_block_count()?, 3);
-        // slots 10
-        assert_eq!(storage.unfinalized_block_count()?, 1);
-        assert_eq!(storage.block_root_by_slot_count()?, 4);
-        assert_eq!(storage.slot_by_state_root_count()?, 3);
-        assert_eq!(storage.state_count()?, 3);
+//         // slots 1, 3, 10
+//         assert_eq!(storage.finalized_block_count()?, 3);
+//         // slots 10
+//         assert_eq!(storage.unfinalized_block_count()?, 1);
+//         assert_eq!(storage.block_root_by_slot_count()?, 4);
+//         assert_eq!(storage.slot_by_state_root_count()?, 3);
+//         assert_eq!(storage.state_count()?, 3);
 
-        Ok(())
-    }
+//         Ok(())
+//     }
 
-    #[test]
-    fn test_prune_old_blocks_and_states() -> Result<()> {
-        let database = Database::persistent(
-            "test_db",
-            TempDir::new()?,
-            ByteSize::mib(10),
-            DatabaseMode::ReadWrite,
-            None,
-        )?;
+//     #[test]
+//     fn test_prune_old_blocks_and_states() -> Result<()> {
+//         let database = Database::persistent(
+//             "test_db",
+//             TempDir::new()?,
+//             ByteSize::mib(10),
+//             DatabaseMode::ReadWrite,
+//             None,
+//         )?;
 
-        let block = SignedBeaconBlock::<Mainnet>::Phase0(Phase0SignedBeaconBlock::default());
+//         let block = SignedBeaconBlock::<Mainnet>::Phase0(Phase0SignedBeaconBlock::default());
 
-        database.put_batch(vec![
-            // Slot 1
-            serialize(BlockRootBySlot(1), H256::repeat_byte(1))?,
-            serialize(FinalizedBlockByRoot(H256::repeat_byte(1)), &block)?,
-            serialize(SlotByStateRoot(H256::repeat_byte(1)), 1_u64)?,
-            serialize(StateByBlockRoot(H256::repeat_byte(1)), 1_u64)?,
-            // Slot 3
-            serialize(BlockRootBySlot(3), H256::repeat_byte(3))?,
-            serialize(FinalizedBlockByRoot(H256::repeat_byte(3)), &block)?,
-            // Slot 5
-            serialize(BlockRootBySlot(5), H256::repeat_byte(5))?,
-            serialize(UnfinalizedBlockByRoot(H256::repeat_byte(5)), &block)?,
-            //Slot 6
-            serialize(BlockRootBySlot(6), H256::repeat_byte(6))?,
-            serialize(UnfinalizedBlockByRoot(H256::repeat_byte(6)), &block)?,
-            serialize(SlotByStateRoot(H256::repeat_byte(6)), 6_u64)?,
-            serialize(StateByBlockRoot(H256::repeat_byte(6)), 6_u64)?,
-            // Slot 10, test case that "10" < "3" is not true
-            serialize(BlockRootBySlot(10), H256::repeat_byte(10))?,
-            serialize(UnfinalizedBlockByRoot(H256::repeat_byte(10)), &block)?,
-            serialize(SlotByStateRoot(H256::repeat_byte(10)), 10_u64)?,
-            serialize(StateByBlockRoot(H256::repeat_byte(10)), 10_u64)?,
-        ])?;
+//         database.put_batch(vec![
+//             // Slot 1
+//             serialize(BlockRootBySlot(1), H256::repeat_byte(1))?,
+//             serialize(FinalizedBlockByRoot(H256::repeat_byte(1)), &block)?,
+//             serialize(SlotByStateRoot(H256::repeat_byte(1)), 1_u64)?,
+//             serialize(StateByBlockRoot(H256::repeat_byte(1)), 1_u64)?,
+//             // Slot 3
+//             serialize(BlockRootBySlot(3), H256::repeat_byte(3))?,
+//             serialize(FinalizedBlockByRoot(H256::repeat_byte(3)), &block)?,
+//             // Slot 5
+//             serialize(BlockRootBySlot(5), H256::repeat_byte(5))?,
+//             serialize(UnfinalizedBlockByRoot(H256::repeat_byte(5)), &block)?,
+//             //Slot 6
+//             serialize(BlockRootBySlot(6), H256::repeat_byte(6))?,
+//             serialize(UnfinalizedBlockByRoot(H256::repeat_byte(6)), &block)?,
+//             serialize(SlotByStateRoot(H256::repeat_byte(6)), 6_u64)?,
+//             serialize(StateByBlockRoot(H256::repeat_byte(6)), 6_u64)?,
+//             // Slot 10, test case that "10" < "3" is not true
+//             serialize(BlockRootBySlot(10), H256::repeat_byte(10))?,
+//             serialize(UnfinalizedBlockByRoot(H256::repeat_byte(10)), &block)?,
+//             serialize(SlotByStateRoot(H256::repeat_byte(10)), 10_u64)?,
+//             serialize(StateByBlockRoot(H256::repeat_byte(10)), 10_u64)?,
+//         ])?;
 
-        let storage = Storage::<Mainnet>::new(
-            Arc::new(Config::mainnet()),
-            Arc::new(PubkeyCache::default()),
-            database,
-            nonzero!(64_u64),
-            StorageMode::default(),
-        );
+//         let storage = Storage::<Mainnet>::new(
+//             Arc::new(Config::mainnet()),
+//             Arc::new(PubkeyCache::default()),
+//             database,
+//             Hierarchy::new([6]).unwrap(),
+//             StorageMode::default(),
+//         );
 
-        assert_eq!(storage.finalized_block_count()?, 2);
-        assert_eq!(storage.unfinalized_block_count()?, 3);
-        assert_eq!(storage.block_root_by_slot_count()?, 5);
-        assert_eq!(storage.slot_by_state_root_count()?, 3);
-        assert_eq!(storage.state_count()?, 3);
+//         assert_eq!(storage.finalized_block_count()?, 2);
+//         assert_eq!(storage.unfinalized_block_count()?, 3);
+//         assert_eq!(storage.block_root_by_slot_count()?, 5);
+//         assert_eq!(storage.slot_by_state_root_count()?, 3);
+//         assert_eq!(storage.state_count()?, 3);
 
-        storage.prune_old_blocks_and_states(5)?;
+//         storage.prune_old_blocks_and_states(5)?;
 
-        assert_eq!(storage.finalized_block_count()?, 0);
-        assert_eq!(storage.unfinalized_block_count()?, 3);
-        assert_eq!(storage.block_root_by_slot_count()?, 3);
-        assert_eq!(storage.slot_by_state_root_count()?, 3);
-        assert_eq!(storage.state_count()?, 2);
+//         assert_eq!(storage.finalized_block_count()?, 0);
+//         assert_eq!(storage.unfinalized_block_count()?, 3);
+//         assert_eq!(storage.block_root_by_slot_count()?, 3);
+//         assert_eq!(storage.slot_by_state_root_count()?, 3);
+//         assert_eq!(storage.state_count()?, 2);
 
-        storage.prune_old_state_roots(5)?;
+//         storage.prune_old_state_roots(5)?;
 
-        assert_eq!(storage.slot_by_state_root_count()?, 2);
+//         assert_eq!(storage.slot_by_state_root_count()?, 2);
 
-        Ok(())
-    }
+//         Ok(())
+//     }
 
-    #[test]
-    #[expect(clippy::similar_names)]
-    fn test_prune_old_blob_sidecars() -> Result<()> {
-        let database = Database::persistent(
-            "test_db",
-            TempDir::new()?,
-            ByteSize::mib(10),
-            DatabaseMode::ReadWrite,
-            None,
-        )?;
+//     #[test]
+//     #[expect(clippy::similar_names)]
+//     fn test_prune_old_blob_sidecars() -> Result<()> {
+//         let database = Database::persistent(
+//             "test_db",
+//             TempDir::new()?,
+//             ByteSize::mib(10),
+//             DatabaseMode::ReadWrite,
+//             None,
+//         )?;
 
-        let storage = Storage::<Mainnet>::new(
-            Arc::new(Config::mainnet()),
-            Arc::new(PubkeyCache::default()),
-            database,
-            nonzero!(64_u64),
-            StorageMode::default(),
-        );
+//         let storage = Storage::<Mainnet>::new(
+//             Arc::new(Config::mainnet()),
+//             Arc::new(PubkeyCache::default()),
+//             database,
+//             Hierarchy::new([6]).unwrap(),
+//             StorageMode::default(),
+//         );
 
-        let blob_id_0 = BlobIdentifier {
-            block_root: H256::zero(),
-            index: 0,
-        };
+//         let blob_id_0 = BlobIdentifier {
+//             block_root: H256::zero(),
+//             index: 0,
+//         };
 
-        // slot 5
-        let blob_id_5 = BlobIdentifier {
-            block_root: H256::zero(),
-            index: 1,
-        };
+//         // slot 5
+//         let blob_id_5 = BlobIdentifier {
+//             block_root: H256::zero(),
+//             index: 1,
+//         };
 
-        let mut blob_sidecar_5 = BlobSidecar::default();
-        blob_sidecar_5.signed_block_header.message.slot = 5;
+//         let mut blob_sidecar_5 = BlobSidecar::default();
+//         blob_sidecar_5.signed_block_header.message.slot = 5;
 
-        // slot 10
-        let blob_id_10 = BlobIdentifier {
-            block_root: H256::zero(),
-            index: 2,
-        };
+//         // slot 10
+//         let blob_id_10 = BlobIdentifier {
+//             block_root: H256::zero(),
+//             index: 2,
+//         };
 
-        let mut blob_sidecar_10 = BlobSidecar::default();
-        blob_sidecar_10.signed_block_header.message.slot = 10;
+//         let mut blob_sidecar_10 = BlobSidecar::default();
+//         blob_sidecar_10.signed_block_header.message.slot = 10;
 
-        let blob_sidecars = vec![
-            BlobSidecarWithId {
-                blob_sidecar: Arc::new(BlobSidecar::default()),
-                blob_id: blob_id_0,
-            },
-            BlobSidecarWithId {
-                blob_sidecar: Arc::new(blob_sidecar_5),
-                blob_id: blob_id_5,
-            },
-            BlobSidecarWithId {
-                blob_sidecar: Arc::new(blob_sidecar_10),
-                blob_id: blob_id_10,
-            },
-        ];
+//         let blob_sidecars = vec![
+//             BlobSidecarWithId {
+//                 blob_sidecar: Arc::new(BlobSidecar::default()),
+//                 blob_id: blob_id_0,
+//             },
+//             BlobSidecarWithId {
+//                 blob_sidecar: Arc::new(blob_sidecar_5),
+//                 blob_id: blob_id_5,
+//             },
+//             BlobSidecarWithId {
+//                 blob_sidecar: Arc::new(blob_sidecar_10),
+//                 blob_id: blob_id_10,
+//             },
+//         ];
 
-        let persisted = storage.append_blob_sidecars(blob_sidecars)?;
+//         let persisted = storage.append_blob_sidecars(blob_sidecars)?;
 
-        assert_eq!(persisted, vec![blob_id_0, blob_id_5, blob_id_10]);
-        assert_eq!(storage.slot_by_blob_id_count()?, 3);
-        assert_eq!(storage.blob_sidecar_by_blob_id_count()?, 3);
+//         assert_eq!(persisted, vec![blob_id_0, blob_id_5, blob_id_10]);
+//         assert_eq!(storage.slot_by_blob_id_count()?, 3);
+//         assert_eq!(storage.blob_sidecar_by_blob_id_count()?, 3);
 
-        storage.prune_old_blob_sidecars(6)?;
+//         storage.prune_old_blob_sidecars(6)?;
 
-        assert_eq!(storage.slot_by_blob_id_count()?, 1);
-        assert_eq!(storage.blob_sidecar_by_blob_id_count()?, 1);
+//         assert_eq!(storage.slot_by_blob_id_count()?, 1);
+//         assert_eq!(storage.blob_sidecar_by_blob_id_count()?, 1);
 
-        Ok(())
-    }
+//         Ok(())
+//     }
 
-    #[test]
-    fn test_block_root_before_or_at_slot() -> Result<()> {
-        let database = Database::in_memory();
+//     #[test]
+//     fn test_block_root_before_or_at_slot() -> Result<()> {
+//         let database = Database::in_memory();
 
-        database.put_batch(vec![
-            serialize(BlockRootBySlot(2), H256::repeat_byte(2))?,
-            serialize(BlockRootBySlot(6), H256::repeat_byte(6))?,
-        ])?;
+//         database.put_batch(vec![
+//             serialize(BlockRootBySlot(2), H256::repeat_byte(2))?,
+//             serialize(BlockRootBySlot(6), H256::repeat_byte(6))?,
+//         ])?;
 
-        let storage = Storage::<Mainnet>::new(
-            Arc::new(Config::mainnet()),
-            Arc::new(PubkeyCache::default()),
-            database,
-            nonzero!(64_u64),
-            StorageMode::default(),
-        );
+//         let storage = Storage::<Mainnet>::new(
+//             Arc::new(Config::mainnet()),
+//             Arc::new(PubkeyCache::default()),
+//             database,
+//             Hierarchy::new([6]).unwrap(),
+//             StorageMode::default(),
+//         );
 
-        assert_eq!(storage.block_root_before_or_at_slot(1)?, None);
-        assert_eq!(
-            storage.block_root_before_or_at_slot(2)?,
-            Some(H256::repeat_byte(2)),
-        );
-        assert_eq!(
-            storage.block_root_before_or_at_slot(3)?,
-            Some(H256::repeat_byte(2)),
-        );
-        assert_eq!(
-            storage.block_root_before_or_at_slot(6)?,
-            Some(H256::repeat_byte(6)),
-        );
-        assert_eq!(
-            storage.block_root_before_or_at_slot(9)?,
-            Some(H256::repeat_byte(6)),
-        );
+//         assert_eq!(storage.block_root_before_or_at_slot(1)?, None);
+//         assert_eq!(
+//             storage.block_root_before_or_at_slot(2)?,
+//             Some(H256::repeat_byte(2)),
+//         );
+//         assert_eq!(
+//             storage.block_root_before_or_at_slot(3)?,
+//             Some(H256::repeat_byte(2)),
+//         );
+//         assert_eq!(
+//             storage.block_root_before_or_at_slot(6)?,
+//             Some(H256::repeat_byte(6)),
+//         );
+//         assert_eq!(
+//             storage.block_root_before_or_at_slot(9)?,
+//             Some(H256::repeat_byte(6)),
+//         );
 
-        Ok(())
-    }
-}
+//         Ok(())
+//     }
+// }

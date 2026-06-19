@@ -15,6 +15,7 @@
 pub use crate::{
     controller::Controller,
     events::{DEFAULT_MAX_EVENTS, Event, EventChannels, Topic},
+    hierarchy::Hierarchy,
     messages::{
         AttestationVerifierMessage, P2pMessage, PoolMessage, SubnetMessage, SyncMessage,
         ValidatorMessage,
@@ -29,7 +30,8 @@ pub use crate::{
         BlobSidecarByBlobId, BlockCheckpoint, BlockRootBySlot, DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
         DataColumnSidecarByColumnId, FinalizedBlockByRoot, SlotBlobId, SlotByStateRoot,
         SlotColumnId, StateByBlockRoot, StateCheckpoint, StateLoadStrategy, Storage,
-        UnfinalizedBlockByRoot, get, print_beacon_database_info, save,
+        UnfinalizedBlockByRoot, beacon_state_compression_selector, get, is_state_diff_key,
+        print_beacon_database_info, save,
     },
     storage_tool::{export_state_and_blocks, replay_blocks},
     wait::Wait,
@@ -40,6 +42,7 @@ pub mod controller;
 
 mod block_processor;
 mod events;
+mod hierarchy;
 mod messages;
 mod misc;
 mod mutator;

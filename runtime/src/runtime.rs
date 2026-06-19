@@ -165,7 +165,7 @@ pub async fn run_after_genesis<P: Preset>(
     let StorageConfig {
         in_memory,
         ref directories,
-        archival_epoch_interval,
+        ref hierarchy,
         storage_mode,
         ..
     } = storage_config;
@@ -263,7 +263,7 @@ pub async fn run_after_genesis<P: Preset>(
         chain_config.clone_arc(),
         pubkey_cache.clone_arc(),
         storage_database,
-        archival_epoch_interval,
+        hierarchy.clone(),
         storage_mode,
     ));
 
@@ -1591,7 +1591,7 @@ fn handle_command<P: Preset>(
     Feature::InhibitApplicationRestart.enable();
 
     let StorageConfig {
-        archival_epoch_interval,
+        hierarchy,
         storage_mode,
         ..
     } = storage_config;
@@ -1613,7 +1613,7 @@ fn handle_command<P: Preset>(
                 chain_config,
                 pubkey_cache.clone_arc(),
                 storage_database,
-                *archival_epoch_interval,
+                hierarchy.clone(),
                 *storage_mode,
             );
 

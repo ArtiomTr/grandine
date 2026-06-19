@@ -196,6 +196,7 @@ pub fn initialize_tracing_logger(
             telemetry_filter = telemetry_filter
                 .add_directive(format!("helper_functions={trace_level}").parse()?)
                 .add_directive(format!("transition_functions={trace_level}").parse()?)
+                .add_directive(format!("types={trace_level}").parse()?)
         }
 
         if let Ok(env_filter) = EnvFilter::try_from_env("GRANDINE_TRACE_LOG") {

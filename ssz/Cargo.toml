@@ -34,6 +34,10 @@ triomphe = { workspace = true }
 try_from_iterator = { workspace = true }
 typenum = { workspace = true }
 
+# `rayon` is only used to parallelize cold Merkle hashing on hosts; zkvm guests build without it.
+[target.'cfg(not(target_os = "zkvm"))'.dependencies]
+rayon = { workspace = true }
+
 [dev-dependencies]
 duplicate = { workspace = true }
 spec_test_utils = { workspace = true }

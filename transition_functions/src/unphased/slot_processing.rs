@@ -33,7 +33,16 @@ pub fn process_slot<P: Preset>(state: &mut impl BeaconState<P>) {
     let slot = state.slot();
 
     // > Cache state root
-    let previous_state_root = state.hash_tree_root();
+    //
+    // This is what makes the first `process_slot` after a state load so expensive: it
+    // recomputes the entire state Merkle tree (dominated by the validator registry) from a
+    // cold cache. Every later call only rehashes the handful of nodes invalidated since, so
+    // it is orders of magnitude cheaper. The child span isolates this cost in traces.
+    let previous_state_root = {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::debug_span!("hash_state_root").entered();
+        state.hash_tree_root()
+    };
     *state.state_roots_mut().mod_index_mut(slot) = previous_state_root;
 
     // > Cache latest block header state root
@@ -42,7 +51,11 @@ pub fn process_slot<P: Preset>(state: &mut impl BeaconState<P>) {
     }
 
     // > Cache block root
-    let previous_block_root = state.latest_block_header().hash_tree_root();
+    let previous_block_root = {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::debug_span!("hash_latest_block_header").entered();
+        state.latest_block_header().hash_tree_root()
+    };
     *state.block_roots_mut().mod_index_mut(slot) = previous_block_root;
 
     state.cache_mut().advance_slot();

@@ -10,6 +10,7 @@ use core::{
     fmt::{Debug, Formatter, Result as FmtResult},
     iter::{Flatten, FusedIterator},
     marker::PhantomData,
+    ops::{Bound, RangeBounds},
 };
 
 use arithmetic::{NonZeroExt as _, U64Ext as _};
@@ -39,6 +40,11 @@ use crate::{
     type_level::{FitsInU64, MerkleElements, MinimumBundleSize},
     zero_default::ZeroDefault,
 };
+
+/// Minimum number of elements a subtree must span before [`PersistentList::par_warm_hash`] forks it
+/// onto another Rayon task. Below this the sequential hash is cheaper than the scheduling overhead.
+#[cfg(not(target_os = "zkvm"))]
+const PARALLEL_HASH_MIN_ELEMENTS: usize = 1 << 14;
 
 #[derive(Derivative)]
 #[derivative(
@@ -383,6 +389,180 @@ impl<T, N, B> PersistentList<T, N, B> {
         Ok(&mut bundle[B::index_in_bundle(index)])
     }
 
+    #[must_use]
+    pub fn slice<R>(&self, range: R) -> Self
+    where
+        T: Clone,
+        N: Unsigned,
+        B: BundleSize<T>,
+        R: RangeBounds<usize>,
+    {
+        let start = match range.start_bound() {
+            Bound::Included(&s) => s,
+            Bound::Excluded(&s) => s
+                .checked_add(1)
+                .expect("slice start bound should not overflow"),
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&e) => e
+                .checked_add(1)
+                .expect("slice end bound should not overflow"),
+            Bound::Excluded(&e) => e,
+            Bound::Unbounded => self.length,
+        };
+
+        assert!(start <= end);
+        assert!(end <= self.length);
+
+        if start == 0 && end == self.length {
+            return self.clone();
+        }
+
+        if start == end {
+            return Self::default();
+        }
+
+        // Unaligned prefix drop: no leaf and therefore no ancestor of a leaf can be reused from
+        // the original (every surviving leaf bundle has different contents than any original
+        // leaf bundle once you shift by a fractional bundle). Rebuild from elements directly,
+        // skipping the suffix prune since its output would just be thrown away.
+        if start > 0 && start % B::USIZE != 0 {
+            return Self::try_from_iter(self.into_iter().skip(start).take(end - start).cloned())
+                .expect("subrange of a valid list is itself a valid list");
+        }
+
+        // Drop suffix via in-place prune on a cloned root. Internal subtrees that fall entirely
+        // within the kept prefix are reused as-is via Arc sharing; only nodes on the right spine
+        // up to `end` are freshly allocated.
+        let pruned = if end < self.length {
+            let mut root = self
+                .root
+                .as_ref()
+                .expect("non-empty list should have a root")
+                .clone_arc();
+
+            root.make_mut().prune(end);
+
+            Self {
+                root: Some(root),
+                length: end,
+                phantom: PhantomData,
+            }
+        } else {
+            self.clone()
+        };
+
+        if start == 0 {
+            return pruned;
+        }
+
+        // Bundle-aligned prefix drop. The surviving subtrees of the original tree can be reused
+        // as Arc-shared segments; we collect them and reassemble in a single segment-merge pass
+        // so that only the O(depth) bridging internal nodes on the new right spine are freshly
+        // built.
+        let root = pruned
+            .root
+            .as_ref()
+            .expect("non-empty list should have a root")
+            .clone_arc();
+        let depth = pruned.depth();
+
+        let mut survivors = Vec::with_capacity(depth.max(1).into());
+        Self::collect_drop_prefix(root, depth, pruned.length, start, &mut survivors);
+
+        let new_length = pruned.length - start;
+
+        // Merge all surviving subtrees into a single segment stack in one pass. Only the last
+        // surviving subtree may be partial (the original tail); every earlier one is a full
+        // subtree contributing exactly one full segment.
+        let mut segments: Vec<Segment<T, B>> = Vec::with_capacity(2 * usize::from(depth.max(1)));
+        let survivors_len = survivors.len();
+        for (i, (node, height, length)) in survivors.into_iter().enumerate() {
+            debug_assert_eq!(height, B::depth_of_length(length));
+            if i + 1 < survivors_len {
+                Self::append_full_segment(
+                    &mut segments,
+                    Segment {
+                        node,
+                        height,
+                        full: true,
+                    },
+                );
+            } else {
+                let mut piece_segments = Vec::with_capacity(usize::from(height) + 1);
+                Self::collect_segments(node, height, length, &mut piece_segments);
+                for segment in piece_segments {
+                    if segment.full {
+                        Self::append_full_segment(&mut segments, segment);
+                    } else {
+                        segments.push(segment);
+                    }
+                }
+            }
+        }
+
+        Self::from_segments(segments, new_length)
+    }
+
+    fn collect_drop_prefix(
+        node: Arc<Hc<Node<T, B>>>,
+        height: Height,
+        length: usize,
+        drop: usize,
+        out: &mut Vec<(Arc<Hc<Node<T, B>>>, Height, usize)>,
+    ) where
+        T: Clone,
+        B: BundleSize<T>,
+    {
+        if drop == 0 {
+            out.push((node, height, length));
+            return;
+        }
+        if drop == length {
+            return;
+        }
+        match node.as_ref().as_ref() {
+            Node::Internal {
+                left,
+                right,
+                left_height,
+                right_height,
+            } => {
+                debug_assert_eq!(height, *left_height + 1);
+                let left_length = length.min(B::USIZE << left_height);
+                let right_length = length - left_length;
+
+                if drop >= left_length {
+                    Self::collect_drop_prefix(
+                        right.clone_arc(),
+                        *right_height,
+                        right_length,
+                        drop - left_length,
+                        out,
+                    );
+                } else {
+                    Self::collect_drop_prefix(
+                        left.clone_arc(),
+                        *left_height,
+                        left_length,
+                        drop,
+                        out,
+                    );
+                    if right_length > 0 {
+                        out.push((right.clone_arc(), *right_height, right_length));
+                    }
+                }
+            }
+            Node::Leaf { .. } => {
+                // `drop == 0` and `drop == length` are handled above. Any other in-leaf drop
+                // would mean the caller passed an un-bundle-aligned `drop`, which `slice`
+                // diverts to the iterator-based rebuild before reaching this function.
+                unreachable!("bundle-aligned drop should never split a leaf");
+            }
+        }
+    }
+
     // This clones the elements being visited and checks them for mutations to avoid rebuilding
     // parts of the tree that have not been modified. An `Iterator` that behaves the same way would
     // be more convenient, but items returned by an iterator cannot borrow from the iterator itself.
@@ -398,6 +578,108 @@ impl<T, N, B> PersistentList<T, N, B> {
         {
             *node = new_node;
         }
+    }
+
+    /// Applies `updater` to the elements at `indices`, calling it with each
+    /// `(index, &mut element)` in ascending index order.
+    ///
+    /// `indices` must be sorted in ascending order and free of duplicates. The spine is
+    /// descended a single time, recursing only into subtrees that actually contain a target
+    /// index, so the cost is `O(touched_nodes)` rather than the `O(indices.len() * log(len))`
+    /// of calling [`Self::get_mut`] in a loop. Only the nodes on the paths to the touched
+    /// elements are cloned (copy-on-write) and have their Merkle caches invalidated, so the
+    /// structural sharing with the previous version is preserved for every untouched subtree.
+    pub fn update_at_sorted_indices(
+        &mut self,
+        indices: &[u64],
+        mut updater: impl FnMut(u64, &mut T),
+    ) -> Result<(), IndexError>
+    where
+        T: Clone,
+        B: BundleSize<T>,
+    {
+        let Some(&max_index) = indices.last() else {
+            return Ok(());
+        };
+
+        // The indices are sorted, so bounds checking the maximum bounds checks all of them.
+        shared::validate_index(self.length, max_index)?;
+
+        debug_assert!(
+            indices.windows(2).all(|window| window[0] < window[1]),
+            "update_at_sorted_indices requires strictly ascending indices",
+        );
+
+        let root = self
+            .root
+            .as_mut()
+            .expect("the length check above ensures that self.root is Some");
+
+        Node::update_at_sorted_indices(root, 0, indices, &mut updater);
+
+        Ok(())
+    }
+
+    /// Populates the per-node Merkle caches in parallel, leaving the list in the same state a call
+    /// to [`SszHash::hash_tree_root`] would (which afterwards just recombines the cached roots).
+    ///
+    /// Hashing a freshly loaded list from a cold cache is single-threaded and dominated by the
+    /// largest field. Warming it through a parallel tree descent first turns that into a multi-core
+    /// pass. The Merkle root is order-independent, so the cached values are identical to the
+    /// sequential ones. Subtrees below [`PARALLEL_HASH_MIN_LEAVES`] are warmed sequentially to keep
+    /// task overhead off the small/warm cases.
+    #[cfg(not(target_os = "zkvm"))]
+    pub fn par_warm_hash(&self)
+    where
+        T: SszHash + SszWrite + Send + Sync,
+        B: BundleSize<T> + MerkleElements<T> + Send + Sync,
+    {
+        if let Some(root) = self.root.as_ref() {
+            Node::par_warm(root);
+        }
+    }
+
+    pub fn extend(&mut self, elements: impl IntoIterator<Item = T>) -> Result<(), PushError>
+    where
+        T: Clone,
+        N: Unsigned,
+        B: BundleSize<T>,
+    {
+        let mut elements = elements.into_iter().collect_vec();
+
+        if elements.is_empty() {
+            return Ok(());
+        }
+
+        let new_length = self
+            .length
+            .checked_add(elements.len())
+            .ok_or(PushError::ListFull)?;
+
+        Self::validate_length(new_length).map_err(|_| PushError::ListFull)?;
+
+        let tail_length = B::index_in_bundle(self.length);
+
+        if tail_length != 0 {
+            let fill_count = (B::USIZE - tail_length).min(elements.len());
+
+            for element in elements.drain(..fill_count) {
+                self.push(element)?;
+            }
+        }
+
+        if elements.is_empty() {
+            return Ok(());
+        }
+
+        let suffix = Self::try_from_iter(elements)
+            .expect("validated length should allow building a suffix list");
+
+        self.extend_batched_suffix(suffix);
+
+        debug_assert_eq!(self.length, new_length);
+
+        Ok(())
     }
 
     pub fn push(&mut self, element: T) -> Result<(), PushError>
@@ -496,9 +778,226 @@ impl<T, N, B> PersistentList<T, N, B> {
 
         Ok(())
     }
+
+    fn extend_batched_suffix(&mut self, suffix: Self)
+    where
+        B: BundleSize<T>,
+    {
+        if suffix.length == 0 {
+            return;
+        }
+
+        if self.length == 0 {
+            *self = suffix;
+            return;
+        }
+
+        debug_assert_eq!(B::index_in_bundle(self.length), 0);
+
+        let length = self.length + suffix.length;
+        let mut segments = self.segments();
+
+        for segment in suffix.segments() {
+            if segment.full {
+                Self::append_full_segment(&mut segments, segment);
+            } else {
+                segments.push(segment);
+            }
+        }
+
+        *self = Self::from_segments(segments, length);
+    }
+
+    fn segments(&self) -> Vec<Segment<T, B>>
+    where
+        B: BundleSize<T>,
+    {
+        let Some(root) = self.root.as_ref() else {
+            return vec![];
+        };
+
+        let mut segments = Vec::with_capacity(self.depth().max(1).into());
+        Self::collect_segments(root.clone_arc(), self.depth(), self.length, &mut segments);
+        segments
+    }
+
+    fn collect_segments(
+        node: Arc<Hc<Node<T, B>>>,
+        height: Height,
+        length: usize,
+        segments: &mut Vec<Segment<T, B>>,
+    ) where
+        B: BundleSize<T>,
+    {
+        if length == 0 {
+            return;
+        }
+
+        let capacity = B::USIZE << height;
+
+        if length == capacity {
+            segments.push(Segment {
+                node,
+                height,
+                full: true,
+            });
+            return;
+        }
+
+        match node.as_ref().as_ref() {
+            Node::Internal {
+                left,
+                right,
+                left_height,
+                right_height,
+            } => {
+                debug_assert_eq!(height, *left_height + 1);
+                let left_length = length.min(B::USIZE << left_height);
+                let right_length = length - left_length;
+
+                Self::collect_segments(left.clone_arc(), *left_height, left_length, segments);
+                Self::collect_segments(right.clone_arc(), *right_height, right_length, segments);
+            }
+            Node::Leaf { bundle, .. } => {
+                debug_assert_eq!(height, 0);
+                let full = bundle.len() == B::USIZE;
+
+                segments.push(Segment { node, height, full });
+            }
+        }
+    }
+
+    fn append_full_segment(segments: &mut Vec<Segment<T, B>>, segment: Segment<T, B>)
+    where
+        B: BundleSize<T>,
+    {
+        let Some(last) = segments.last() else {
+            segments.push(segment);
+            return;
+        };
+
+        debug_assert!(segment.full);
+        debug_assert!(last.full);
+
+        match last.height.cmp(&segment.height) {
+            Ordering::Greater => segments.push(segment),
+            Ordering::Less => {
+                let (left, right) = Self::split_full_segment(segment);
+                Self::append_full_segment(segments, left);
+                Self::append_full_segment(segments, right);
+            }
+            Ordering::Equal => {
+                let left = segments
+                    .pop()
+                    .expect("checked that the segment stack is non-empty");
+
+                let combined = Segment {
+                    node: Hc::arc(Node::Internal {
+                        left: left.node,
+                        right: segment.node,
+                        left_height: left.height,
+                        right_height: segment.height,
+                    }),
+                    height: segment.height + 1,
+                    full: true,
+                };
+
+                Self::append_full_segment(segments, combined);
+            }
+        }
+    }
+
+    fn split_full_segment(segment: Segment<T, B>) -> (Segment<T, B>, Segment<T, B>)
+    where
+        B: BundleSize<T>,
+    {
+        debug_assert!(segment.full);
+        debug_assert!(segment.height > 0);
+
+        match segment.node.as_ref().as_ref() {
+            Node::Internal {
+                left,
+                right,
+                left_height,
+                right_height,
+            } => {
+                debug_assert_eq!(segment.height, *left_height + 1);
+                debug_assert_eq!(left_height, right_height);
+
+                (
+                    Segment {
+                        node: left.clone_arc(),
+                        height: *left_height,
+                        full: true,
+                    },
+                    Segment {
+                        node: right.clone_arc(),
+                        height: *right_height,
+                        full: true,
+                    },
+                )
+            }
+            Node::Leaf { .. } => unreachable!("a full leaf segment cannot be split further"),
+        }
+    }
+
+    fn from_segments(segments: Vec<Segment<T, B>>, length: usize) -> Self
+    where
+        B: BundleSize<T>,
+    {
+        if length == 0 {
+            return Self::default();
+        }
+
+        let (root, height) = Self::assemble_segments(&segments)
+            .expect("a non-empty list should be assembled from at least one segment");
+
+        debug_assert_eq!(height, Self::depth_of_length(length));
+
+        Self {
+            root: Some(root),
+            length,
+            phantom: PhantomData,
+        }
+    }
+
+    fn assemble_segments(segments: &[Segment<T, B>]) -> Option<(Arc<Hc<Node<T, B>>>, Height)> {
+        match segments {
+            [] => None,
+            [segment] => Some((segment.node.clone_arc(), segment.height)),
+            [left, rest @ ..] => {
+                let (right, right_height) = Self::assemble_segments(rest)?;
+
+                debug_assert!(right_height <= left.height);
+
+                Some((
+                    Hc::arc(Node::Internal {
+                        left: left.node.clone_arc(),
+                        right,
+                        left_height: left.height,
+                        right_height,
+                    }),
+                    left.height + 1,
+                ))
+            }
+        }
+    }
+
+    fn depth_of_length(length: usize) -> u8
+    where
+        B: BundleSize<T>,
+    {
+        B::depth_of_length(length)
+    }
 }
 
 type Height = u8;
+
+struct Segment<T, B> {
+    node: Arc<Hc<Node<T, B>>>,
+    height: Height,
+    full: bool,
+}
 
 #[derive(Derivative)]
 #[derivative(
@@ -728,9 +1227,78 @@ impl<T, B: BundleSize<T>> Node<T, B> {
         }
     }
 
+    // Descends in place towards `indices` (sorted ascending, all within this node's range,
+    // which starts at element `start`), cloning only the nodes on the paths to them. `left` is
+    // always a perfect subtree of `left_height`, so it spans exactly `B::USIZE << left_height`
+    // elements; that boundary partitions the sorted `indices` between the two children.
+    fn update_at_sorted_indices(
+        node: &mut Arc<Hc<Self>>,
+        start: u64,
+        indices: &[u64],
+        updater: &mut impl FnMut(u64, &mut T),
+    ) where
+        T: Clone,
+    {
+        match node.make_mut().as_mut() {
+            Self::Internal {
+                left,
+                right,
+                left_height,
+                ..
+            } => {
+                let mid = start.saturating_add((B::USIZE << *left_height) as u64);
+                let split = indices.partition_point(|&index| index < mid);
+                let (left_indices, right_indices) = indices.split_at(split);
+
+                if !left_indices.is_empty() {
+                    Self::update_at_sorted_indices(left, start, left_indices, updater);
+                }
+
+                if !right_indices.is_empty() {
+                    Self::update_at_sorted_indices(right, mid, right_indices, updater);
+                }
+            }
+            Self::Leaf { bundle, .. } => {
+                // `start` is bundle-aligned, so `index - start` is the position within the leaf.
+                for &index in indices {
+                    let offset = usize::try_from(index - start).expect("offset fits in usize");
+                    updater(index, &mut bundle[offset]);
+                }
+            }
+        }
+    }
+
     fn pushing_increases_height(current_length_and_new_index: usize) -> bool {
         B::index_of_bundle(current_length_and_new_index).is_power_of_two()
             && B::index_in_bundle(current_length_and_new_index) == 0
+    }
+
+    // Warms this node's Merkle cache, descending into large subtrees on parallel Rayon tasks first.
+    // Children are warmed bottom-up so that the final `hash_tree_root` here only recombines roots
+    // that are already cached. Reads only (caches are filled through interior mutability).
+    #[cfg(not(target_os = "zkvm"))]
+    fn par_warm(node: &Arc<Hc<Self>>)
+    where
+        T: SszHash + SszWrite + Send + Sync,
+        B: MerkleElements<T> + Send + Sync,
+    {
+        if let Self::Internal {
+            left,
+            right,
+            left_height,
+            ..
+        } = &***node
+        {
+            let left_elements = B::USIZE
+                .checked_shl(u32::from(*left_height))
+                .unwrap_or(usize::MAX);
+
+            if left_elements >= PARALLEL_HASH_MIN_ELEMENTS {
+                rayon::join(|| Self::par_warm(left), || Self::par_warm(right));
+            }
+        }
+
+        let _ = node.hash_tree_root();
     }
 }
 
@@ -790,3 +1358,185 @@ impl<'list, T: Clone, B> Iterator for LeavesMut<'list, T, B> {
 }
 
 impl<T: Clone, B> FusedIterator for LeavesMut<'_, T, B> {}
+
+#[cfg(test)]
+mod tests {
+    use try_from_iterator::TryFromIterator as _;
+    use typenum::{U64, U1024, U1048576};
+
+    use super::PersistentList;
+    use crate::SszHash as _;
+
+    #[test]
+    fn extended_list_hash_matches_canonical_list_hash() {
+        let mut extended =
+            PersistentList::<u64, U64>::try_from_iter(0..33).expect("list should build");
+
+        extended.extend(33..64).expect("list should extend");
+
+        let canonical =
+            PersistentList::<u64, U64>::try_from_iter(0..64).expect("list should build");
+
+        assert_eq!(extended.hash_tree_root(), canonical.hash_tree_root());
+    }
+
+    #[test]
+    fn update_at_sorted_indices_matches_get_mut_loop() {
+        for total in [
+            1u64, 2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 31, 32, 33, 64, 100, 128, 129, 200, 257,
+        ] {
+            let subsets: [Vec<u64>; 5] = [
+                vec![0],
+                vec![total - 1],
+                (0..total).collect(),
+                (0..total).step_by(5).collect(),
+                (0..total).step_by(17).collect(),
+            ];
+
+            for indices in subsets {
+                if indices.is_empty() {
+                    continue;
+                }
+
+                let mut batched =
+                    PersistentList::<u64, U1024>::try_from_iter(0..total).expect("list should build");
+                batched
+                    .update_at_sorted_indices(&indices, |index, value| {
+                        *value = value.wrapping_add(1000 + index);
+                    })
+                    .expect("indices are in bounds");
+
+                let mut reference =
+                    PersistentList::<u64, U1024>::try_from_iter(0..total).expect("list should build");
+                for &index in &indices {
+                    let value = reference.get_mut(index).expect("index is in bounds");
+                    *value = value.wrapping_add(1000 + index);
+                }
+
+                assert_eq!(batched, reference, "values differ (total={total})");
+                assert_eq!(
+                    batched.hash_tree_root(),
+                    reference.hash_tree_root(),
+                    "roots differ (total={total})",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn par_warm_hash_matches_sequential_hash() {
+        for total in [0u64, 1, 4, 5, 64, 1000, 16_384, 40_000, 70_000] {
+            let warmed = PersistentList::<u64, U1048576>::try_from_iter(0..total)
+                .expect("list should build");
+            warmed.par_warm_hash();
+
+            let sequential = PersistentList::<u64, U1048576>::try_from_iter(0..total)
+                .expect("list should build");
+
+            assert_eq!(
+                warmed.hash_tree_root(),
+                sequential.hash_tree_root(),
+                "roots differ after par_warm_hash (total={total})",
+            );
+        }
+    }
+
+    #[test]
+    fn update_at_sorted_indices_empty_is_noop() {
+        let mut list = PersistentList::<u64, U1024>::try_from_iter(0..50).expect("list should build");
+        let before = list.hash_tree_root();
+        list.update_at_sorted_indices(&[], |_, _| unreachable!("no indices"))
+            .expect("empty update succeeds");
+        assert_eq!(list.hash_tree_root(), before);
+    }
+
+    #[test]
+    fn update_at_sorted_indices_rejects_out_of_bounds() {
+        let mut list = PersistentList::<u64, U1024>::try_from_iter(0..10).expect("list should build");
+        list.update_at_sorted_indices(&[5, 10], |_, _| {})
+            .expect_err("index 10 is out of bounds");
+    }
+
+    #[test]
+    fn slice_suffix_keeps_prefix() {
+        let list = PersistentList::<u64, U64>::try_from_iter(0..10).expect("list should build");
+        let actual = list.slice(..4);
+        let expected = PersistentList::<u64, U64>::try_from_iter(0..4).expect("list should build");
+        assert_eq!(actual, expected);
+        assert_eq!(actual.hash_tree_root(), expected.hash_tree_root());
+    }
+
+    #[test]
+    fn slice_prefix_drops_head_aligned() {
+        let list = PersistentList::<u64, U64>::try_from_iter(0..32).expect("list should build");
+        let actual = list.slice(8..);
+        let expected = PersistentList::<u64, U64>::try_from_iter(8..32).expect("list should build");
+        assert_eq!(actual, expected);
+        assert_eq!(actual.hash_tree_root(), expected.hash_tree_root());
+    }
+
+    #[test]
+    fn slice_prefix_drops_head_unaligned() {
+        let list = PersistentList::<u64, U64>::try_from_iter(0..32).expect("list should build");
+        let actual = list.slice(3..);
+        let expected = PersistentList::<u64, U64>::try_from_iter(3..32).expect("list should build");
+        assert_eq!(actual, expected);
+        assert_eq!(actual.hash_tree_root(), expected.hash_tree_root());
+    }
+
+    #[test]
+    fn slice_prefix_drops_partial_tail_aligned() {
+        let list = PersistentList::<u64, U64>::try_from_iter(0..5).expect("list should build");
+        let actual = list.slice(4..);
+        let expected = PersistentList::<u64, U64>::try_from_iter(4..5).expect("list should build");
+        assert_eq!(actual, expected);
+        assert_eq!(actual.hash_tree_root(), expected.hash_tree_root());
+    }
+
+    #[test]
+    fn slice_prefix_aligned_various_sizes() {
+        for total in [1usize, 2, 3, 4, 7, 8, 13, 16, 17, 31, 32, 33, 100, 128, 129] {
+            let list = PersistentList::<u64, U1024>::try_from_iter(0..total as u64)
+                .expect("list should build");
+            for start in [0usize, 1, 4, 8, 16, 32, 64] {
+                if start > total {
+                    break;
+                }
+                let actual = list.slice(start..);
+                let expected =
+                    PersistentList::<u64, U1024>::try_from_iter(start as u64..total as u64)
+                        .expect("list should build");
+                assert_eq!(actual, expected, "slice({}..) of 0..{}", start, total);
+                assert_eq!(
+                    actual.hash_tree_root(),
+                    expected.hash_tree_root(),
+                    "hash mismatch for slice({}..) of 0..{}",
+                    start,
+                    total,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn slice_full_range_equals_clone() {
+        let list = PersistentList::<u64, U64>::try_from_iter(0..10).expect("list should build");
+        assert_eq!(list.slice(..), list);
+        assert_eq!(list.slice(0..10), list);
+    }
+
+    #[test]
+    fn slice_subrange_drops_both_ends() {
+        let list = PersistentList::<u64, U64>::try_from_iter(0..32).expect("list should build");
+        let actual = list.slice(4..16);
+        let expected = PersistentList::<u64, U64>::try_from_iter(4..16).expect("list should build");
+        assert_eq!(actual, expected);
+        assert_eq!(actual.hash_tree_root(), expected.hash_tree_root());
+    }
+
+    #[test]
+    fn slice_empty_range_yields_empty_list() {
+        let list = PersistentList::<u64, U64>::try_from_iter(0..10).expect("list should build");
+        assert_eq!(list.slice(5..5).len_usize(), 0);
+    }
+}

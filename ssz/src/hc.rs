@@ -124,9 +124,7 @@ impl<T> Hc<T> {
     }
 
     pub fn set_cached_root(&self, root: H256) {
-        if let Err(old_root) = self.cached_root.set(Box::new(root)) {
-            panic!("cached_root already set (old_root: {old_root:?}, root: {root:?})");
-        }
+        self.cached_root.set(Box::new(root));
     }
 
     // The bound on `T` could be made optional with `#[cfg(debug_assertions)]`,

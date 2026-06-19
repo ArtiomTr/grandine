@@ -18,6 +18,7 @@ members = [
     'data_dumper',
     'database',
     'debug_info',
+    'diff',
     'deposit_tree',
     'directories',
     'doppelganger_protection',
@@ -329,6 +330,7 @@ env_logger = '0.11'
 ethereum-types = '0.14'
 ff = '0.13'
 fixed-hash = '0.8'
+flate2 = '1'
 fnv = '1'
 fs-err = { version = '3', features = ['tokio'] }
 fs_extra = '1'
@@ -367,6 +369,7 @@ local-ip-address = '0.6'
 log = '0.4'
 logroller = '0.1'
 lru = '0.17'
+lz4_flex = '0.11'
 mediatype = '0.21'
 memoffset = '0.9'
 mime = '0.3'
@@ -392,6 +395,7 @@ prometheus = '0.14'
 prometheus-client = '0.24'
 proptest = '1'
 psutil = '3'
+qbsdiff = '1.4'
 quote = '1'
 rand = '0.8'
 rand_chacha = '0.3'
@@ -470,8 +474,10 @@ variant_count = '1'
 web3 = { git = 'https://github.com/grandinetech/rust-web3.git', default-features = false, features = ['http-native-tls-vendored'] }
 wincode = { version = '0', features = ['derive'] }
 winsafe = { version = '0', features = ['kernel', 'psapi'] }
+xdelta3 = '0.1'
 xz2 = { version = '0.1' }
 zeroize = { version = '1', features = ['derive', 'serde'] }
+zstd = '0.13'
 zkm-build = { git = 'https://github.com/ProjectZKM/Ziren.git', tag = 'v1.2.5' }
 zkm-sdk = { git = 'https://github.com/ProjectZKM/Ziren.git', tag = 'v1.2.5' }
 
@@ -494,6 +500,7 @@ database = { path = 'database' }
 debug_info = { path = 'debug_info' }
 deposit_tree = { path = 'deposit_tree' }
 directories = { path = 'directories' }
+diff = { path = 'diff' }
 doppelganger_protection = { path = 'doppelganger_protection' }
 eip_2335 = { path = 'eip_2335' }
 eip_7594 = { path = 'eip_7594' }

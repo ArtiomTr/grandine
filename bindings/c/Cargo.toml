@@ -38,6 +38,9 @@ cbindgen = { workspace = true }
 
 [features]
 default = ['blst']
+# Enables tracing instrumentation in the core transition crates so their spans
+# show up in telemetry for the embedded (Nethermind plugin) build.
+tracing = ['runtime/tracing']
 arkworks = ['kzg_utils/arkworks']
 blst = ['bls/blst', 'kzg_utils/blst']
 constantine = ['kzg_utils/constantine']

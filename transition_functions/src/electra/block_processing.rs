@@ -7,7 +7,7 @@ use bls::PublicKeyBytes;
 use execution_engine::{ExecutionEngine, NullExecutionEngine};
 use helper_functions::{
     accessors::{
-        self, attestation_epoch, get_attestation_participation_flags, get_base_reward,
+        self, attestation_epoch, compute_base_reward, get_attestation_participation_flags,
         get_base_reward_per_increment, get_beacon_proposer_index, get_consolidation_churn_limit,
         get_current_epoch, get_pending_balance_to_withdraw, get_randao_mix, index_of_public_key,
         initialize_shuffled_indices,
@@ -701,19 +701,46 @@ pub fn apply_attestation<P: Preset>(
 ) -> Result<()> {
     // > Participation flag indices
     let inclusion_delay = state.slot().try_sub(attestation.data.slot)?;
-    let participation_flags =
-        get_attestation_participation_flags(state, attestation.data, inclusion_delay)?;
+    let participation_flags = {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::debug_span!("apply_attestation::participation_flags").entered();
+        get_attestation_participation_flags(state, attestation.data, inclusion_delay)?
+    };
 
     // > Update epoch participation flags
     let base_reward_per_increment = get_base_reward_per_increment(state)?;
 
-    let attesting_indices_with_base_rewards = get_attesting_indices(state, attestation)?
-        .into_iter()
-        .map(|validator_index| {
-            let base_reward = get_base_reward(state, validator_index, base_reward_per_increment)?;
-            Ok((validator_index, base_reward))
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let attesting_indices = {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::debug_span!("apply_attestation::get_attesting_indices").entered();
+        get_attesting_indices(state, attestation)?
+    };
+
+    // Read every attester's effective balance through a single forward cursor (the indices are
+    // sorted), which amortizes the persistent-list lookups, then turn them into base rewards.
+    let attesting_indices_with_base_rewards = {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::debug_span!("apply_attestation::base_rewards").entered();
+
+        let mut effective_balances = Vec::with_capacity(attesting_indices.len());
+
+        state
+            .validators()
+            .for_each_effective_balance_at_sorted_indices(&attesting_indices, |effective_balance| {
+                effective_balances.push(effective_balance);
+            })?;
+
+        attesting_indices
+            .iter()
+            .copied()
+            .zip(effective_balances)
+            .map(|(validator_index, effective_balance)| {
+                let base_reward =
+                    compute_base_reward::<P>(effective_balance, base_reward_per_increment)?;
+                Ok((validator_index, base_reward))
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
 
     let epoch_participation = match attestation_epoch(state, attestation.data.target.epoch)? {
         AttestationEpoch::Previous => state.previous_epoch_participation_mut(),
@@ -722,17 +749,45 @@ pub fn apply_attestation<P: Preset>(
 
     let mut proposer_reward_numerator: Gwei = 0;
 
-    for (validator_index, base_reward) in attesting_indices_with_base_rewards {
-        let epoch_participation = epoch_participation.get_mut(validator_index)?;
+    {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::debug_span!("apply_attestation::update_participation").entered();
 
-        for (flag_index, weight) in PARTICIPATION_FLAG_WEIGHTS {
-            if participation_flags.get_bit(flag_index) && !epoch_participation.get_bit(flag_index) {
-                proposer_reward_numerator =
-                    proposer_reward_numerator.try_add(base_reward.try_mul(weight)?)?;
-            }
+        // The base rewards are in the same ascending-index order as `attesting_indices`, which is
+        // also the order `update_at_sorted_indices` visits the elements in, so they stay aligned.
+        let mut base_rewards = attesting_indices_with_base_rewards.iter().copied();
+        let mut arithmetic_error = None;
+
+        epoch_participation.update_at_sorted_indices(
+            &attesting_indices,
+            |validator_index, participation| {
+                let (reward_index, base_reward) =
+                    base_rewards.next().expect("base rewards align with attesting indices");
+                debug_assert_eq!(reward_index, validator_index);
+
+                for (flag_index, weight) in PARTICIPATION_FLAG_WEIGHTS {
+                    if participation_flags.get_bit(flag_index)
+                        && !participation.get_bit(flag_index)
+                    {
+                        match base_reward
+                            .try_mul(weight)
+                            .and_then(|delta| proposer_reward_numerator.try_add(delta))
+                        {
+                            Ok(updated) => proposer_reward_numerator = updated,
+                            Err(error) => {
+                                arithmetic_error.get_or_insert(error);
+                            }
+                        }
+                    }
+                }
+
+                *participation |= participation_flags;
+            },
+        )?;
+
+        if let Some(error) = arithmetic_error {
+            return Err(error.into());
         }
-
-        *epoch_participation |= participation_flags;
     }
 
     // > Reward proposer
@@ -748,11 +803,14 @@ pub fn apply_attestation<P: Preset>(
     increase_balance(balance(state, proposer_index)?, proposer_reward)?;
 
     slot_report.add_attestation_reward(proposer_reward);
-    slot_report.update_performance(
-        state,
-        attestation.data,
-        get_attesting_indices(state, attestation)?,
-    )?;
+    {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::debug_span!("apply_attestation::update_performance").entered();
+        // Reuse the indices computed above instead of recomputing them. This is also what makes
+        // the recomputation-free path correct under `NullSlotReport`, where `update_performance`
+        // is a no-op but its argument was previously still evaluated.
+        slot_report.update_performance(state, attestation.data, attesting_indices)?;
+    }
 
     Ok(())
 }

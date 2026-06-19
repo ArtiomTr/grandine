@@ -7,6 +7,8 @@ use p2p::NetworkConfig;
 
 pub const DEFAULT_ETH1_DB_SIZE: ByteSize = ByteSize::gib(16);
 pub const DEFAULT_ETH2_DB_SIZE: ByteSize = ByteSize::gib(1024);
+// zstd's own default level; a balanced trade-off between ratio and CPU.
+pub const DEFAULT_DATABASE_ZSTD_COMPRESSION_LEVEL: i32 = 3;
 pub const DEFAULT_LIBP2P_IPV4_PORT: NonZeroU16 = nonzero!(9000_u16);
 pub const DEFAULT_LIBP2P_IPV6_PORT: NonZeroU16 = nonzero!(9050_u16);
 pub const DEFAULT_LIBP2P_QUIC_IPV4_PORT: NonZeroU16 = nonzero!(9001_u16);

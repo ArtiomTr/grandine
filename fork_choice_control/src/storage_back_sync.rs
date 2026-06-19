@@ -44,100 +44,101 @@ impl<P: Preset> Storage<P> {
         is_exiting: &Arc<AtomicBool>,
         finalized_validators: &Validators<P>,
     ) -> Result<()> {
-        let WithOrigin { value, origin } = anchor_checkpoint_provider.checkpoint();
+        todo!("back sync state archival not working currently");
+        // let WithOrigin { value, origin } = anchor_checkpoint_provider.checkpoint();
 
-        let FinalizedCheckpoint {
-            state: anchor_state,
-            block: anchor_block,
-        } = value;
+        // let FinalizedCheckpoint {
+        //     state: anchor_state,
+        //     block: anchor_block,
+        // } = value;
 
-        let anchor_block_slot = anchor_block.message().slot();
-        let anchor_block_root = anchor_block.message().hash_tree_root();
+        // let anchor_block_slot = anchor_block.message().slot();
+        // let anchor_block_root = anchor_block.message().hash_tree_root();
 
-        // check whether archiving was interrupted
-        if let Some(slot) = get_latest_archived_slot(&self.database)?
-            && self
-                .stored_state(slot, Some(finalized_validators))?
-                .is_some()
-            && slot > start_slot
-            && slot <= end_slot
-        {
-            start_slot = slot;
-            info_with_peers!("resuming back-sync archival from {slot} slot");
-        }
+        // // check whether archiving was interrupted
+        // if let Some(slot) = get_latest_archived_slot(&self.database)?
+        //     && slot > start_slot
+        //     && slot <= end_slot
+        // {
+        //     start_slot = slot;
+        //     info_with_peers!("resuming back-sync archival from {slot} slot");
+        // }
 
-        let mut state = if start_slot == anchor_block_slot {
-            if origin.is_checkpoint_sync() {
-                warn_with_peers!("unable to back-sync to genesis state as it not available");
-            }
+        // let mut state = if start_slot == anchor_block_slot {
+        //     if origin.is_checkpoint_sync() {
+        //         warn_with_peers!("unable to back-sync to genesis state as it not available");
+        //     }
 
-            anchor_state
-        } else {
-            self.stored_state(start_slot, Some(finalized_validators))?
-                .ok_or(Error::StateNotFound {
-                    state_slot: start_slot,
-                })?
-        };
+        //     anchor_state
+        // } else {
+        //      self.stored_state(
+        //         start_slot,
+        //         Some(finalized_validators),
+        //     )?
+        //     .ok_or(Error::StateNotFound {
+        //         state_slot: start_slot,
+        //     })?
+        // };
 
-        let mut previous_block = None;
-        let mut batch = vec![];
-        let mut states_in_batch: u64 = 0;
+        // let mut previous_block = None;
+        // let mut batch = vec![];
+        // let mut states_in_batch: u64 = 0;
 
-        if start_slot == anchor_block_slot {
-            batch.push(serialize(StateByBlockRoot(anchor_block_root), &state)?);
-        }
+        // if start_slot == anchor_block_slot {
+        //     batch.push(serialize(StateByBlockRoot(anchor_block_root), &state)?);
+        // }
 
-        for slot in start_slot.saturating_add(1)..=end_slot {
-            if is_exiting.load(Ordering::Relaxed) {
-                bail!(AnyhowError::msg("received a termination signal"));
-            }
+        // for slot in start_slot.saturating_add(1)..=end_slot {
+        //     if is_exiting.load(Ordering::Relaxed) {
+        //         bail!(AnyhowError::msg("received a termination signal"));
+        //     }
 
-            if let Some((block, _)) = self.finalized_block_by_slot(slot)? {
-                combined::untrusted_state_transition(
-                    self.config(),
-                    &self.pubkey_cache,
-                    state.make_mut(),
-                    &block,
-                )?;
-                previous_block = Some(block);
-            } else {
-                combined::process_slots(self.config(), &self.pubkey_cache, state.make_mut(), slot)?;
-            }
+        //     if let Some((block, _)) = self.finalized_block_by_slot(slot)? {
+        //         combined::untrusted_state_transition(
+        //             self.config(),
+        //             &self.pubkey_cache,
+        //             state.make_mut(),
+        //             &block,
+        //         )?;
+        //         previous_block = Some(block);
+        //     } else {
+        //         combined::process_slots(self.config(), &self.pubkey_cache, state.make_mut(), slot)?;
+        //     }
 
-            batch.push(serialize(SlotByStateRoot(state.hash_tree_root()), slot)?);
+        //     batch.push(serialize(SlotByStateRoot(state.hash_tree_root()), slot)?);
 
-            let state_epoch = Self::epoch_at_slot(slot);
-            let append_state = misc::is_epoch_start::<P>(slot)
-                && state_epoch.is_multiple_of(self.archival_epoch_interval.into());
+        //     let state_epoch = Self::epoch_at_slot(slot);
+        //     let append_state = misc::is_epoch_start::<P>(slot)
+        //         && state_epoch.is_multiple_of(self.archival_epoch_interval.into());
 
-            if let Some(block) = previous_block.as_ref()
-                && append_state
-            {
-                debug_with_peers!("back-synced state in {slot} is ready for storage");
+        //     if let Some(block) = previous_block.as_ref()
+        //         && append_state
+        //     {
+        //         debug_with_peers!("back-synced state in {slot} is ready for storage");
 
-                let block_root = block.message().hash_tree_root();
+        //         let block_root = block.message().hash_tree_root();
 
-                batch.push(serialize(StateByBlockRoot(block_root), &state)?);
-                batch.push(serialize(ARCHIVER_CHECKPOINT_KEY, slot)?);
+        //         batch.push(serialize(StateByBlockRoot(block_root), &state)?);
+        //         batch.push(serialize(ARCHIVER_CHECKPOINT_KEY, slot)?);
 
-                states_in_batch = states_in_batch.saturating_add(1);
+        //         states_in_batch = states_in_batch.saturating_add(1);
 
-                if states_in_batch == ARCHIVED_STATES_BEFORE_FLUSH {
-                    info_with_peers!("archiving back-sync data up to {slot} slot");
+        //         if states_in_batch == ARCHIVED_STATES_BEFORE_FLUSH {
+        //             info_with_peers!("archiving back-sync data up to {slot} slot");
 
-                    self.database.put_batch(batch)?;
+        //             self.database.put_batch(batch)?;
 
-                    batch = vec![];
-                    states_in_batch = 0;
-                }
-            }
-        }
+        //             batch = vec![];
+        //             states_in_batch = 0;
+        //         }
+        //     }
+        // }
 
-        self.database.put_batch(batch)?;
+        // self.database.put_batch(batch)?;
 
-        info_with_peers!(
-            "back-synced state archival completed (start_slot: {start_slot}, end_slot: {end_slot})",
-        );
+        // info_with_peers!(
+        //     "back-synced state archival completed (start_slot: {start_slot}, end_slot: {end_slot})",
+        // );
 
         Ok(())
     }

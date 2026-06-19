@@ -51,6 +51,7 @@ mod incomplete_persistent_vector;
 mod iter;
 mod merkle_tree;
 mod negative;
+mod option;
 mod persistent_list;
 mod persistent_vector;
 mod pointers;

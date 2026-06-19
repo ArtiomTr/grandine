@@ -40,6 +40,34 @@ pub trait PrefixableKey {
     }
 }
 
+/// Compression algorithm used to (de)compress a single stored value.
+///
+/// The algorithm is chosen per key via a [`CompressionSelector`], which is applied symmetrically
+/// on writes and reads, so the value bytes themselves stay free of any framing/tag overhead.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Compression {
+    /// Store the value as-is, without compression.
+    None,
+    /// Snappy. The historical default for every key.
+    #[default]
+    Snappy,
+    /// Zstandard at the given compression level. The level only affects writes; decompression is
+    /// level-independent, so reads may pass any level.
+    Zstd(i32),
+}
+
+/// Picks the [`Compression`] to use for a given key.
+///
+/// The same selector must be installed for reads and writes of a database, since values carry no
+/// self-describing tag. Defaults to [`Compression::Snappy`] for every key (see
+/// [`default_compression_selector`]).
+pub type CompressionSelector = Arc<dyn Fn(&[u8]) -> Compression + Send + Sync>;
+
+#[must_use]
+fn default_compression_selector() -> CompressionSelector {
+    Arc::new(|_| Compression::Snappy)
+}
+
 #[cfg(not(target_os = "zkvm"))]
 #[derive(Debug)]
 pub enum RestartMessage {
@@ -92,7 +120,10 @@ impl DatabaseMode {
     }
 }
 
-pub struct Database(DatabaseKind);
+pub struct Database {
+    kind: DatabaseKind,
+    compression: CompressionSelector,
+}
 
 impl Database {
     #[cfg(not(target_os = "zkvm"))]
@@ -142,18 +173,36 @@ impl Database {
 
         transaction.commit()?;
 
-        Ok(Self(DatabaseKind::Persistent {
-            database_name,
-            environment,
-            restart_tx,
-        }))
+        Ok(Self {
+            kind: DatabaseKind::Persistent {
+                database_name,
+                environment,
+                restart_tx,
+            },
+            compression: default_compression_selector(),
+        })
     }
 
     #[must_use]
     pub fn in_memory() -> Self {
-        Self(DatabaseKind::InMemory {
-            map: Mutex::default(),
-        })
+        Self {
+            kind: DatabaseKind::InMemory {
+                map: Mutex::default(),
+            },
+            compression: default_compression_selector(),
+        }
+    }
+
+    /// Installs a [`CompressionSelector`] that decides, per key, how values are (de)compressed.
+    ///
+    /// Must be set identically before reading and writing, otherwise values written with one
+    /// algorithm will be decoded with another. Non-delta keys should keep mapping to
+    /// [`Compression::Snappy`] to stay compatible with databases created before per-key compression
+    /// was introduced.
+    #[must_use]
+    pub fn with_compression(mut self, compression: CompressionSelector) -> Self {
+        self.compression = compression;
+        self
     }
 
     pub fn delete(&self, key: impl AsRef<[u8]>) -> Result<()> {
@@ -296,7 +345,34 @@ impl Database {
         Ok(contains_key)
     }
 
+    pub fn contains_prefixed_key(&self, prefix: impl AsRef<[u8]>) -> Result<bool> {
+        let contains_key = match self.kind() {
+            #[cfg(not(target_os = "zkvm"))]
+            DatabaseKind::Persistent {
+                database_name,
+                environment,
+                restart_tx: _,
+            } => {
+                let transaction = environment.begin_ro_txn()?;
+                let database = transaction.open_db(Some(database_name))?;
+                let mut cursor = transaction.cursor(database.dbi())?;
+                cursor.set_range(prefix.as_ref())?.is_some_and(
+                    |(key, _): (Cow<'_, [u8]>, Cow<'_, [u8]>)| key.starts_with(prefix.as_ref()),
+                )
+            }
+            DatabaseKind::InMemory { map } => map
+                .lock()
+                .expect("in-memory database mutex is poisoned")
+                .get_next(prefix.as_ref())
+                .is_some_and(|(key, _)| key.starts_with(prefix.as_ref())),
+        };
+
+        Ok(contains_key)
+    }
+
     pub fn get(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
+        let compression = (self.compression)(key.as_ref());
+
         match self.kind() {
             #[cfg(not(target_os = "zkvm"))]
             DatabaseKind::Persistent {
@@ -309,15 +385,47 @@ impl Database {
 
                 transaction
                     .get::<Cow<_>>(database.dbi(), key.as_ref())?
-                    .map(|compressed| decompress(&compressed))
+                    .map(|compressed| decompress(&compressed, compression))
             }
             DatabaseKind::InMemory { map } => map
                 .lock()
                 .expect("in-memory database mutex is poisoned")
                 .get(key.as_ref())
-                .map(|compressed| decompress(compressed)),
+                .map(|compressed| decompress(compressed, compression)),
         }
         .transpose()
+    }
+
+    /// Returns the full stored key that is greater than or equal to `key`, without reading or
+    /// decompressing its value.
+    ///
+    /// This exists so callers can inspect a key (e.g. to detect a cache hit) before paying the cost
+    /// of decompressing a potentially large value they may not need.
+    pub fn next_key(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
+        match self.kind() {
+            #[cfg(not(target_os = "zkvm"))]
+            DatabaseKind::Persistent {
+                database_name,
+                environment,
+                restart_tx: _,
+            } => {
+                let transaction = environment.begin_ro_txn()?;
+                let database = transaction.open_db(Some(database_name))?;
+
+                let mut cursor = transaction.cursor(database.dbi())?;
+
+                // Decoding the value as `()` makes `libmdbx` skip copying it entirely.
+                cursor
+                    .set_range::<Cow<[u8]>, ()>(key.as_ref())?
+                    .map(|(found_key, ())| found_key.into_owned())
+            }
+            DatabaseKind::InMemory { map } => map
+                .lock()
+                .expect("in-memory database mutex is poisoned")
+                .get_next(key.as_ref())
+                .map(|(found_key, _)| found_key.to_vec()),
+        }
+        .pipe(Ok)
     }
 
     #[cfg(not(target_os = "zkvm"))]
@@ -411,6 +519,7 @@ impl Database {
                 environment,
                 restart_tx: _,
             } => {
+                let selector = self.compression.clone();
                 let transaction = environment.begin_ro_txn()?;
                 let database = transaction.open_db(Some(database_name))?;
 
@@ -421,10 +530,11 @@ impl Database {
                     .transpose()
                     .into_iter()
                     .chain(core::iter::from_fn(move || cursor.next().transpose()))
-                    .map(|result| decompress_pair(result?))
+                    .map(move |result| decompress_pair(result?, &selector))
                     .pipe(Either::Left)
             }
             DatabaseKind::InMemory { map } => {
+                let selector = self.compression.clone();
                 let map = map.lock().expect("in-memory database mutex is poisoned");
                 let start_pair = map.get_key_value(start);
                 let (_, mut above) = map.split(start);
@@ -435,8 +545,9 @@ impl Database {
                         .expect_none("start_pair should have been discarded by OrdMap::split");
                 }
 
-                let it = above.into_iter().map(|(key, value)| {
-                    Ok((Cow::Owned(key.to_vec()), decompress(value.as_ref())?))
+                let it = above.into_iter().map(move |(key, value)| {
+                    let compression = selector(key.as_ref());
+                    Ok((Cow::Owned(key.to_vec()), decompress(value.as_ref(), compression)?))
                 });
 
                 #[cfg(not(target_os = "zkvm"))]
@@ -467,6 +578,7 @@ impl Database {
                 environment,
                 restart_tx: _,
             } => {
+                let selector = self.compression.clone();
                 let transaction = environment.begin_ro_txn()?;
                 let database = transaction.open_db(Some(database_name))?;
                 let mut cursor = transaction.cursor(database.dbi())?;
@@ -485,10 +597,11 @@ impl Database {
                     .transpose()
                     .into_iter()
                     .chain(core::iter::from_fn(move || cursor.prev().transpose()))
-                    .map(|result| decompress_pair(result?))
+                    .map(move |result| decompress_pair(result?, &selector))
                     .pipe(Either::Left)
             }
             DatabaseKind::InMemory { map } => {
+                let selector = self.compression.clone();
                 let map = map.lock().expect("in-memory database mutex is poisoned");
                 let end_pair = map.get_key_value(end);
                 let (mut below, _) = map.split(end);
@@ -499,8 +612,9 @@ impl Database {
                         .expect_none("end_pair should have been discarded by OrdMap::split");
                 }
 
-                let it = below.into_iter().rev().map(|(key, value)| {
-                    Ok((Cow::Owned(key.to_vec()), decompress(value.as_ref())?))
+                let it = below.into_iter().rev().map(move |(key, value)| {
+                    let compression = selector(key.as_ref());
+                    Ok((Cow::Owned(key.to_vec()), decompress(value.as_ref(), compression)?))
                 });
 
                 #[cfg(not(target_os = "zkvm"))]
@@ -535,7 +649,10 @@ impl Database {
             } => {
                 let compressed_pairs = pairs
                     .into_iter()
-                    .map(|(key, value)| Ok((key, compress(value.as_ref())?)))
+                    .map(|(key, value)| {
+                        let compression = (self.compression)(key.as_ref());
+                        Ok((key, compress(value.as_ref(), compression)?))
+                    })
                     .collect::<Result<Vec<_>>>()?;
 
                 let transaction = environment.begin_rw_txn()?;
@@ -563,8 +680,9 @@ impl Database {
                 let mut new_map = map.clone();
 
                 for (key, value) in pairs {
+                    let compression = (self.compression)(key.as_ref());
                     let key = key.as_ref().into();
-                    let compressed = compress(value.as_ref())?.into();
+                    let compressed = compress(value.as_ref(), compression)?.into();
                     new_map.insert(key, compressed);
                 }
 
@@ -597,19 +715,23 @@ impl Database {
                     cursor.set_lowerbound::<Vec<u8>, Cow<[u8]>>(key.as_ref())?
                 {
                     if is_next {
-                        cursor.prev()?.map(decompress_pair)
+                        cursor.prev()?.map(|pair| decompress_pair(pair, &self.compression))
                     } else {
-                        Some(Ok((key, decompress(&value)?)))
+                        let compression = (self.compression)(&key);
+                        Some(Ok((key, decompress(&value, compression)?)))
                     }
                 } else {
-                    cursor.last()?.map(decompress_pair)
+                    cursor.last()?.map(|pair| decompress_pair(pair, &self.compression))
                 }
             }
             DatabaseKind::InMemory { map } => map
                 .lock()
                 .expect("in-memory database mutex is poisoned")
                 .get_prev(key.as_ref())
-                .map(|(key, value)| Ok((key.to_vec(), decompress(value)?))),
+                .map(|(key, value)| {
+                    let compression = (self.compression)(key);
+                    Ok((key.to_vec(), decompress(value, compression)?))
+                }),
         }
         .transpose()
     }
@@ -632,27 +754,35 @@ impl Database {
 
                 let mut cursor = transaction.cursor(database.dbi())?;
 
-                cursor.set_range(key.as_ref())?.map(decompress_pair)
+                cursor
+                    .set_range(key.as_ref())?
+                    .map(|pair| decompress_pair(pair, &self.compression))
             }
             DatabaseKind::InMemory { map } => map
                 .lock()
                 .expect("in-memory database mutex is poisoned")
                 .get_next(key.as_ref())
-                .map(|(key, value)| Ok((key.to_vec(), decompress(value)?))),
+                .map(|(key, value)| {
+                    let compression = (self.compression)(key);
+                    Ok((key.to_vec(), decompress(value, compression)?))
+                }),
         }
         .transpose()
     }
 
     const fn kind(&self) -> &DatabaseKind {
-        &self.0
+        &self.kind
     }
 }
 
 impl From<InMemoryMap> for Database {
     fn from(map: InMemoryMap) -> Self {
-        Self(DatabaseKind::InMemory {
-            map: Mutex::new(map),
-        })
+        Self {
+            kind: DatabaseKind::InMemory {
+                map: Mutex::new(map),
+            },
+            compression: default_compression_selector(),
+        }
     }
 }
 
@@ -694,17 +824,35 @@ struct Error;
 
 pub type InMemoryMap = OrdMap<Arc<[u8]>, Arc<[u8]>>;
 
-fn compress(data: &[u8]) -> Result<Vec<u8>> {
-    Encoder::new().compress_vec(data).map_err(Into::into)
+fn compress(data: &[u8], compression: Compression) -> Result<Vec<u8>> {
+    match compression {
+        Compression::None => Ok(data.to_vec()),
+        Compression::Snappy => Encoder::new().compress_vec(data).map_err(Into::into),
+        #[cfg(not(target_os = "zkvm"))]
+        Compression::Zstd(level) => zstd::stream::encode_all(data, level).map_err(Into::into),
+        #[cfg(target_os = "zkvm")]
+        Compression::Zstd(_) => anyhow::bail!("zstd compression is not supported on zkvm"),
+    }
 }
 
-fn decompress(data: &[u8]) -> Result<Vec<u8>> {
-    Decoder::new().decompress_vec(data).map_err(Into::into)
+fn decompress(data: &[u8], compression: Compression) -> Result<Vec<u8>> {
+    match compression {
+        Compression::None => Ok(data.to_vec()),
+        Compression::Snappy => Decoder::new().decompress_vec(data).map_err(Into::into),
+        #[cfg(not(target_os = "zkvm"))]
+        Compression::Zstd(_) => zstd::stream::decode_all(data).map_err(Into::into),
+        #[cfg(target_os = "zkvm")]
+        Compression::Zstd(_) => anyhow::bail!("zstd decompression is not supported on zkvm"),
+    }
 }
 
 #[cfg(not(target_os = "zkvm"))]
-fn decompress_pair<K>((key, compressed_value): (K, Cow<[u8]>)) -> Result<(K, Vec<u8>)> {
-    let value = decompress(&compressed_value)?;
+fn decompress_pair<K: AsRef<[u8]>>(
+    (key, compressed_value): (K, Cow<[u8]>),
+    selector: &CompressionSelector,
+) -> Result<(K, Vec<u8>)> {
+    let compression = selector(key.as_ref());
+    let value = decompress(&compressed_value, compression)?;
     Ok((key, value))
 }
 
@@ -891,7 +1039,7 @@ mod tests {
             })
             .collect::<Result<Vec<_>>>()?;
 
-        let compressed_len = compress(b"A")?.len();
+        let compressed_len = compress(b"A", Compression::Snappy)?.len();
         assert_eq!(compressed_len, 3);
 
         let expected = [

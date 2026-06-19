@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 
 use anyhow::{Result, ensure};
 use arithmetic::{U64Ext as _, UsizeExt as _};
@@ -91,8 +90,13 @@ pub fn get_indexed_attestation<P: Preset>(
 pub fn get_attesting_indices<P: Preset>(
     state: &impl BeaconState<P>,
     attestation: &Attestation<P>,
-) -> Result<HashSet<ValidatorIndex>> {
-    let mut output = HashSet::new();
+) -> Result<Vec<ValidatorIndex>> {
+    // Committees within a slot partition the slot's validators, so attesters across the
+    // selected committees are disjoint and no deduplication is needed. The result is sorted
+    // before returning so callers can read validator-indexed state through a single forward
+    // cursor (see `ValidatorList::for_each_effective_balance_at_sorted_indices` and
+    // `PersistentList::update_at_sorted_indices`) instead of paying `O(log n)` per random access.
+    let mut output = vec![];
     let committee_indices = get_committee_indices::<P>(attestation.committee_bits);
     let mut committee_offset: usize = 0;
 
@@ -130,6 +134,8 @@ pub fn get_attesting_indices<P: Preset>(
             participants_count: committee_offset
         },
     );
+
+    output.sort_unstable();
 
     Ok(output)
 }

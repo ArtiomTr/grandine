@@ -65,14 +65,19 @@ impl<P: Preset> StateAtSlotCache<P> {
     where
         F: FnOnce() -> Result<Option<Arc<BeaconState<P>>>>,
     {
+        let _span = tracing::debug_span!("StateAtSlotCache::get_or_try_init", %slot).entered();
         let state_entry_mutex = self.get_or_init_state_entry_mutex(slot)?;
         let mut state_entry = self.try_lock_state_entry(&state_entry_mutex, slot)?;
 
         if let Some(state) = state_entry.as_ref() {
+            tracing::debug_span!("StateAtSlotCache::hit", %slot).in_scope(|| {});
             return Ok(Some(state.clone_arc()));
         }
 
-        let state_option = init()?;
+        let state_option = {
+            let _span = tracing::debug_span!("StateAtSlotCache::init", %slot).entered();
+            init()?
+        };
 
         (*state_entry).clone_from(&state_option);
 
@@ -92,6 +97,7 @@ impl<P: Preset> StateAtSlotCache<P> {
     }
 
     fn get_or_init_state_entry_mutex(&self, slot: Slot) -> Result<StateEntryMutex<P>> {
+        let _span = tracing::debug_span!("StateAtSlotCache::get_or_init_entry", %slot).entered();
         self.try_lock_cache()?
             .cache_get_or_set_with(slot, StateEntryMutex::default)
             .clone_arc()
@@ -100,6 +106,11 @@ impl<P: Preset> StateAtSlotCache<P> {
 
     fn try_lock_cache(&self) -> Result<MutexGuard<'_, Cache<P>>> {
         let timeout = self.try_lock_timeout;
+        let _span = tracing::debug_span!(
+            "StateAtSlotCache::try_lock_cache",
+            timeout_ms = timeout.as_millis(),
+        )
+        .entered();
 
         self.cache.try_lock_for(timeout).ok_or_else(|| {
             let error = CacheLockError::CacheLockTimeout { timeout };
@@ -116,6 +127,12 @@ impl<P: Preset> StateAtSlotCache<P> {
         slot: Slot,
     ) -> Result<MutexGuard<'entry, Option<Arc<BeaconState<P>>>>> {
         let timeout = self.try_lock_timeout;
+        let _span = tracing::debug_span!(
+            "StateAtSlotCache::try_lock_state_entry",
+            %slot,
+            timeout_ms = timeout.as_millis(),
+        )
+        .entered();
 
         state_entry_mutex.try_lock_for(timeout).ok_or_else(|| {
             let error = CacheLockError::StateEntryLockTimeout { slot, timeout };

@@ -23,6 +23,7 @@ use types::{
 use crate::{
     controller::{Controller, MutatorHandle},
     events::EventChannels,
+    hierarchy::Hierarchy,
     messages::{AttestationVerifierMessage, P2pMessage},
     storage::{DEFAULT_ARCHIVAL_EPOCH_INTERVAL, Storage},
     unbounded_sink::UnboundedSink,
@@ -108,7 +109,7 @@ where
             chain_config.clone_arc(),
             pubkey_cache.clone_arc(),
             database,
-            DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
+            Hierarchy::default(),
             StorageMode::Standard {
                 custom_data_availability_window: None,
             },

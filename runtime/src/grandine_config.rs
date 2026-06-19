@@ -114,10 +114,7 @@ impl GrandineConfig {
             ..
         } = self;
 
-        let StorageConfig {
-            archival_epoch_interval,
-            ..
-        } = storage_config;
+        let StorageConfig { hierarchy, .. } = storage_config;
 
         match predefined_network {
             Some(network) => info!("network: {network}"),
@@ -171,7 +168,7 @@ impl GrandineConfig {
             info!("validator API disabled");
         }
 
-        info!("archival interval: {archival_epoch_interval} epochs");
+        // info!("archival interval: {archival_epoch_interval} epochs");
         info!("slasher enabled: {slashing_enabled}");
 
         if let Some(client_version) = &network_config.identify_agent_version {

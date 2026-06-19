@@ -89,6 +89,14 @@ test-case = { workspace = true }
 
 [features]
 embed = []
+# Forwards the tracing instrumentation toggle down to the core transition crates.
+# `binary_utils/tracing` is required so the telemetry EnvFilter actually admits
+# `transition_functions`/`helper_functions` spans (otherwise they are filtered out).
+tracing = [
+    'fork_choice_control/tracing',
+    'helper_functions/tracing',
+    'binary_utils/tracing',
+]
 
 logger-always-write-style = []
 

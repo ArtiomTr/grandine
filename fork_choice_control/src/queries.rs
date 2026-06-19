@@ -16,7 +16,7 @@ use pubkey_cache::PubkeyCache;
 use serde::Serialize;
 use std_ext::ArcExt;
 use thiserror::Error;
-use tracing::instrument;
+use tracing::{debug_span, instrument};
 use typenum::Unsigned as _;
 use types::{
     combined::{BeaconState, DataColumnSidecar, SignedAggregateAndProof, SignedBeaconBlock},
@@ -322,6 +322,7 @@ where
         chain_link.state(&self.store_snapshot())
     }
 
+    #[tracing::instrument(name = "Controller::state_at_slot_blocking", skip_all, fields(slot = %slot))]
     pub fn state_at_slot_blocking(
         &self,
         slot: Slot,
@@ -329,18 +330,23 @@ where
         self.snapshot().state_at_slot_blocking(slot)
     }
 
+    #[tracing::instrument(skip_all, fields(slot = %slot))]
     pub fn state_at_slot_cached_blocking(
         &self,
         slot: Slot,
     ) -> Result<Option<WithStatus<Arc<BeaconState<P>>>>> {
-        let store = self.store_snapshot();
+        let store = {
+            let _span = debug_span!("state_at_slot_cached_blocking::store_snapshot").entered();
+            self.store_snapshot()
+        };
 
         if slot < store.finalized_slot() {
-            let state_from_cache = self.state_at_slot_cache().get_or_try_init(slot, || {
-                Ok(self
-                    .state_at_slot_blocking(slot)?
-                    .map(|with_status| with_status.value))
-            })?;
+            let state_from_cache = {
+                let _span =
+                    debug_span!("state_at_slot_cached_blocking::finalized_cache_lookup").entered();
+                self.state_at_slot_blocking(slot)?
+                    .map(|with_status| with_status.value)
+            };
 
             if let Some(state) = state_from_cache {
                 return Ok(Some(WithStatus::valid(state, true)));
@@ -364,7 +370,11 @@ where
             );
         }
 
-        self.state_at_slot_blocking(slot)
+        {
+            let _span =
+                debug_span!("state_at_slot_cached_blocking::state_at_slot_blocking").entered();
+            self.state_at_slot_blocking(slot)
+        }
     }
 
     pub fn state_before_or_at_slot(
@@ -1224,6 +1234,7 @@ impl<P: Preset> Snapshot<'_, P> {
     //                      Beacon Chain Explorer used at the time. Consider adding a check to prevent
     //                      this method for computing states for future slots. The Eth Beacon Node API
     //                      specification does not say if this is allowed.
+    #[tracing::instrument(name = "Snapshot::state_at_slot_blocking", skip_all, fields(slot = %slot))]
     pub fn state_at_slot_blocking(
         &self,
         slot: Slot,
@@ -1231,12 +1242,19 @@ impl<P: Preset> Snapshot<'_, P> {
         let store = &self.store_snapshot;
 
         if let Some(chain_link) = store.chain_link_before_or_at(slot) {
-            let state = self.state_cache.state_at_slot(
-                &self.pubkey_cache,
-                store,
-                chain_link.block_root,
-                slot,
-            )?;
+            let state = {
+                let _span = debug_span!(
+                    "Snapshot::state_at_slot_blocking::state_cache",
+                    block_root = %chain_link.block_root,
+                )
+                .entered();
+                self.state_cache.state_at_slot(
+                    &self.pubkey_cache,
+                    store,
+                    chain_link.block_root,
+                    slot,
+                )?
+            };
 
             return Ok(Some(WithStatus {
                 value: state,
@@ -1245,10 +1263,13 @@ impl<P: Preset> Snapshot<'_, P> {
             }));
         }
 
-        if let Some(state) = self
-            .storage
-            .stored_state(slot, Some(&store.finalized_validators()))?
-        {
+        let stored_state = {
+            let _span = debug_span!("Snapshot::state_at_slot_blocking::stored_state").entered();
+            self.storage
+                .stored_state(slot, Some(&store.finalized_validators()))?
+        };
+
+        if let Some(state) = stored_state {
             let finalized = store.is_slot_finalized(state.slot());
             return Ok(Some(WithStatus::valid(state, finalized)));
         }

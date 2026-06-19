@@ -5,6 +5,7 @@ use anyhow::{Result, ensure};
 use bytesize::ByteSize;
 use database::{Database, DatabaseMode, RestartMessage};
 use directories::Directories;
+use fork_choice_control::Hierarchy;
 use fs_err::PathExt as _;
 use futures::channel::mpsc::UnboundedSender;
 use logging::info_with_peers;
@@ -25,9 +26,11 @@ pub struct StorageConfig {
     pub db_size: ByteSize,
     pub directories: Arc<Directories>,
     pub eth1_db_size: ByteSize,
-    pub archival_epoch_interval: NonZeroU64,
+    pub hierarchy: Hierarchy,
     pub reset_databases: bool,
     pub storage_mode: StorageMode,
+    /// zstd compression level used for hierarchical state diffs in the beacon fork choice database.
+    pub zstd_compression_level: i32,
 }
 
 impl StorageConfig {
@@ -66,7 +69,12 @@ impl StorageConfig {
             );
         }
 
-        Database::persistent("beacon_fork_choice", path, self.db_size, mode, restart_tx)
+        let database =
+            Database::persistent("beacon_fork_choice", path, self.db_size, mode, restart_tx)?;
+
+        Ok(database.with_compression(fork_choice_control::beacon_state_compression_selector(
+            self.zstd_compression_level,
+        )))
     }
 
     #[must_use]
@@ -140,9 +148,10 @@ impl StorageConfig {
             db_size,
             directories,
             eth1_db_size,
-            archival_epoch_interval,
+            hierarchy,
             reset_databases,
             storage_mode,
+            zstd_compression_level,
         } = self;
 
         let new_db_size = ByteSize::b(
@@ -164,9 +173,10 @@ impl StorageConfig {
             db_size: new_db_size,
             directories,
             eth1_db_size: new_eth1_db_size,
-            archival_epoch_interval,
+            hierarchy,
             reset_databases,
             storage_mode,
+            zstd_compression_level,
         }
     }
 
@@ -192,9 +202,10 @@ mod tests {
             db_size: ByteSize::gb(6),
             directories: Arc::new(Directories::default()),
             eth1_db_size: ByteSize::gb(2),
-            archival_epoch_interval: nonzero!(1_u64),
+            hierarchy: Hierarchy::default(),
             reset_databases: false,
             storage_mode: StorageMode::default(),
+            zstd_compression_level: 0,
         };
 
         let StorageConfig {
@@ -214,9 +225,10 @@ mod tests {
             db_size: ByteSize::b(u64::MAX),
             directories: Arc::new(Directories::default()),
             eth1_db_size: ByteSize::b(u64::MAX),
-            archival_epoch_interval: nonzero!(1_u64),
+            hierarchy: Hierarchy::default(),
             reset_databases: false,
             storage_mode: StorageMode::default(),
+            zstd_compression_level: 0,
         };
 
         assert_eq!(storage_config.db_size, ByteSize::b(u64::MAX));

@@ -64,6 +64,9 @@ struct Options {
     /// Number of blocks to process in batches.
     #[clap(long, default_value_t = 64)]
     batch_size: usize,
+    /// zstd compression level used for hierarchical state diffs, matching the production database.
+    #[clap(long, default_value_t = 3)]
+    zstd_compression_level: i32,
     /// A list beacon block roots that beacon node rejects unconditionally.
     /// Defaults to a list of default blacklisted blocks of the specified `Config`.
     #[clap(long)]
@@ -510,6 +513,7 @@ fn run<P: Preset>(
         unfinalized_states_in_memory,
         database_directory,
         batch_size,
+        zstd_compression_level,
         blacklisted_blocks,
     } = options;
 
@@ -568,7 +572,10 @@ fn run<P: Preset>(
         ByteSize::gib(512),
         DatabaseMode::ReadWrite,
         None,
-    )?;
+    )?
+    .with_compression(fork_choice_control::beacon_state_compression_selector(
+        zstd_compression_level,
+    ));
 
     let (controller, _mutator_handle) = AdHocBenchController::with_p2p_tx(
         chain_config,

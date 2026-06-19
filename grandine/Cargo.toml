@@ -19,6 +19,9 @@ tracing = { workspace = true }
 [features]
 default = ["bls/blst", "kzg_utils/blst"]
 
+# Enables tracing instrumentation in the core transition crates.
+tracing = ['runtime/tracing']
+
 logger-always-write-style = []
 
 # `preset-any` and `network-any` should not be passed to Cargo.

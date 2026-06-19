@@ -42,4 +42,4 @@ test-generator = { workspace = true }
 
 [features]
 metrics = ['helper_functions/metrics', 'dep:prometheus_metrics']
-tracing = ['helper_functions/tracing', 'dep:tracing']
+tracing = ['helper_functions/tracing', 'types/tracing', 'dep:tracing']

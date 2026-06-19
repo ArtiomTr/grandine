@@ -247,6 +247,13 @@ pub fn get_or_init_active_validator_indices_ordered<P: Preset>(
     }
 
     state.cache().active_validator_indices_ordered[relative_epoch].get_or_try_init(|| {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::debug_span!(
+            "init_active_validator_indices_ordered",
+            validator_count = state.validators().len_usize(),
+        )
+        .entered();
+
         if report_cache_miss {
             #[cfg(feature = "metrics")]
             if let Some(metrics) = METRICS.get() {
@@ -290,7 +297,7 @@ pub fn get_or_init_active_validator_indices_shuffled<P: Preset>(
 where
     P::ValidatorRegistryLimit: FitsInU64,
 {
-    fn shuffle<P: Preset, T: Copy>(ordered: &[T], seed: H256) -> Arc<[T]> {
+    fn shuffle<P: Preset, T: Copy + Send>(ordered: &[T], seed: H256) -> Arc<[T]> {
         let mut shuffled = ArcBox::from(ordered);
 
         shuffling::shuffle_slice::<P, _>(&mut shuffled, seed).expect(
@@ -302,6 +309,9 @@ where
     }
 
     state.cache().active_validator_indices_shuffled[relative_epoch].get_or_try_init(|| {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::debug_span!("init_active_validator_indices_shuffled").entered();
+
         if report_cache_miss {
             #[cfg(feature = "metrics")]
             if let Some(metrics) = METRICS.get() {
@@ -311,11 +321,18 @@ where
 
         let seed = get_seed(state, relative_epoch, DOMAIN_BEACON_ATTESTER)?;
 
-        let result: PackedIndices = match get_or_init_active_validator_indices_ordered(
-            state,
-            relative_epoch,
-            report_cache_miss,
-        )? {
+        // Building the ordered list is traced separately inside
+        // `get_or_init_active_validator_indices_ordered`. The span below isolates the swap-or-not
+        // shuffle itself, which dominates the first attestation processed in each epoch.
+        let ordered =
+            get_or_init_active_validator_indices_ordered(state, relative_epoch, report_cache_miss)?;
+
+        #[cfg(feature = "tracing")]
+        let _shuffle_span =
+            tracing::debug_span!("shuffle_active_validator_indices", count = ordered.len())
+                .entered();
+
+        let result: PackedIndices = match ordered {
             PackedIndices::U8(ordered) => PackedIndices::U8(shuffle::<P, _>(ordered, seed)),
             PackedIndices::U16(ordered) => PackedIndices::U16(shuffle::<P, _>(ordered, seed)),
             PackedIndices::U32(ordered) => PackedIndices::U32(shuffle::<P, _>(ordered, seed)),
@@ -491,6 +508,9 @@ pub fn get_or_try_init_beacon_proposer_index<P: Preset>(
         .cache()
         .proposer_index
         .get_or_try_init(|| {
+            #[cfg(feature = "tracing")]
+            let _span = tracing::debug_span!("init_beacon_proposer_index").entered();
+
             if report_cache_miss {
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = METRICS.get() {
@@ -572,6 +592,9 @@ pub fn get_or_init_total_active_balance<P: Preset>(
 ) -> Gwei {
     state.cache().total_active_balance[RelativeEpoch::Current]
         .get_or_init(|| {
+            #[cfg(feature = "tracing")]
+            let _span = tracing::debug_span!("init_total_active_balance").entered();
+
             if report_cache_miss {
                 #[cfg(feature = "metrics")]
                 if let Some(metrics) = METRICS.get() {

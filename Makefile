@@ -16,6 +16,14 @@ ifeq ($(DISABLE_TRACING),0)
 	FEATURES := $(FEATURES) --features tracing
 endif
 
+# `c_grandine` bakes in its own networks, so it cannot take $(FEATURES) (which
+# carry grandine-only features like default-networks). Forward just the core-crate
+# tracing toggle to the cdylib/staticlib build that the Nethermind plugin embeds.
+C_GRANDINE_FEATURES =
+ifeq ($(DISABLE_TRACING),0)
+	C_GRANDINE_FEATURES := --features tracing
+endif
+
 .PHONY: all
 all: build
 
@@ -62,7 +70,7 @@ x86_64-unknown-linux-gnu: ./target/x86_64-unknown-linux-gnu/compact/libgrandine.
 	cross build --bin grandine --target x86_64-unknown-linux-gnu $(FEATURES) --profile compact $(EXCLUDES)
 
 ./target/x86_64-unknown-linux-gnu/compact/libgrandine.so:
-	cross build -p c_grandine --profile compact --target x86_64-unknown-linux-gnu
+	cross build -p c_grandine $(C_GRANDINE_FEATURES) --profile compact --target x86_64-unknown-linux-gnu
 
 # ------ GRANDINE LINUX ARM64 ------
 
@@ -73,7 +81,7 @@ aarch64-unknown-linux-gnu: ./target/aarch64-unknown-linux-gnu/compact/grandine .
 	cross build --bin grandine --target aarch64-unknown-linux-gnu $(FEATURES) --profile compact $(EXCLUDES)
 
 ./target/aarch64-unknown-linux-gnu/compact/libgrandine.so:
-	cross build -p c_grandine --profile compact --target aarch64-unknown-linux-gnu
+	cross build -p c_grandine $(C_GRANDINE_FEATURES) --profile compact --target aarch64-unknown-linux-gnu
 
 # ------ GRANDINE WINDOWS X64 ------
 
@@ -84,7 +92,7 @@ x86_64-pc-windows-msvc: ./target/x86_64-pc-windows-msvc/compact/grandine.exe ./t
 	cargo build --profile compact --bin grandine --target x86_64-pc-windows-msvc $(FEATURES) $(EXCLUDES)
 
 ./target/x86_64-pc-windows-msvc/compact/grandine.dll:
-	cargo build -p c_grandine --profile compact --target x86_64-pc-windows-msvc
+	cargo build -p c_grandine $(C_GRANDINE_FEATURES) --profile compact --target x86_64-pc-windows-msvc
 
 # ------ GRANDINE MACOS X64 ------
 
@@ -95,7 +103,7 @@ x86_64-apple-darwin: ./target/x86_64-apple-darwin/compact/grandine ./target/x86_
 	cargo build --profile compact --bin grandine --target x86_64-apple-darwin $(FEATURES) $(EXCLUDES)
 
 ./target/x86_64-apple-darwin/compact/libgrandine.dylib:
-	cargo build -p c_grandine --profile compact --target x86_64-apple-darwin
+	cargo build -p c_grandine $(C_GRANDINE_FEATURES) --profile compact --target x86_64-apple-darwin
 
 # ------ GRANDINE MACOS ARM64 ------
 
@@ -106,7 +114,7 @@ aarch64-apple-darwin: ./target/aarch64-apple-darwin/compact/grandine ./target/aa
 	cargo build --profile compact --bin grandine --target aarch64-apple-darwin $(FEATURES) $(EXCLUDES)
 
 ./target/aarch64-apple-darwin/compact/libgrandine.dylib:
-	cargo build -p c_grandine --profile compact --target aarch64-apple-darwin
+	cargo build -p c_grandine $(C_GRANDINE_FEATURES) --profile compact --target aarch64-apple-darwin
 
 # ------ GRANDINE-NETHERMIND INTEGRATION ------
 

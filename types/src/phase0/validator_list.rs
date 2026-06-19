@@ -323,6 +323,37 @@ impl CacheNode {
             }
         }
     }
+
+    /// Invalidates the cached roots for a batch of indices in a single traversal.
+    ///
+    /// `indices` must be sorted ascending and lie within `[offset, offset + length)`;
+    /// each tree node on the union of root-to-leaf paths is visited (and cloned via
+    /// `make_mut`) exactly once, instead of once per index as with [`Self::invalidate`].
+    fn invalidate_many(self: &mut Arc<Self>, indices: &[usize], offset: usize, length: usize) {
+        if indices.is_empty() {
+            return;
+        }
+
+        match Arc::make_mut(self) {
+            Self::Leaf(root) => *root = OnceBox::new(),
+            Self::Internal { root, left, right } => {
+                *root = OnceBox::new();
+
+                let left_length = length.next_power_of_two() / 2;
+                let mid = offset + left_length;
+                let split = indices.partition_point(|&index| index < mid);
+                let (left_indices, right_indices) = indices.split_at(split);
+
+                left.invalidate_many(left_indices, offset, left_length);
+
+                let right_length = length
+                    .checked_sub(left_length)
+                    .expect("left_length never exceeds length");
+
+                right.invalidate_many(right_indices, mid, right_length);
+            }
+        }
+    }
 }
 
 impl<N: Unsigned> Default for ValidatorList<N> {
@@ -399,6 +430,119 @@ impl<N: Unsigned> ValidatorList<N> {
         );
 
         Ok(effective_balance)
+    }
+
+    /// Reads the effective balances at `sorted_indices` (sorted ascending and in bounds),
+    /// calling `callback` with each balance in ascending-index order.
+    ///
+    /// With the persistent `im::Vector` backend, reading through a single forward cursor
+    /// amortizes the per-lookup cost: consecutive indices that land in the same leaf chunk
+    /// cost `O(1)` instead of `O(log n)`. This matters when reading a whole committee's worth
+    /// of balances during attestation processing.
+    pub fn for_each_effective_balance_at_sorted_indices(
+        &self,
+        sorted_indices: &[u64],
+        mut callback: impl FnMut(Gwei),
+    ) -> Result<(), IndexError> {
+        let Some(&max_index) = sorted_indices.last() else {
+            return Ok(());
+        };
+
+        // The indices are sorted, so bounds checking the maximum bounds checks all of them.
+        self.validate_index(max_index)?;
+
+        #[cfg(not(target_os = "zkvm"))]
+        {
+            let mut focus = self.effective_balances.focus();
+
+            for &index in sorted_indices {
+                let index = usize::try_from(index).expect("validator index fits in usize");
+                let effective_balance = focus
+                    .get(index)
+                    .copied()
+                    .expect("index was bounds-checked above");
+                callback(effective_balance);
+            }
+        }
+
+        #[cfg(target_os = "zkvm")]
+        {
+            for &index in sorted_indices {
+                let index = usize::try_from(index).expect("validator index fits in usize");
+                callback(self.effective_balances[index]);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Applies a batch of effective-balance edits, invalidating the Merkle cache
+    /// for all touched indices in a single traversal.
+    ///
+    /// This is much cheaper than calling [`Self::effective_balance_mut`] in a loop
+    /// when many balances change at once, because the cache is invalidated once for
+    /// the whole batch rather than once per index.
+    pub fn set_effective_balances(
+        &mut self,
+        edits: impl IntoIterator<Item = (u64, Gwei)>,
+    ) -> Result<(), IndexError> {
+        let mut indices = Vec::new();
+
+        for (index, effective_balance) in edits {
+            let index = self.validate_index(index)?;
+
+            let slot = self.effective_balances.get_mut(index).expect(
+                "validator list invariant violated: \
+                    effective balance list is out of sync with current length",
+            );
+
+            *slot = effective_balance;
+            indices.push(index);
+        }
+
+        self.invalidate_indices(indices);
+
+        Ok(())
+    }
+
+    /// Applies a batch of [`PartialValidator`] edits, invalidating the Merkle cache
+    /// for all touched indices in a single traversal (see [`Self::set_effective_balances`]).
+    pub fn set_partial_validators(
+        &mut self,
+        edits: impl IntoIterator<Item = (u64, PartialValidator)>,
+    ) -> Result<(), IndexError> {
+        let mut indices = Vec::new();
+
+        for (index, partial_validator) in edits {
+            let index = self.validate_index(index)?;
+
+            let slot = self.items.get_mut(index).expect(
+                "validator list invariant violated: \
+                    partial validator list is out of sync with current length",
+            );
+
+            *slot = partial_validator;
+            indices.push(index);
+        }
+
+        self.invalidate_indices(indices);
+
+        Ok(())
+    }
+
+    /// Invalidates the Merkle cache for a set of mutated indices in a single traversal.
+    fn invalidate_indices(&mut self, mut indices: Vec<usize>) {
+        if indices.is_empty() {
+            return;
+        }
+
+        let len = self.len_usize();
+
+        if let Some(cache) = self.cache.as_mut() {
+            indices.sort_unstable();
+            indices.dedup();
+            cache.invalidate_many(&indices, 0, len);
+        }
     }
 
     pub fn partial_validator(&self, index: u64) -> Result<&PartialValidator, IndexError> {
@@ -771,6 +915,20 @@ impl<'de, N: Unsigned> Deserialize<'de> for ValidatorList<N> {
 impl<N: Unsigned> SszHash for ValidatorList<N> {
     type PackingFactor = U1;
 
+    // The first hash after a state is loaded from disk is expensive: the Merkle cache
+    // (`CacheNode`) is built empty, so every validator leaf and internal node is computed
+    // from scratch here. Later hashes only recompute the few nodes invalidated by block
+    // processing. The `validators` field plus this span's duration make that cold pass
+    // visible in traces. See `hash_node` for the actual recursion.
+    #[cfg_attr(
+        feature = "tracing",
+        tracing::instrument(
+            level = "debug",
+            name = "validator_list_hash_tree_root",
+            skip_all,
+            fields(validators = self.len_usize()),
+        )
+    )]
     fn hash_tree_root(&self) -> H256 {
         let root = match self.len_usize() {
             0 => {

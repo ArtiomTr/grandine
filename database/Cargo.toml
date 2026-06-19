@@ -23,6 +23,7 @@ libmdbx = { workspace = true }
 logging = { workspace = true }
 thiserror = { workspace = true }
 tracing ={ workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
