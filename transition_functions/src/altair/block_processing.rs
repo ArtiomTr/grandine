@@ -495,6 +495,7 @@ pub fn apply_deposits<P: Preset>(
 
                 let validator_index = state.validators().len_u64();
 
+                // The public key -> index map is maintained inside the validator list itself.
                 state.validators_mut().push(validator)?;
                 state.balances_mut().push(total_amount)?;
                 state.previous_epoch_participation_mut().push(0)?;

@@ -916,6 +916,7 @@ pub fn add_validator_to_registry<P: Preset>(
         .prev_multiple_of(P::EFFECTIVE_BALANCE_INCREMENT)
         .min(max_effective_balance);
 
+    // The public key -> index map is maintained inside the validator list itself.
     state.validators_mut().push(validator)?;
     state.balances_mut().push(amount)?;
     state.previous_epoch_participation_mut().push(0)?;

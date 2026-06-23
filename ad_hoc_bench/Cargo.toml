@@ -21,8 +21,10 @@ itertools = { workspace = true }
 logging = { workspace = true }
 pubkey_cache = { workspace = true }
 rand = { workspace = true }
+ssz = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }
+typenum = { workspace = true }
 types = { workspace = true }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]

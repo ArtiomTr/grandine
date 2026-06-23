@@ -19,7 +19,7 @@ use tracing::info;
 use transition_functions::combined;
 use typenum::Unsigned as _;
 use types::{
-    Validators,
+    PubkeyList, Validators,
     combined::{BeaconState, DataColumnSidecar, SignedBeaconBlock},
     config::Config,
     deneb::{

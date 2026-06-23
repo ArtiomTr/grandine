@@ -102,6 +102,7 @@ pub mod gloas {
 }
 
 pub use collections::{ProposerLookahead, Ptc, PtcWindow, Validators};
+pub use phase0::validator_list::PubkeyList;
 
 mod collections;
 

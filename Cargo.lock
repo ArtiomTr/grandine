@@ -30,9 +30,11 @@ dependencies = [
  "logging",
  "pubkey_cache",
  "rand 0.8.6",
+ "ssz",
  "tempfile",
  "tikv-jemalloc-ctl",
  "tracing",
+ "typenum",
  "types",
 ]
 
