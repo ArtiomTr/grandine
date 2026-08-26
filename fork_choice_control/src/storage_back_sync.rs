@@ -397,6 +397,7 @@ mod tests {
             database,
             StorageMode::default(),
             StateStorageConfig::default(),
+            None,
         );
 
         let error = storage
@@ -424,6 +425,7 @@ mod tests {
             Database::in_memory(),
             StorageMode::default(),
             StateStorageConfig::default(),
+            None,
         )
     }
 }
