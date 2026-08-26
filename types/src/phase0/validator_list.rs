@@ -25,7 +25,7 @@ use typenum::Unsigned;
 use crate::{
     nonstandard::{PartialValidator, PubkeyList, RawValidatorList, ValidatorListIter},
     phase0::{containers::Validator, primitives::Gwei},
-    traits::{SszValidatorList, SszValidatorListMut},
+    traits::SszValidatorList,
 };
 
 #[derive(Clone, Debug, Default, Derivative)]
@@ -207,40 +207,6 @@ impl<N: Unsigned> SszValidatorList for ValidatorList<N> {
         self.buf.effective_balance(index)
     }
 
-    fn partial_validator(&self, index: u64) -> Result<&PartialValidator, IndexError> {
-        self.buf.partial_validator(index)
-    }
-
-    fn pubkeys(&self) -> &PubkeyList {
-        self.buf.pubkeys()
-    }
-
-    fn partial_validators(&self) -> VectorIter<'_, PartialValidator> {
-        self.buf.partial_validators()
-    }
-
-    fn effective_balances(&self) -> VectorIter<'_, Gwei> {
-        self.buf.effective_balances()
-    }
-
-    fn len_usize(&self) -> usize {
-        self.buf.len_usize()
-    }
-
-    fn len_u64(&self) -> u64 {
-        self.buf.len_u64()
-    }
-
-    fn iter<'a>(&'a self) -> Box<dyn ExactSizeIterator<Item = Validator> + 'a> {
-        Box::new(self.into_iter())
-    }
-
-    fn clone_boxed(&self) -> Box<dyn SszValidatorList> {
-        Box::new(self.clone())
-    }
-}
-
-impl<N: Unsigned> SszValidatorListMut for ValidatorList<N> {
     fn effective_balance_mut(&mut self, index: u64) -> Result<&mut u64, IndexError> {
         self.invalidate_index(
             index
@@ -249,6 +215,10 @@ impl<N: Unsigned> SszValidatorListMut for ValidatorList<N> {
         );
 
         self.buf.effective_balance_mut(index)
+    }
+
+    fn partial_validator(&self, index: u64) -> Result<&PartialValidator, IndexError> {
+        self.buf.partial_validator(index)
     }
 
     fn partial_validator_mut(&mut self, index: u64) -> Result<&mut PartialValidator, IndexError> {
@@ -261,15 +231,8 @@ impl<N: Unsigned> SszValidatorListMut for ValidatorList<N> {
         self.buf.partial_validator_mut(index)
     }
 
-    fn update_effective_balances(
-        &mut self,
-        updater: &mut dyn FnMut(&PartialValidator, Gwei) -> Result<Gwei, anyhow::Error>,
-    ) -> Result<(), anyhow::Error> {
-        self.buf.update_effective_balances(updater, |index, len| {
-            if let Some(cache) = self.cache.as_mut() {
-                cache.invalidate(index, len);
-            }
-        })
+    fn pubkeys(&self) -> &PubkeyList {
+        self.buf.pubkeys()
     }
 
     fn set_pubkeys(&mut self, pubkeys: &PubkeyList) -> Result<()> {
@@ -287,6 +250,25 @@ impl<N: Unsigned> SszValidatorListMut for ValidatorList<N> {
         self.cache = (length > 0).then(|| CacheNode::build_empty(length));
     }
 
+    fn partial_validators(&self) -> VectorIter<'_, PartialValidator> {
+        self.buf.partial_validators()
+    }
+
+    fn effective_balances(&self) -> VectorIter<'_, Gwei> {
+        self.buf.effective_balances()
+    }
+
+    fn update_effective_balances(
+        &mut self,
+        updater: &mut dyn FnMut(&PartialValidator, Gwei) -> Result<Gwei, anyhow::Error>,
+    ) -> Result<(), anyhow::Error> {
+        self.buf.update_effective_balances(updater, |index, len| {
+            if let Some(cache) = self.cache.as_mut() {
+                cache.invalidate(index, len);
+            }
+        })
+    }
+
     fn push(&mut self, validator: Validator) -> Result<(), PushError> {
         let old_length = self.len_usize();
 
@@ -302,6 +284,22 @@ impl<N: Unsigned> SszValidatorListMut for ValidatorList<N> {
         }
 
         Ok(())
+    }
+
+    fn len_usize(&self) -> usize {
+        self.buf.len_usize()
+    }
+
+    fn len_u64(&self) -> u64 {
+        self.buf.len_u64()
+    }
+
+    fn iter<'a>(&'a self) -> Box<dyn ExactSizeIterator<Item = Validator> + 'a> {
+        Box::new(self.into_iter())
+    }
+
+    fn clone_boxed(&self) -> Box<dyn SszValidatorList> {
+        Box::new(self.clone())
     }
 }
 
@@ -423,5 +421,121 @@ impl<N: Unsigned, const SIZE: usize> TryFrom<[Validator; SIZE]> for ValidatorLis
 
     fn try_from(array: [Validator; SIZE]) -> Result<Self, Self::Error> {
         Self::try_from_iter(array)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ssz::SszReadDefault as _;
+    use typenum::U128;
+
+    use super::*;
+
+    type TestValidatorList = ValidatorList<U128>;
+
+    fn validator(index: u8) -> Validator {
+        Validator {
+            pubkey: PublicKeyBytes::repeat_byte(index.saturating_add(1)),
+            withdrawal_credentials: H256::repeat_byte(index),
+            effective_balance: 32_000_000_000 + u64::from(index),
+            slashed: false,
+            activation_eligibility_epoch: index.into(),
+            activation_epoch: index.into(),
+            exit_epoch: u64::MAX,
+            withdrawable_epoch: u64::MAX,
+        }
+    }
+
+    fn validators(count: u8) -> TestValidatorList {
+        TestValidatorList::try_from_iter((0..count).map(validator)).expect("list is not full")
+    }
+
+    #[test]
+    fn stripping_and_restoring_pubkeys_round_trips_through_ssz() -> Result<()> {
+        let original = validators(9);
+        let pubkeys = original.pubkeys().clone();
+        let original_root = original.hash_tree_root();
+
+        let mut stripped = original.clone();
+        stripped.clear_pubkeys(pubkeys.len());
+
+        assert_eq!(
+            stripped.pubkey(0)?,
+            &PublicKeyBytes::zero(),
+            "stripping should zero the pubkeys the writer omits",
+        );
+
+        assert_ne!(
+            stripped.hash_tree_root(),
+            original_root,
+            "the stripped list hashes differently, so the cache must have been invalidated",
+        );
+
+        let mut restored = TestValidatorList::from_ssz_default(stripped.to_ssz()?)?;
+        restored.set_pubkeys(&pubkeys)?;
+
+        assert_eq!(restored, original);
+        assert_eq!(restored.hash_tree_root(), original_root);
+
+        for index in 0..original.len_u64() {
+            assert_eq!(restored.pubkey(index)?, original.pubkey(index)?);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn set_pubkeys_takes_only_as_many_keys_as_there_are_validators() -> Result<()> {
+        // The finalized pubkey list on disk covers every validator ever seen, so it is longer than
+        // the list of a state read back from an earlier slot.
+        let longer = validators(12);
+        let shorter = validators(5);
+
+        let mut stripped = shorter.clone();
+        stripped.clear_pubkeys(shorter.len_usize());
+        stripped.set_pubkeys(longer.pubkeys())?;
+
+        assert_eq!(stripped, shorter);
+        assert_eq!(stripped.hash_tree_root(), shorter.hash_tree_root());
+        assert_eq!(stripped.pubkeys().len(), shorter.len_usize());
+
+        // The index map is carried over whole, but indices past the end are not reachable.
+        assert_eq!(
+            stripped.pubkeys().index_of(&validator(11).pubkey),
+            None,
+            "an index past the truncated list must not be looked up",
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn set_pubkeys_rejects_a_list_shorter_than_the_validator_count() {
+        let mut list = validators(5);
+
+        list.set_pubkeys(validators(4).pubkeys())
+            .expect_err("4 pubkeys cannot cover 5 validators");
+    }
+
+    #[test]
+    fn clearing_more_pubkeys_than_there_are_validators_is_capped() -> Result<()> {
+        let mut list = validators(3);
+
+        list.clear_pubkeys(100);
+
+        assert_eq!(list.len_usize(), 3);
+        assert_eq!(list.pubkey(2)?, &PublicKeyBytes::zero());
+
+        Ok(())
+    }
+
+    #[test]
+    fn clearing_no_pubkeys_leaves_the_list_untouched() {
+        let original = validators(3);
+        let mut list = original.clone();
+
+        list.clear_pubkeys(0);
+
+        assert_eq!(list.hash_tree_root(), original.hash_tree_root());
     }
 }
