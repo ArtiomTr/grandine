@@ -57,8 +57,8 @@ use crate::{
     },
     collections::{
         BuilderPendingPayments, BuilderPendingWithdrawals, Builders, Eth1DataVotes,
-        HistoricalRoots, PayloadExpectedWithdrawals, ProposerLookahead, PtcWindow, RandaoMixes,
-        RecentRoots, Slashings,
+        HistoricalRoots, HistoricalSummaries, PayloadExpectedWithdrawals, ProposerLookahead,
+        PtcWindow, RandaoMixes, RecentRoots, Slashings,
     },
     combined::{
         Attestation as CombinedAtteststation, AttesterSlashing as CombinedAttesterSlashing,
@@ -706,6 +706,9 @@ pub trait PostCapellaBeaconState<P: Preset>: PostBellatrixBeaconState<P> {
 
     fn next_withdrawal_validator_index(&self) -> ValidatorIndex;
     fn next_withdrawal_validator_index_mut(&mut self) -> &mut ValidatorIndex;
+
+    fn historical_summaries(&self) -> &HistoricalSummaries<P>;
+    fn historical_summaries_mut(&mut self) -> &mut HistoricalSummaries<P>;
 }
 
 impl<P: Preset, S: PostCapellaBeaconState<P>> PostCapellaBeaconState<P> for Hc<S> {
@@ -723,6 +726,14 @@ impl<P: Preset, S: PostCapellaBeaconState<P>> PostCapellaBeaconState<P> for Hc<S
 
     fn next_withdrawal_validator_index_mut(&mut self) -> &mut ValidatorIndex {
         self.as_mut().next_withdrawal_validator_index_mut()
+    }
+
+    fn historical_summaries(&self) -> &HistoricalSummaries<P> {
+        self.as_ref().historical_summaries()
+    }
+
+    fn historical_summaries_mut(&mut self) -> &mut HistoricalSummaries<P> {
+        self.as_mut().historical_summaries_mut()
     }
 }
 
@@ -742,6 +753,14 @@ impl<P: Preset> PostCapellaBeaconState<P> for CapellaBeaconState<P> {
     fn next_withdrawal_validator_index_mut(&mut self) -> &mut ValidatorIndex {
         &mut self.next_withdrawal_validator_index
     }
+
+    fn historical_summaries(&self) -> &HistoricalSummaries<P> {
+        &self.historical_summaries
+    }
+
+    fn historical_summaries_mut(&mut self) -> &mut HistoricalSummaries<P> {
+        &mut self.historical_summaries
+    }
 }
 
 impl<P: Preset> PostCapellaBeaconState<P> for DenebBeaconState<P> {
@@ -759,6 +778,14 @@ impl<P: Preset> PostCapellaBeaconState<P> for DenebBeaconState<P> {
 
     fn next_withdrawal_validator_index_mut(&mut self) -> &mut ValidatorIndex {
         &mut self.next_withdrawal_validator_index
+    }
+
+    fn historical_summaries(&self) -> &HistoricalSummaries<P> {
+        &self.historical_summaries
+    }
+
+    fn historical_summaries_mut(&mut self) -> &mut HistoricalSummaries<P> {
+        &mut self.historical_summaries
     }
 }
 
@@ -778,6 +805,14 @@ impl<P: Preset> PostCapellaBeaconState<P> for ElectraBeaconState<P> {
     fn next_withdrawal_validator_index_mut(&mut self) -> &mut ValidatorIndex {
         &mut self.next_withdrawal_validator_index
     }
+
+    fn historical_summaries(&self) -> &HistoricalSummaries<P> {
+        &self.historical_summaries
+    }
+
+    fn historical_summaries_mut(&mut self) -> &mut HistoricalSummaries<P> {
+        &mut self.historical_summaries
+    }
 }
 
 impl<P: Preset> PostCapellaBeaconState<P> for FuluBeaconState<P> {
@@ -796,6 +831,14 @@ impl<P: Preset> PostCapellaBeaconState<P> for FuluBeaconState<P> {
     fn next_withdrawal_validator_index_mut(&mut self) -> &mut ValidatorIndex {
         &mut self.next_withdrawal_validator_index
     }
+
+    fn historical_summaries(&self) -> &HistoricalSummaries<P> {
+        &self.historical_summaries
+    }
+
+    fn historical_summaries_mut(&mut self) -> &mut HistoricalSummaries<P> {
+        &mut self.historical_summaries
+    }
 }
 
 impl<P: Preset> PostCapellaBeaconState<P> for GloasBeaconState<P> {
@@ -813,6 +856,14 @@ impl<P: Preset> PostCapellaBeaconState<P> for GloasBeaconState<P> {
 
     fn next_withdrawal_validator_index_mut(&mut self) -> &mut ValidatorIndex {
         &mut self.next_withdrawal_validator_index
+    }
+
+    fn historical_summaries(&self) -> &HistoricalSummaries<P> {
+        &self.historical_summaries
+    }
+
+    fn historical_summaries_mut(&mut self) -> &mut HistoricalSummaries<P> {
+        &mut self.historical_summaries
     }
 }
 
