@@ -31,7 +31,7 @@ use eth2_libp2p::{
     rpc::config::{InboundRateLimiterConfig, OutboundRateLimiterConfig},
 };
 use features::Feature;
-use fork_choice_control::{DEFAULT_ARCHIVAL_EPOCH_INTERVAL, DEFAULT_MAX_EVENTS};
+use fork_choice_control::{DEFAULT_MAX_EVENTS, Hierarchy, StateStorageConfig};
 use fork_choice_store::{
     BuilderCircuitBreakerConfig, DEFAULT_CACHE_LOCK_TIMEOUT_MILLIS, StoreConfig,
 };
@@ -332,11 +332,11 @@ struct BeaconNodeOptions {
     #[clap(long)]
     network_dir: Option<PathBuf>,
 
-    /// Archival epoch interval
-    #[clap(long, default_value_t = DEFAULT_ARCHIVAL_EPOCH_INTERVAL)]
-    archival_epoch_interval: NonZeroU64,
+    /// [DEPRECATED] Archival epoch interval. Ignored; use --state-hierarchy instead.
+    #[clap(long)]
+    archival_epoch_interval: Option<NonZeroU64>,
 
-    /// Enable archival storage mode, where all blocks, states (every --archival-epoch-interval epochs) and blobs are stored in the database
+    /// Enable archival storage mode, where all blocks, states (at the frequency defined by --state-hierarchy) and blobs are stored in the database
     /// [default: disabled]
     #[clap(long, conflicts_with("prune_storage"))]
     archive_storage: bool,
@@ -345,6 +345,27 @@ struct BeaconNodeOptions {
     /// [default: disabled]
     #[clap(long, conflicts_with("archive_storage"))]
     prune_storage: bool,
+
+    /// Hierarchy of state storage, defined as a comma separated list of slot
+    /// exponents, starting from the deepest layer. The list must be non-empty,
+    /// strictly increasing, and every exponent at most 63. Full states are
+    /// written at the frequency of the last exponent, all other layers are
+    /// stored as deltas
+    #[clap(long, default_value_t = StateStorageConfig::default().hierarchy)]
+    state_hierarchy: Hierarchy,
+
+    /// Number of states to keep in memory for every state storage hierarchy
+    /// layer, as a comma separated list starting from the shallowest one - the
+    /// full state snapshot. This is the reverse of the order --state-hierarchy
+    /// exponents are listed in. Must contain as many values as there are layers
+    /// in --state-hierarchy
+    /// [default: 5,3,3 followed by a 0 for every remaining layer]
+    #[clap(long, num_args = 1.., value_delimiter = ',')]
+    state_cache_sizes: Option<Vec<usize>>,
+
+    /// zstd compression level used for states stored in the database
+    #[clap(long, default_value_t = StateStorageConfig::default().compression_level)]
+    state_compression_level: i32,
 
     /// Number of unfinalized states to keep in memory.
     #[clap(long, default_value_t = StoreConfig::default().unfinalized_states_in_memory)]
@@ -1093,6 +1114,9 @@ impl GrandineArgs {
             archival_epoch_interval,
             archive_storage,
             prune_storage,
+            state_hierarchy,
+            state_cache_sizes,
+            state_compression_level,
             unfinalized_states_in_memory,
             reconstruction_delay,
             request_timeout,
@@ -1501,14 +1525,37 @@ impl GrandineArgs {
             }
         };
 
+        if archival_epoch_interval.is_some() {
+            warn_with_peers!(
+                "--archival-epoch-interval is deprecated and ignored; \
+                 use --state-hierarchy instead"
+            );
+        }
+
+        let state_storage_config = StateStorageConfig {
+            cache_sizes: state_cache_sizes.unwrap_or_else(|| {
+                StateStorageConfig::default_cache_sizes(state_hierarchy.depth())
+            }),
+            hierarchy: state_hierarchy,
+            compression_level: state_compression_level,
+        };
+
+        state_storage_config.validate(
+            chain_config
+                .preset_base
+                .phase0_preset()
+                .slots_per_epoch()
+                .get(),
+        )?;
+
         let storage_config = StorageConfig {
             in_memory,
             db_size: database_size,
             directories: directories.clone_arc(),
             eth1_db_size: eth1_database_size,
-            archival_epoch_interval,
             reset_databases: force_reset_beacon_db,
             storage_mode,
+            state_storage_config,
         };
 
         network_config_options.print_upnp_warning();
@@ -1882,6 +1929,68 @@ mod tests {
     use crate::commands::InterchangeCommand;
 
     use super::*;
+
+    #[test]
+    fn state_storage_options_default_to_the_default_hierarchy() {
+        let config = config_from_args([]);
+        let state_storage_config = &config.storage_config.state_storage_config;
+        let default = StateStorageConfig::default();
+
+        assert_eq!(
+            state_storage_config.hierarchy.exponents(),
+            default.hierarchy.exponents(),
+        );
+
+        assert_eq!(state_storage_config.cache_sizes, default.cache_sizes);
+
+        assert_eq!(
+            state_storage_config.compression_level,
+            default.compression_level,
+        );
+    }
+
+    #[test]
+    fn state_cache_sizes_default_to_the_configured_hierarchy_depth() {
+        let config = config_from_args(["--state-hierarchy", "5,9,11"]);
+        let state_storage_config = &config.storage_config.state_storage_config;
+
+        assert_eq!(state_storage_config.hierarchy.exponents(), [5, 9, 11]);
+        assert_eq!(state_storage_config.cache_sizes, [5, 3, 3]);
+    }
+
+    #[test]
+    fn state_cache_sizes_are_parsed_as_a_comma_separated_list() {
+        let config = config_from_args([
+            "--state-hierarchy",
+            "5,9,11",
+            "--state-cache-sizes",
+            "1,2,3",
+            "--state-compression-level",
+            "7",
+        ]);
+
+        let state_storage_config = &config.storage_config.state_storage_config;
+
+        assert_eq!(state_storage_config.cache_sizes, [1, 2, 3]);
+        assert_eq!(state_storage_config.compression_level, 7);
+    }
+
+    #[test]
+    fn state_cache_sizes_must_match_the_hierarchy_depth() {
+        try_config_from_args(["--state-hierarchy", "5,9,11", "--state-cache-sizes", "1,2"])
+            .expect_err("cache sizes must match the hierarchy depth");
+    }
+
+    #[test]
+    fn state_hierarchy_deepest_layer_must_be_epoch_aligned() {
+        try_config_from_args(["--state-hierarchy", "3,9,11"])
+            .expect_err("a sub-epoch deepest layer must be rejected");
+    }
+
+    #[test]
+    fn deprecated_archival_epoch_interval_is_accepted_and_ignored() {
+        config_from_args(["--archival-epoch-interval", "64"]);
+    }
 
     #[test]
     fn network_config_options() {
