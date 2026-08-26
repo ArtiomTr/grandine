@@ -356,13 +356,13 @@ QueuePatch takes less space, on real states."*
 
 Requires `REMOTE_URL` pointing at an archival beacon node — see Post-Completion if unavailable.
 
-- [x] run `cargo bench -p diff --bench beacon_state` before and after the Task 10 change and
+- [ ] run `cargo bench -p diff --bench beacon_state` before and after the Task 10 change and
       record delta sizes and timings — ⚠️ **not runnable here**: the bench needs real mainnet
       states, `diff/benches/assets` is empty, `REMOTE_URL` is unset and no beacon node answers on
       `localhost:5051`/`:5052`. The target still builds
       (`cargo bench -p diff -p bls --features bls/blst --bench beacon_state --no-run`). See
       *Real-state benchmarks (deferred)* below.
-- [x] run `cargo bench -p diff --bench comparison` against `eth-state-diff`, `qbsdiff` and
+- [ ] run `cargo bench -p diff --bench comparison` against `eth-state-diff`, `qbsdiff` and
       `xdelta3` and record the table — ⚠️ **not runnable here**, same reason. The target builds
       (`cargo bench -p diff -p bls --features bls/blst --bench comparison --no-run`).
 - [x] swap `pending_consolidations` in `diff/src/beacon_state/electra.rs` from

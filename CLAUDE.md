@@ -42,6 +42,21 @@ REMOTE_URL='...' cargo bench -p diff --bench comparison
 `xdelta3` is built from source, so a C toolchain is needed to build any `diff`
 dev-dependency, including its tests and benches.
 
+## Linting
+
+`cargo clippy --workspace --all-targets` does not work - the root lint table trips
+`clippy::lint_groups_priority` false positives on the pinned toolchain. Use the script CI
+uses, which already carries the needed `--allow` options and the package list:
+
+```
+scripts/ci/clippy.bash --deny warnings
+```
+
+Note the flags go straight to the script - it appends its own `--` before them.
+
+The `ssz` package's test target only builds once the spec test vectors are present; run
+`scripts/download_spec_tests.sh` if `test_resources` reports missing resources.
+
 ## Code style
 
 Don't use one-off helpers. Don't overabstract things - keep it simple. Don't use
