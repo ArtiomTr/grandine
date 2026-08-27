@@ -40,7 +40,7 @@ pub use crate::{
 pub mod checkpoint_sync;
 pub mod controller;
 
-mod archival_permits;
+mod archival_pool;
 mod block_processor;
 mod events;
 mod frame_cache;

@@ -75,7 +75,7 @@ use types::{
 
 use crate::{
     MutatorIgnoreReason, SidecarsPendingReconstruction,
-    archival_permits::ArchivalPermits,
+    archival_pool::ArchivalPool,
     block_processor::BlockProcessor,
     events::{DependentRootsBundle, EventChannels},
     messages::{
@@ -138,7 +138,7 @@ pub struct Mutator<P: Preset, E, W, TS, PS, LS, NS, SS, VS> {
     waiting_for_checkpoint_states: HashMap<Checkpoint, WaitingForCheckpointState<P>>,
     sidecars_pending_reconstruction: SidecarsPendingReconstruction<P>,
     storage: Arc<Storage<P>>,
-    archival_permits: ArchivalPermits,
+    archival_pool: ArchivalPool,
     thread_pool: ThreadPool<P, E, W>,
     metrics: Option<Arc<Metrics>>,
     finished_loading_from_storage: bool,
@@ -204,7 +204,7 @@ where
             waiting_for_checkpoint_states: HashMap::new(),
             sidecars_pending_reconstruction,
             storage,
-            archival_permits: ArchivalPermits::default(),
+            archival_pool: ArchivalPool::default(),
             thread_pool,
             metrics,
             finished_loading_from_storage: false,
@@ -3254,8 +3254,7 @@ where
                     drop(wait_group);
                 };
 
-                self.archival_permits
-                    .spawn_or_run("store-unloader", unload)?;
+                self.archival_pool.submit(unload)?;
             }
         }
 
@@ -5073,8 +5072,7 @@ where
                 drop(wait_group);
             };
 
-            self.archival_permits
-                .spawn_or_run("store-archiver", archive)?;
+            self.archival_pool.submit(archive)?;
         }
 
         Ok(())

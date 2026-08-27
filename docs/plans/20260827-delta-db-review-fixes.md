@@ -298,19 +298,30 @@ reworking - specifically, we need to do a managed threadpool implementation inst
 queue for input tasks, which need to be offloaded; 3. Once queue is empty, threadpool has to be
 downscaled back to smaller size."*
 
-- [ ] replace `ArchivalPermits`/`ArchivalPermit` with a pool type holding a shared task channel
+- [x] replace `ArchivalPermits`/`ArchivalPermit` with a pool type holding a shared task channel
       and a worker count bounded by `num_cores / 2`
-- [ ] submitting work pushes onto the channel and spawns an additional worker only while the
+- [x] submitting work pushes onto the channel and spawns an additional worker only while the
       worker count is below the cap and the queue is non-empty
-- [ ] workers exit after the queue drains, so the pool downscales back to its idle size
-- [ ] delete `MAX_CONCURRENT_ARCHIVAL_THREADS`, `spawn_or_run`, the inline-fallback behaviour and
+- [x] workers exit after the queue drains, so the pool downscales back to its idle size
+- [x] delete `MAX_CONCURRENT_ARCHIVAL_THREADS`, `spawn_or_run`, the inline-fallback behaviour and
       the doc comment explaining it; callers in the fork choice mutator submit and return
-- [ ] rename the module and its `fork_choice_control/src/lib.rs` registration to match
-- [ ] update both mutator call sites
-- [ ] write tests: submitted work all runs, and the worker count never exceeds the cap
-- [ ] write tests: the pool downscales after the queue drains
-- [ ] write tests: work submitted from several threads concurrently is not dropped
-- [ ] run tests - must pass before next task
+- [x] rename the module and its `fork_choice_control/src/lib.rs` registration to match
+- [x] update both mutator call sites
+- [x] write tests: submitted work all runs, and the worker count never exceeds the cap
+- [x] write tests: the pool downscales after the queue drains
+- [x] write tests: work submitted from several threads concurrently is not dropped
+- [x] run tests - must pass before next task
+
+The pool is `fork_choice_control/src/archival_pool.rs` (`ArchivalPool`): a `Mutex<VecDeque<Work>>`
+plus a worker count, both mutated under the same lock, so a task enqueued by a submitter that saw
+a worker alive is always picked up before that worker retires. The idle size is zero — workers
+exit as soon as the queue drains and the next submission spawns a fresh one, up to
+`available_parallelism() / 2`. No condvar and no idle parking is needed because workers never
+wait for work; they either take the next task or retire.
+
+⚠️ Three `compliance_tests::fulu_minimal_*` tests fail on this branch (`P2pMessage::Accept`
+assertion in `helpers.rs:694`). Verified pre-existing by stashing these changes — unrelated to
+this task.
 
 ### Task 10: Fix the balance patch mode estimator
 
