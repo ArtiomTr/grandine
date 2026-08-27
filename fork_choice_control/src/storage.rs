@@ -17,12 +17,12 @@ use logging::{debug_with_peers, info_with_peers, warn_with_peers};
 use prometheus_metrics::{Metrics, observe_vec, start_timer_vec, stop_and_record};
 use pubkey_cache::PubkeyCache;
 use reqwest::Client;
-use ssz::{ByteList, Ssz, SszRead, SszReadDefault, SszWrite};
+use ssz::{Ssz, SszRead, SszReadDefault, SszWrite};
 use std_ext::ArcExt as _;
 use thiserror::Error;
 use tracing::info;
 use transition_functions::combined;
-use typenum::{U64, Unsigned as _};
+use typenum::Unsigned as _;
 use types::{
     combined::{BeaconState, DataColumnSidecar, SignedBeaconBlock},
     config::Config,
@@ -48,10 +48,6 @@ use zstd::DEFAULT_COMPRESSION_LEVEL;
 use crate::{checkpoint_sync, frame_cache::FrameCache, hierarchy::Hierarchy, spine::Spine};
 
 pub const MAX_DATA_COLUMN_EPOCHS_TO_PRUNE: usize = 100;
-
-// Exponents are distinct, sorted and at most 63, so a hierarchy cannot have
-// more layers than that.
-type MaxHierarchyDepth = U64;
 
 // Retain archival data in memory until the number of ready beacon states
 // reaches `ARCHIVED_STATES_BEFORE_FLUSH`. This approach minimizes unnecessary
@@ -264,9 +260,7 @@ impl<P: Preset> Storage<P> {
     /// set from the configured layout, so running against chains written under a
     /// different one deletes frames those chains depend on.
     pub(crate) fn verify_or_record_hierarchy(&self) -> Result<()> {
-        let configured = self.hierarchy.exponents();
-
-        let Some(stored) = self.get::<ByteList<MaxHierarchyDepth>>(StateHierarchyKey)? else {
+        let Some(stored) = self.get::<Hierarchy>(StateHierarchyKey)? else {
             // A database written before the hierarchy was recorded names none,
             // so the configured layout is adopted without being verifiable
             // against the chains already on disk.
@@ -281,17 +275,13 @@ impl<P: Preset> Storage<P> {
                 );
             }
 
-            return save(
-                &self.database,
-                StateHierarchyKey,
-                ByteList::<MaxHierarchyDepth>::try_from(configured.to_vec())?,
-            );
+            return save(&self.database, StateHierarchyKey, &self.hierarchy);
         };
 
         ensure!(
-            stored.as_bytes() == configured,
+            stored.exponents() == self.hierarchy.exponents(),
             Error::StateHierarchyMismatch {
-                stored: stored.as_bytes().iter().join(","),
+                stored: stored.to_string(),
                 configured: self.hierarchy.to_string(),
             },
         );
@@ -2617,17 +2607,19 @@ mod tests {
         let storage = storage_with_hierarchy(&directory, [11, 9, 5])?;
 
         assert_eq!(
-            storage.get::<ByteList<MaxHierarchyDepth>>(StateHierarchyKey)?,
+            storage
+                .get::<Hierarchy>(StateHierarchyKey)?
+                .map(|hierarchy| hierarchy.to_string()),
             None,
         );
 
         storage.verify_or_record_hierarchy()?;
 
         let stored = storage
-            .get::<ByteList<MaxHierarchyDepth>>(StateHierarchyKey)?
+            .get::<Hierarchy>(StateHierarchyKey)?
             .expect("the hierarchy must be recorded");
 
-        assert_eq!(stored.as_bytes(), [11, 9, 5]);
+        assert_eq!(stored.exponents(), [11, 9, 5]);
 
         Ok(())
     }
@@ -2647,9 +2639,9 @@ mod tests {
 
         assert_eq!(
             storage
-                .get::<ByteList<MaxHierarchyDepth>>(StateHierarchyKey)?
+                .get::<Hierarchy>(StateHierarchyKey)?
                 .expect("the hierarchy must be recorded")
-                .as_bytes(),
+                .exponents(),
             [11, 9, 5],
         );
 
@@ -2687,9 +2679,9 @@ mod tests {
         // The stored hierarchy must survive a rejected open.
         assert_eq!(
             storage
-                .get::<ByteList<MaxHierarchyDepth>>(StateHierarchyKey)?
+                .get::<Hierarchy>(StateHierarchyKey)?
                 .expect("the hierarchy must be recorded")
-                .as_bytes(),
+                .exponents(),
             [11, 9, 5],
         );
 

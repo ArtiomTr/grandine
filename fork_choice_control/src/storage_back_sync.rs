@@ -235,12 +235,14 @@ mod tests {
     use pubkey_cache::PubkeyCache;
     use types::{nonstandard::StorageMode, phase0::consts::GENESIS_SLOT, traits::BeaconState as _};
 
-    use ssz::{ByteList, H256, SszRead as _, SszWrite as _};
-    use typenum::U64;
+    use ssz::{H256, SszRead as _, SszWrite as _};
     use types::{combined::BeaconState, preset::Mainnet};
 
     use super::*;
-    use crate::storage::{StateHierarchyKey, StateStorageConfig, save};
+    use crate::{
+        hierarchy::Hierarchy,
+        storage::{StateHierarchyKey, StateStorageConfig, save},
+    };
 
     #[test]
     fn test_archive_back_sync_states() -> Result<()> {
@@ -385,11 +387,7 @@ mod tests {
         let finalized_validators = genesis_state.validators().clone_boxed();
         let database = Database::in_memory();
 
-        save(
-            &database,
-            StateHierarchyKey,
-            ByteList::<U64>::try_from(vec![11, 9, 5])?,
-        )?;
+        save(&database, StateHierarchyKey, Hierarchy::new([11, 9, 5])?)?;
 
         let storage = Storage::<Mainnet>::new(
             Arc::new(Mainnet::default_config()),

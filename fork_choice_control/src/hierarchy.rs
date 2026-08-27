@@ -1,6 +1,7 @@
 use core::{fmt, str::FromStr};
 
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail};
+use ssz::{ReadError, Size, SszRead, SszSize, SszWrite, WriteError};
 use types::{config::Config, phase0::primitives::Slot, preset::Preset};
 
 /// A hierarchy of storage.
@@ -67,27 +68,62 @@ impl Default for Hierarchy {
     }
 }
 
+impl SszSize for Hierarchy {
+    const SIZE: Size = Size::Variable { minimum_size: 1 };
+}
+
+impl<C> SszRead<C> for Hierarchy {
+    fn from_ssz_unchecked(_context: &C, bytes: &[u8]) -> Result<Self, ReadError> {
+        let exponents = bytes.to_vec();
+
+        Self::validate(&exponents).map_err(|message| ReadError::Custom { message })?;
+
+        Ok(Self { exponents })
+    }
+}
+
+impl SszWrite for Hierarchy {
+    fn write_variable(&self, bytes: &mut Vec<u8>) -> Result<(), WriteError> {
+        bytes.extend_from_slice(&self.exponents);
+
+        Ok(())
+    }
+}
+
 impl Hierarchy {
     pub fn new(exponents: impl IntoIterator<Item = u8>) -> Result<Self> {
         let exponents = exponents.into_iter().collect::<Vec<_>>();
-        ensure!(
-            exponents.is_sorted_by(|previous, next| previous >= next),
-            "exponents must be sorted in decreasing order"
-        );
-        ensure!(
-            exponents
-                .iter()
-                .zip(exponents.iter().skip(1))
-                .all(|(previous, next)| previous != next),
-            "exponents can't be duplicate"
-        );
-        ensure!(!exponents.is_empty(), "exponents must not be empty");
-        ensure!(
-            exponents.iter().all(|&e| e <= 63),
-            "max value allowed for exponent is 63"
-        );
+
+        if let Err(message) = Self::validate(&exponents) {
+            bail!(message);
+        }
 
         Ok(Self { exponents })
+    }
+
+    // The messages are `&'static str` because `SszRead` can only carry those.
+    fn validate(exponents: &[u8]) -> Result<(), &'static str> {
+        if !exponents.is_sorted_by(|previous, next| previous >= next) {
+            return Err("exponents must be sorted in decreasing order");
+        }
+
+        if exponents
+            .iter()
+            .zip(exponents.iter().skip(1))
+            .any(|(previous, next)| previous == next)
+        {
+            return Err("exponents can't be duplicate");
+        }
+
+        if exponents.is_empty() {
+            return Err("exponents must not be empty");
+        }
+
+        if exponents.iter().any(|&e| e > 63) {
+            return Err("max value allowed for exponent is 63");
+        }
+
+        Ok(())
     }
 
     /// Check if state is a part of hierarchy or not.
@@ -235,6 +271,7 @@ impl Hierarchy {
 
 #[cfg(test)]
 mod tests {
+    use ssz::SszReadDefault as _;
     use types::preset::Mainnet;
 
     use super::*;
@@ -786,5 +823,38 @@ mod tests {
         }
 
         spine
+    }
+
+    #[test]
+    fn ssz_round_trip() -> Result<()> {
+        for exponents in [vec![21, 18, 16, 13, 11, 9, 5], vec![5], vec![63, 0]] {
+            let hierarchy = hierarchy(exponents.iter().copied());
+            let bytes = hierarchy.to_ssz()?;
+
+            assert_eq!(bytes, exponents);
+            assert_eq!(
+                Hierarchy::from_ssz_default(bytes)?.exponents(),
+                exponents.as_slice(),
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn ssz_decoding_rejects_invalid_exponents() {
+        for (bytes, expected) in [
+            (vec![], "exponents must not be empty"),
+            (vec![5, 9], "exponents must be sorted in decreasing order"),
+            (vec![9, 5, 5], "exponents can't be duplicate"),
+            (vec![64, 5], "max value allowed for exponent is 63"),
+        ] {
+            assert_eq!(
+                Hierarchy::from_ssz_default(bytes)
+                    .expect_err("invalid exponents must be rejected")
+                    .to_string(),
+                expected,
+            );
+        }
     }
 }

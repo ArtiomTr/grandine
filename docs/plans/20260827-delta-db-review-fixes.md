@@ -156,18 +156,18 @@ already ordered.
 Review note: *"instead of doing this, and other things, just implement SszRead/SszWrite on
 hierarchy itself, and move this out of the file."*
 
-- [ ] implement `SszSize`, `SszWrite` and `SszRead<C>` for `Hierarchy` in
+- [x] implement `SszSize`, `SszWrite` and `SszRead<C>` for `Hierarchy` in
       `fork_choice_control/src/hierarchy.rs`, encoding the exponents as a variable-length
       `u8` list and running the same validation as `Hierarchy::new` on read
-- [ ] delete `type MaxHierarchyDepth = U64;` from `fork_choice_control/src/storage.rs` and the
+- [x] delete `type MaxHierarchyDepth = U64;` from `fork_choice_control/src/storage.rs` and the
       now-unused `typenum::U64` import
-- [ ] replace every `ByteList::<MaxHierarchyDepth>` round-trip at the `StateHierarchyKey` call
+- [x] replace every `ByteList::<MaxHierarchyDepth>` round-trip at the `StateHierarchyKey` call
       sites with direct `Hierarchy` (de)serialization
-- [ ] update `Error::StateHierarchyMismatch` to format the stored hierarchy via `Display`
+- [x] update `Error::StateHierarchyMismatch` to format the stored hierarchy via `Display`
       instead of joining raw bytes with `itertools`
-- [ ] write tests for SSZ round-trip of the default hierarchy and of a one-layer hierarchy
-- [ ] write tests: decoding rejects an empty list, non-decreasing exponents and an exponent above 63
-- [ ] run tests - must pass before next task
+- [x] write tests for SSZ round-trip of the default hierarchy and of a one-layer hierarchy
+- [x] write tests: decoding rejects an empty list, non-decreasing exponents and an exponent above 63
+- [x] run tests - must pass before next task
 
 ### Task 3: Move `StateStorageConfig` into its own file
 
