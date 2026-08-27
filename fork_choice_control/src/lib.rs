@@ -26,11 +26,12 @@ pub use crate::{
     },
     queries::{BlockWithRoot, ForkChoiceContext, ForkTip, Snapshot},
     specialized::{AdHocBenchController, BenchController},
+    state_storage_config::StateStorageConfig,
     storage::{
         BlobSidecarByBlobId, BlockCheckpoint, BlockRootBySlot, DataColumnSidecarByColumnId,
         Error as StorageError, FinalizedBlockByRoot, SlotBlobId, SlotByStateRoot, SlotColumnId,
-        StateByBlockRoot, StateCheckpoint, StateLoadStrategy, StateStorageConfig, Storage,
-        UnfinalizedBlockByRoot, get, print_beacon_database_info, save,
+        StateByBlockRoot, StateCheckpoint, StateLoadStrategy, Storage, UnfinalizedBlockByRoot, get,
+        print_beacon_database_info, save,
     },
     storage_tool::{export_state_and_blocks, replay_blocks},
     wait::Wait,
@@ -50,6 +51,7 @@ mod mutator;
 mod queries;
 mod specialized;
 mod spine;
+mod state_storage_config;
 mod storage;
 mod storage_back_sync;
 mod storage_tool;

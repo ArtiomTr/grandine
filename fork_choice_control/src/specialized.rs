@@ -24,7 +24,8 @@ use crate::{
     controller::{Controller, MutatorHandle},
     events::EventChannels,
     messages::{AttestationVerifierMessage, P2pMessage},
-    storage::{StateStorageConfig, Storage},
+    state_storage_config::StateStorageConfig,
+    storage::Storage,
     unbounded_sink::UnboundedSink,
 };
 

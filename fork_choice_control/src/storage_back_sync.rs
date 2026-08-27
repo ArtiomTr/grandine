@@ -241,7 +241,8 @@ mod tests {
     use super::*;
     use crate::{
         hierarchy::Hierarchy,
-        storage::{StateHierarchyKey, StateStorageConfig, save},
+        state_storage_config::StateStorageConfig,
+        storage::{StateHierarchyKey, save},
     };
 
     #[test]

@@ -173,14 +173,14 @@ hierarchy itself, and move this out of the file."*
 
 Review note: *"Config needs to be moved into its own, separate file."*
 
-- [ ] create `fork_choice_control/src/state_storage_config.rs` holding `StateStorageConfig`,
+- [x] create `fork_choice_control/src/state_storage_config.rs` holding `StateStorageConfig`,
       its `Default` and `impl` blocks, and `MAX_STATE_CACHE_SIZE`
-- [ ] register the module in `fork_choice_control/src/lib.rs` and re-export `StateStorageConfig`
+- [x] register the module in `fork_choice_control/src/lib.rs` and re-export `StateStorageConfig`
       from the same place it is exported today
-- [ ] update imports in `storage.rs`, `storage_back_sync.rs`, `runtime/src/grandine_args.rs`,
+- [x] update imports in `storage.rs`, `storage_back_sync.rs`, `runtime/src/grandine_args.rs`,
       `runtime/src/misc.rs`, `http_api/src/context.rs` and any other caller
-- [ ] move the existing `StateStorageConfig` tests along with it
-- [ ] run tests - must pass before next task
+- [x] move the existing `StateStorageConfig` tests along with it
+- [x] run tests - must pass before next task
 
 ### Task 4: Relax the `cache_sizes` length constraint
 
