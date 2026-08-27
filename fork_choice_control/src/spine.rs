@@ -116,7 +116,7 @@ mod tests {
     use super::*;
 
     fn spine(anchor_slot: Slot) -> Spine<Mainnet> {
-        let hierarchy = Hierarchy::new([5, 9, 11]).expect("exponents in tests are valid");
+        let hierarchy = Hierarchy::new([11, 9, 5]).expect("exponents in tests are valid");
 
         Spine::new(
             Arc::new(Config::mainnet()),

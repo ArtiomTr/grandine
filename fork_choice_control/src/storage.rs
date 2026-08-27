@@ -66,8 +66,8 @@ pub struct StateStorageConfig {
     /// Layout of state frames and deltas written to the database.
     pub hierarchy: Hierarchy,
     /// Number of states cached in memory for every hierarchy layer, starting
-    /// from the shallowest one - the full state snapshot. Note this is the
-    /// reverse of the order `hierarchy` exponents are listed in.
+    /// from the shallowest one - the full state snapshot, in the same order
+    /// `hierarchy` exponents are listed in.
     pub cache_sizes: Vec<usize>,
     /// zstd compression level used for state frames and deltas.
     pub compression_level: i32,
@@ -118,8 +118,12 @@ impl StateStorageConfig {
 
         // States are only ever persisted at hierarchy slots, and every read path that loads a
         // persisted state as an anchor requires it to be at an epoch start. The deepest layer is
-        // written every `2^exponents[0]` slots, so that has to be a whole number of epochs.
-        let deepest_exponent = self.hierarchy.exponents()[0];
+        // written every `2^exponents.last()` slots, so that has to be a whole number of epochs.
+        let deepest_exponent = *self
+            .hierarchy
+            .exponents()
+            .last()
+            .expect("Hierarchy::new rejects empty exponents");
 
         let deepest_interval = 1u64
             .checked_shl(deepest_exponent.into())
@@ -2482,7 +2486,7 @@ mod tests {
         assert!(too_few.validate(MAINNET_SLOTS_PER_EPOCH).is_err());
 
         let too_many = StateStorageConfig {
-            hierarchy: Hierarchy::new([5, 9]).expect("exponents in tests are valid"),
+            hierarchy: Hierarchy::new([9, 5]).expect("exponents in tests are valid"),
             cache_sizes: vec![5, 3, 3],
             ..StateStorageConfig::default()
         };
@@ -2529,7 +2533,7 @@ mod tests {
         // start, so a layer written more often than once per epoch would make the database
         // unloadable.
         let sub_epoch = StateStorageConfig {
-            hierarchy: Hierarchy::new([3, 9]).expect("exponents in tests are valid"),
+            hierarchy: Hierarchy::new([9, 3]).expect("exponents in tests are valid"),
             cache_sizes: StateStorageConfig::default_cache_sizes(2),
             ..StateStorageConfig::default()
         };
@@ -2540,7 +2544,7 @@ mod tests {
         sub_epoch.validate(8)?;
 
         let epoch_aligned = StateStorageConfig {
-            hierarchy: Hierarchy::new([5, 9]).expect("exponents in tests are valid"),
+            hierarchy: Hierarchy::new([9, 5]).expect("exponents in tests are valid"),
             cache_sizes: StateStorageConfig::default_cache_sizes(2),
             ..StateStorageConfig::default()
         };
@@ -2610,7 +2614,7 @@ mod tests {
     #[test]
     fn hierarchy_check_records_the_configured_hierarchy_in_a_fresh_database() -> Result<()> {
         let directory = TempDir::new()?;
-        let storage = storage_with_hierarchy(&directory, [5, 9, 11])?;
+        let storage = storage_with_hierarchy(&directory, [11, 9, 5])?;
 
         assert_eq!(
             storage.get::<ByteList<MaxHierarchyDepth>>(StateHierarchyKey)?,
@@ -2623,7 +2627,7 @@ mod tests {
             .get::<ByteList<MaxHierarchyDepth>>(StateHierarchyKey)?
             .expect("the hierarchy must be recorded");
 
-        assert_eq!(stored.as_bytes(), [5, 9, 11]);
+        assert_eq!(stored.as_bytes(), [11, 9, 5]);
 
         Ok(())
     }
@@ -2635,18 +2639,18 @@ mod tests {
         // LMDB refuses a second concurrent open of the same environment, so
         // every reopen has to outlive the previous one.
         for _ in 0..3 {
-            let storage = storage_with_hierarchy(&directory, [5, 9, 11])?;
+            let storage = storage_with_hierarchy(&directory, [11, 9, 5])?;
             storage.verify_or_record_hierarchy()?;
         }
 
-        let storage = storage_with_hierarchy(&directory, [5, 9, 11])?;
+        let storage = storage_with_hierarchy(&directory, [11, 9, 5])?;
 
         assert_eq!(
             storage
                 .get::<ByteList<MaxHierarchyDepth>>(StateHierarchyKey)?
                 .expect("the hierarchy must be recorded")
                 .as_bytes(),
-            [5, 9, 11],
+            [11, 9, 5],
         );
 
         Ok(())
@@ -2657,11 +2661,11 @@ mod tests {
         let directory = TempDir::new()?;
 
         {
-            let storage = storage_with_hierarchy(&directory, [5, 9, 11])?;
+            let storage = storage_with_hierarchy(&directory, [11, 9, 5])?;
             storage.verify_or_record_hierarchy()?;
         }
 
-        let storage = storage_with_hierarchy(&directory, [5, 9, 13])?;
+        let storage = storage_with_hierarchy(&directory, [13, 9, 5])?;
 
         let error = storage
             .verify_or_record_hierarchy()
@@ -2669,9 +2673,9 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "database was written with state hierarchy 5,9,11, \
-             but 5,9,13 is configured; \
-             pass --state-hierarchy 5,9,11 to keep using this database \
+            "database was written with state hierarchy 11,9,5, \
+             but 13,9,5 is configured; \
+             pass --state-hierarchy 11,9,5 to keep using this database \
              or --force-reset-beacon-db to discard it",
         );
 
@@ -2686,7 +2690,7 @@ mod tests {
                 .get::<ByteList<MaxHierarchyDepth>>(StateHierarchyKey)?
                 .expect("the hierarchy must be recorded")
                 .as_bytes(),
-            [5, 9, 11],
+            [11, 9, 5],
         );
 
         Ok(())

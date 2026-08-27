@@ -347,18 +347,18 @@ struct BeaconNodeOptions {
     prune_storage: bool,
 
     /// Hierarchy of state storage, defined as a comma separated list of slot
-    /// exponents, starting from the deepest layer. The list must be non-empty,
-    /// strictly increasing, and every exponent at most 63. Full states are
-    /// written at the frequency of the last exponent, all other layers are
-    /// stored as deltas
+    /// exponents, starting from the shallowest layer. The list must be
+    /// non-empty, strictly decreasing, and every exponent at most 63. Full
+    /// states are written at the frequency of the first exponent, all other
+    /// layers are stored as deltas
     #[clap(long, default_value_t = StateStorageConfig::default().hierarchy)]
     state_hierarchy: Hierarchy,
 
     /// Number of states to keep in memory for every state storage hierarchy
     /// layer, as a comma separated list starting from the shallowest one - the
-    /// full state snapshot. This is the reverse of the order --state-hierarchy
-    /// exponents are listed in. Must contain as many values as there are layers
-    /// in --state-hierarchy
+    /// full state snapshot, in the same order --state-hierarchy exponents are
+    /// listed in. Must contain as many values as there are layers in
+    /// --state-hierarchy
     /// [default: 5,3,3 followed by a 0 for every remaining layer]
     #[clap(long, num_args = 1.., value_delimiter = ',')]
     state_cache_sizes: Option<Vec<usize>>,
@@ -1951,10 +1951,10 @@ mod tests {
 
     #[test]
     fn state_cache_sizes_default_to_the_configured_hierarchy_depth() {
-        let config = config_from_args(["--state-hierarchy", "5,9,11"]);
+        let config = config_from_args(["--state-hierarchy", "11,9,5"]);
         let state_storage_config = &config.storage_config.state_storage_config;
 
-        assert_eq!(state_storage_config.hierarchy.exponents(), [5, 9, 11]);
+        assert_eq!(state_storage_config.hierarchy.exponents(), [11, 9, 5]);
         assert_eq!(state_storage_config.cache_sizes, [5, 3, 3]);
     }
 
@@ -1962,7 +1962,7 @@ mod tests {
     fn state_cache_sizes_are_parsed_as_a_comma_separated_list() {
         let config = config_from_args([
             "--state-hierarchy",
-            "5,9,11",
+            "11,9,5",
             "--state-cache-sizes",
             "1,2,3",
             "--state-compression-level",
@@ -1977,13 +1977,13 @@ mod tests {
 
     #[test]
     fn state_cache_sizes_must_match_the_hierarchy_depth() {
-        try_config_from_args(["--state-hierarchy", "5,9,11", "--state-cache-sizes", "1,2"])
+        try_config_from_args(["--state-hierarchy", "11,9,5", "--state-cache-sizes", "1,2"])
             .expect_err("cache sizes must match the hierarchy depth");
     }
 
     #[test]
     fn state_hierarchy_deepest_layer_must_be_epoch_aligned() {
-        try_config_from_args(["--state-hierarchy", "3,9,11"])
+        try_config_from_args(["--state-hierarchy", "11,9,3"])
             .expect_err("a sub-epoch deepest layer must be rejected");
     }
 

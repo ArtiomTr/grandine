@@ -388,7 +388,7 @@ mod tests {
         save(
             &database,
             StateHierarchyKey,
-            ByteList::<U64>::try_from(vec![5, 9, 11])?,
+            ByteList::<U64>::try_from(vec![11, 9, 5])?,
         )?;
 
         let storage = Storage::<Mainnet>::new(
