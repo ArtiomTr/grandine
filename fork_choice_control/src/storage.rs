@@ -82,8 +82,6 @@ pub struct Storage<P: Preset> {
     pub(crate) compression_level: i32,
     pub(crate) anchor_slot: Arc<AtomicU64>,
     frame_cache: FrameCache<P>,
-    /// The spine tracking states persisted by forward sync. It is owned by
-    /// `Storage` and lives as long as the process does.
     forward_spine: Arc<Spine<P>>,
     metrics: Option<Arc<Metrics>>,
 }

@@ -367,7 +367,6 @@ impl Database {
         .pipe(Ok)
     }
 
-    /// The keys are copied out of the database, for the same reason [`Database::next_raw`] copies.
     pub fn iterate_all_keys_with_lengths(
         &self,
     ) -> Result<impl Iterator<Item = Result<(Vec<u8>, usize)>>> {
@@ -422,10 +421,6 @@ impl Database {
 
     /// Like [`Database::iterator_ascending`], but yields values as present in the database,
     /// without decompressing them.
-    ///
-    /// Both key and value are copied out of the database, for the same reason
-    /// [`Database::next_raw`] copies: the cursor's transaction ends when the iterator is dropped,
-    /// so borrowed data would outlive the memory-mapped pages it points into.
     pub fn iterator_ascending_raw(
         &self,
         range: RangeFrom<impl AsRef<[u8]>>,
@@ -481,7 +476,6 @@ impl Database {
         .pipe(Ok)
     }
 
-    /// The keys are copied out of the database, for the same reason [`Database::next_raw`] copies.
     pub fn keys_ascending(
         &self,
         range: RangeFrom<impl AsRef<[u8]>>,
@@ -534,7 +528,6 @@ impl Database {
         .pipe(Ok)
     }
 
-    /// The keys are copied out of the database, for the same reason [`Database::next_raw`] copies.
     pub fn iterator_descending(
         &self,
         range: RangeToInclusive<impl AsRef<[u8]>>,
@@ -712,10 +705,6 @@ impl Database {
     /// Behaves like [`im::OrdMap::get_next`].
     ///
     /// [`im::OrdMap::get_next`]: https://docs.rs/im/15.1.0/im/ordmap/struct.OrdMap.html#method.get_next
-    ///
-    /// The data is copied out of the database. `Cow::Borrowed` values decoded from a `libmdbx`
-    /// cursor point into memory-mapped pages that are only valid while the cursor's transaction
-    /// is alive, and the transaction ends when this function returns.
     pub fn next_raw(&self, key: impl AsRef<[u8]>) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
         match self.kind() {
             #[cfg(not(target_os = "zkvm"))]
@@ -740,8 +729,6 @@ impl Database {
     }
 
     /// Returns the first key that is greater than or equal to `key`.
-    ///
-    /// The key is copied out of the database, for the same reason [`Database::next_raw`] copies.
     pub fn next_key(&self, key: impl AsRef<[u8]>) -> Result<Option<Vec<u8>>> {
         match self.kind() {
             #[cfg(not(target_os = "zkvm"))]

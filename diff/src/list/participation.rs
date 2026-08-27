@@ -11,9 +11,6 @@ use crate::{
 #[derive(Ssz, Debug, Clone)]
 #[ssz(derive_hash = false)]
 pub struct ParticipationPatch {
-    /// Length of the base this patch was computed against. Applying it to a list of any other
-    /// length would silently produce a wrong result, because the edit positions are absolute and
-    /// the appended tail assumes the base ends where it did at diff time.
     base_len: u32,
     positions: PositionSet,
     edits: ContiguousList<ParticipationFlags, Unlimited>,

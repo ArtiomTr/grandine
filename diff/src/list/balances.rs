@@ -15,10 +15,6 @@ use crate::{
 #[derive(Ssz, Debug, Clone)]
 #[ssz(derive_hash = false)]
 pub struct BalancesPatch {
-    /// Length of the base this patch was computed against. A patch only describes the base it was
-    /// diffed from, so applying it to a list of any other length would silently produce a wrong
-    /// result: the edit positions are absolute and the appended tail assumes the base ends where
-    /// it did at diff time.
     base_len: u32,
     mode: Gwei,
     positions: PositionSet,

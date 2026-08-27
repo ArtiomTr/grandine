@@ -454,21 +454,22 @@ Review note: *"this should be pub(crate) instead - not published to everything."
 
 Every note in this group is a plain deletion.
 
-- [ ] `database/src/lib.rs:370`, `:484`, `:537` — delete the three
+- [x] `database/src/lib.rs:370`, `:484`, `:537` — delete the three
       *"The keys are copied out of the database, for the same reason `Database::next_raw` copies."* lines
-- [ ] `database/src/lib.rs:425-428` — delete the *"Both key and value are copied out..."* paragraph,
+- [x] `database/src/lib.rs:425-428` — delete the *"Both key and value are copied out..."* paragraph,
       keeping the rest of the doc comment
-- [ ] `database/src/lib.rs:715-718` — delete the *"The data is copied out of the database.
+- [x] `database/src/lib.rs:715-718` — delete the *"The data is copied out of the database.
       `Cow::Borrowed` values..."* paragraph
-- [ ] `diff/src/list/balances.rs:18-21`, `diff/src/list/participation.rs:14`,
+- [x] `diff/src/list/balances.rs:18-21`, `diff/src/list/participation.rs:14`,
       `diff/src/list/validators.rs:24` — delete the repeated *"Length of the base this patch was
       computed against..."* comments in all three files
-- [ ] `fork_choice_control/src/queries.rs:344-345` — delete the
+- [x] `fork_choice_control/src/queries.rs:344-345` — delete the
       *"Like `Self::state_at_slot_blocking`, but rejects slots too far in the future..."* comment
-- [ ] `fork_choice_control/src/storage.rs:174-175` — delete the
+- [x] `fork_choice_control/src/storage.rs:174-175` — delete the
       *"The spine tracking states persisted by forward sync..."* comment on `forward_spine`
-- [ ] `grep -rn "for the same reason" database/ diff/ fork_choice_control/` to confirm none remain
-- [ ] run tests - must pass before next task
+- [x] `grep -rn "for the same reason" database/ diff/ fork_choice_control/` to confirm none remain
+      (only `storage.rs:370`'s unrelated crash-ordering rationale remains; kept deliberately)
+- [x] run tests - must pass before next task
 
 ### Task 15: Relax the sub-epoch deepest-exponent restriction
 

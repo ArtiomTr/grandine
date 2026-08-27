@@ -21,9 +21,6 @@ use crate::{
 #[derive(Ssz, Debug, Clone)]
 #[ssz(derive_hash = false)]
 pub struct ValidatorListPatch {
-    /// Length of the base this patch was computed against. Applying it to a list of any other
-    /// length would silently produce a wrong result, because the edit positions are absolute and
-    /// the appended tail assumes the base ends where it did at diff time.
     base_len: u32,
     effective_balance_edits: ContiguousList<PositionalEdit<Gwei>, Unlimited>,
     withdrawal_credentials_edits: ContiguousList<PositionalEdit<H256>, Unlimited>,

@@ -341,8 +341,6 @@ where
         self.snapshot().state_at_slot_blocking(slot)
     }
 
-    /// Like [`Self::state_at_slot_blocking`], but rejects slots too far in the future instead of
-    /// making the caller pay for a long series of empty slot state transitions.
     pub fn state_at_slot_checked_blocking(
         &self,
         slot: Slot,
