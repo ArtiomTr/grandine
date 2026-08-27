@@ -1540,13 +1540,7 @@ impl GrandineArgs {
             compression_level: state_compression_level,
         };
 
-        state_storage_config.validate(
-            chain_config
-                .preset_base
-                .phase0_preset()
-                .slots_per_epoch()
-                .get(),
-        )?;
+        state_storage_config.validate()?;
 
         let storage_config = StorageConfig {
             in_memory,
@@ -1996,9 +1990,17 @@ mod tests {
     }
 
     #[test]
-    fn state_hierarchy_deepest_layer_must_be_epoch_aligned() {
-        try_config_from_args(["--state-hierarchy", "11,9,3"])
-            .expect_err("a sub-epoch deepest layer must be rejected");
+    fn state_hierarchy_accepts_a_sub_epoch_deepest_layer() {
+        let config = config_from_args(["--state-hierarchy", "21,16,4"]);
+
+        assert_eq!(
+            config
+                .storage_config
+                .state_storage_config
+                .hierarchy
+                .exponents(),
+            [21, 16, 4],
+        );
     }
 
     #[test]

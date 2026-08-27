@@ -655,7 +655,16 @@ mod tests {
 
         let config = Config::mainnet();
 
-        for exponents in [vec![5], vec![9, 5], vec![11, 9, 5], vec![11, 9, 7, 5]] {
+        for exponents in [
+            vec![5],
+            vec![9, 5],
+            vec![11, 9, 5],
+            vec![11, 9, 7, 5],
+            // Sub-epoch deepest layers: states are written several times per epoch.
+            vec![3],
+            vec![9, 4],
+            vec![11, 9, 5, 2],
+        ] {
             let hierarchy = hierarchy(exponents.iter().copied());
 
             // An anchor of 31 is what checkpoint sync produces when the

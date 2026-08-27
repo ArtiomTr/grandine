@@ -481,21 +481,21 @@ Storage loading algorithm probably has to be updated too."*
 
 This is the largest correctness change; it lands last because it touches the read path.
 
-- [ ] delete the `deepest_interval.is_multiple_of(slots_per_epoch)` `ensure!` from
+- [x] delete the `deepest_interval.is_multiple_of(slots_per_epoch)` `ensure!` from
       `StateStorageConfig::validate` and its explanatory comment
-- [ ] audit every read path that treats a stored state as an anchor and assumes it sits at an
+- [x] audit every read path that treats a stored state as an anchor and assumes it sits at an
       epoch start (`grep -rn "is_epoch_start\|compute_start_slot_at_epoch" fork_choice_control/src/storage*.rs`)
-- [ ] update those paths to accept a mid-epoch anchor: loading a state at an arbitrary hierarchy
+- [x] update those paths to accept a mid-epoch anchor: loading a state at an arbitrary hierarchy
       slot must still find its parent frame and replay from it correctly
-- [ ] confirm the deepest exponent no longer needs to be `>= 5` on Mainnet / `>= 3` on minimal,
+- [x] confirm the deepest exponent no longer needs to be `>= 5` on Mainnet / `>= 3` on minimal,
       and that `--state-hierarchy 21,16,4` (or similar) starts and round-trips states
-- [ ] write tests: `validate` accepts sub-epoch deepest exponents (`4`, `3`, `2`, `1`, `0`)
-- [ ] write tests: store and read back a state at a mid-epoch hierarchy slot
-- [ ] write tests: the pruning-retention property test in `hierarchy.rs` also holds for a
+- [x] write tests: `validate` accepts sub-epoch deepest exponents (`4`, `3`, `2`, `1`, `0`)
+- [x] write tests: store and read back a state at a mid-epoch hierarchy slot
+- [x] write tests: the pruning-retention property test in `hierarchy.rs` also holds for a
       sub-epoch deepest exponent
-- [ ] update `runtime/src/grandine_args.rs`'s `state_hierarchy_deepest_layer_must_be_epoch_aligned`
+- [x] update `runtime/src/grandine_args.rs`'s `state_hierarchy_deepest_layer_must_be_epoch_aligned`
       test to assert the new, permissive behaviour (and rename it)
-- [ ] run tests - must pass before next task
+- [x] run tests - must pass before next task
 
 ### Task 16: Verify acceptance criteria
 

@@ -63,7 +63,7 @@ impl StateStorageConfig {
         estimated_cache_size.as_u64() > total_memory.as_u64() / 100 * MEMORY_WARNING_PERCENT
     }
 
-    pub fn validate(&self, slots_per_epoch: u64) -> Result<()> {
+    pub fn validate(&self) -> Result<()> {
         ensure!(
             self.cache_sizes.len() <= self.hierarchy.depth(),
             "number of state cache sizes ({}) must not exceed the number of \
@@ -89,26 +89,6 @@ impl StateStorageConfig {
             );
         }
 
-        // States are only ever persisted at hierarchy slots, and every read path that loads a
-        // persisted state as an anchor requires it to be at an epoch start. The deepest layer is
-        // written every `2^exponents.last()` slots, so that has to be a whole number of epochs.
-        let deepest_exponent = *self
-            .hierarchy
-            .exponents()
-            .last()
-            .expect("Hierarchy::new rejects empty exponents");
-
-        let deepest_interval = 1u64
-            .checked_shl(deepest_exponent.into())
-            .expect("Hierarchy::new rejects exponents above 63");
-
-        ensure!(
-            deepest_interval.is_multiple_of(slots_per_epoch),
-            "deepest state hierarchy exponent ({deepest_exponent}) writes a state every \
-            {deepest_interval} slots, which is not a whole number of epochs \
-            ({slots_per_epoch} slots); states must be persisted at epoch starts",
-        );
-
         let level_range = zstd::compression_level_range();
 
         ensure!(
@@ -126,21 +106,19 @@ impl StateStorageConfig {
 mod tests {
     use super::*;
 
-    const MAINNET_SLOTS_PER_EPOCH: u64 = 32;
-
     #[test]
     fn state_storage_config_accepts_fewer_cache_sizes_than_hierarchy_layers() -> Result<()> {
         let config = StateStorageConfig::default();
 
         assert!(config.cache_sizes.len() < config.hierarchy.depth());
-        config.validate(MAINNET_SLOTS_PER_EPOCH)?;
+        config.validate()?;
 
         let single = StateStorageConfig {
             cache_sizes: vec![5],
             ..StateStorageConfig::default()
         };
 
-        single.validate(MAINNET_SLOTS_PER_EPOCH)?;
+        single.validate()?;
 
         let exactly_as_deep = StateStorageConfig {
             hierarchy: Hierarchy::new([9, 5]).expect("exponents in tests are valid"),
@@ -148,7 +126,7 @@ mod tests {
             ..StateStorageConfig::default()
         };
 
-        exactly_as_deep.validate(MAINNET_SLOTS_PER_EPOCH)?;
+        exactly_as_deep.validate()?;
 
         Ok(())
     }
@@ -162,7 +140,7 @@ mod tests {
         };
 
         let error = too_many
-            .validate(MAINNET_SLOTS_PER_EPOCH)
+            .validate()
             .expect_err("3 cache sizes do not fit into 2 hierarchy layers");
 
         assert_eq!(
@@ -179,7 +157,7 @@ mod tests {
             ..StateStorageConfig::default()
         };
 
-        oversized.validate(MAINNET_SLOTS_PER_EPOCH)?;
+        oversized.validate()?;
 
         Ok(())
     }
@@ -242,28 +220,17 @@ mod tests {
     }
 
     #[test]
-    fn state_storage_config_rejects_a_sub_epoch_deepest_layer() -> Result<()> {
-        // Every read path that loads a persisted state as an anchor requires it to be at an epoch
-        // start, so a layer written more often than once per epoch would make the database
-        // unloadable.
-        let sub_epoch = StateStorageConfig {
-            hierarchy: Hierarchy::new([9, 3]).expect("exponents in tests are valid"),
-            cache_sizes: StateStorageConfig::default_cache_sizes(2),
-            ..StateStorageConfig::default()
-        };
+    fn state_storage_config_accepts_a_sub_epoch_deepest_layer() -> Result<()> {
+        for deepest_exponent in [4, 3, 2, 1, 0] {
+            let sub_epoch = StateStorageConfig {
+                hierarchy: Hierarchy::new([9, deepest_exponent])
+                    .expect("exponents in tests are valid"),
+                cache_sizes: StateStorageConfig::default_cache_sizes(2),
+                ..StateStorageConfig::default()
+            };
 
-        assert!(sub_epoch.validate(MAINNET_SLOTS_PER_EPOCH).is_err());
-
-        // The same hierarchy is valid on a preset with 8 slots per epoch.
-        sub_epoch.validate(8)?;
-
-        let epoch_aligned = StateStorageConfig {
-            hierarchy: Hierarchy::new([9, 5]).expect("exponents in tests are valid"),
-            cache_sizes: StateStorageConfig::default_cache_sizes(2),
-            ..StateStorageConfig::default()
-        };
-
-        epoch_aligned.validate(MAINNET_SLOTS_PER_EPOCH)?;
+            sub_epoch.validate()?;
+        }
 
         Ok(())
     }
@@ -277,21 +244,21 @@ mod tests {
             ..StateStorageConfig::default()
         };
 
-        in_range.validate(MAINNET_SLOTS_PER_EPOCH)?;
+        in_range.validate()?;
 
         let above = StateStorageConfig {
             compression_level: level_range.end() + 1,
             ..StateStorageConfig::default()
         };
 
-        assert!(above.validate(MAINNET_SLOTS_PER_EPOCH).is_err());
+        assert!(above.validate().is_err());
 
         let below = StateStorageConfig {
             compression_level: level_range.start() - 1,
             ..StateStorageConfig::default()
         };
 
-        assert!(below.validate(MAINNET_SLOTS_PER_EPOCH).is_err());
+        assert!(below.validate().is_err());
 
         Ok(())
     }

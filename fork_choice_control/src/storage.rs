@@ -203,7 +203,7 @@ impl<P: Preset> Storage<P> {
             } => 'block: {
                 // Attempt to load local state first: either latest or from specified slot.
                 let local_state_storage = match state_slot {
-                    Some(slot) => self.load_state_by_iteration(slot, None)?,
+                    Some(slot) => self.load_state_by_iteration(slot, None, true)?,
                     None => self.load_latest_state(None)?,
                 };
 
@@ -400,7 +400,7 @@ impl<P: Preset> Storage<P> {
                  attempting to find stored state by iteration",
             );
 
-            self.load_state_by_iteration(Slot::MAX, finalized_validators)
+            self.load_state_by_iteration(Slot::MAX, finalized_validators, true)
         }
     }
 
@@ -615,8 +615,12 @@ impl<P: Preset> Storage<P> {
                     self.hierarchy
                         .contains::<P>(&self.config, anchor_slot, state_slot);
 
+                // The checkpoint is loaded back as the fork choice anchor, which has to be at
+                // an epoch start. Hierarchy slots need not be - the deepest layer may be written
+                // several times per epoch.
                 if !checkpoint_state_appended
-                    && ((store.is_forward_synced() && is_epoch_start) || is_hierarchy_slot)
+                    && is_epoch_start
+                    && (store.is_forward_synced() || is_hierarchy_slot)
                 {
                     info_with_peers!("saving checkpoint block & state in slot {state_slot}");
 
@@ -1395,7 +1399,7 @@ impl<P: Preset> Storage<P> {
         finalized_validators: Option<&dyn SszValidatorList>,
     ) -> Result<Option<Arc<BeaconState<P>>>> {
         let (mut state, state_block, blocks) =
-            match self.load_state_by_iteration(slot, finalized_validators)? {
+            match self.load_state_by_iteration(slot, finalized_validators, false)? {
                 OptionalStateStorage::None | OptionalStateStorage::UnfinalizedOnly(_) => {
                     return Ok(None);
                 }
@@ -1432,13 +1436,6 @@ impl<P: Preset> Storage<P> {
 
         let mut state = loop {
             if let Some(state) = self.state_by_block_root(block_root, Some(finalized_validators))? {
-                let slot = state.slot();
-
-                ensure!(
-                    misc::is_epoch_start::<P>(slot),
-                    Error::PersistedSlotCannotContainAnchor { slot },
-                );
-
                 break state;
             }
 
@@ -1550,10 +1547,14 @@ impl<P: Preset> Storage<P> {
         Ok(None)
     }
 
+    /// Finds the newest persisted state at or below `start_from_slot`, along with the blocks
+    /// needed to replay it forward. `epoch_start_only` restricts the search to states that can
+    /// serve as a fork choice anchor.
     fn load_state_by_iteration(
         &self,
         start_from_slot: Slot,
         finalized_validators: Option<&dyn SszValidatorList>,
+        epoch_start_only: bool,
     ) -> Result<OptionalStateStorage<'_, P>> {
         let results = self
             .database
@@ -1589,16 +1590,11 @@ impl<P: Preset> Storage<P> {
                 };
 
                 if let Some(state) = self.state_by_block_root(block_root, finalized_validators)? {
-                    let slot = state.slot();
+                    if !epoch_start_only || misc::is_epoch_start::<P>(state.slot()) {
+                        let blocks = self.blocks_by_roots(block_roots);
 
-                    ensure!(
-                        misc::is_epoch_start::<P>(slot),
-                        Error::PersistedSlotCannotContainAnchor { slot },
-                    );
-
-                    let blocks = self.blocks_by_roots(block_roots);
-
-                    return Ok(OptionalStateStorage::Full((state, block, blocks)));
+                        return Ok(OptionalStateStorage::Full((state, block, blocks)));
+                    }
                 }
             }
 
@@ -2770,7 +2766,7 @@ mod tests {
 
         assert!(
             matches!(
-                storage.load_state_by_iteration(8, Some(finalized_validators))?,
+                storage.load_state_by_iteration(8, Some(finalized_validators), false)?,
                 OptionalStateStorage::Full(_),
             ),
             "before pruning the whole chain up to slot 8 is on disk",
@@ -2796,6 +2792,67 @@ mod tests {
             "the block at slot 4 is gone, so the retained state at slot 0 \
              cannot be replayed to slot 8",
         );
+
+        Ok(())
+    }
+
+    /// A sub-epoch deepest layer persists states in the middle of an epoch. Those are readable
+    /// like any other, but the fork choice anchor still has to sit at an epoch start, so the
+    /// anchor search walks past them.
+    #[test]
+    fn a_mid_epoch_hierarchy_state_is_readable_but_is_never_picked_as_an_anchor() -> Result<()> {
+        let directory = TempDir::new()?;
+        let storage = storage_with_hierarchy(&directory, [9, 3])?;
+
+        let validator_source = state_with_slot(0);
+        let finalized_validators = validator_source.validators();
+
+        let epoch_start_root = H256::repeat_byte(1);
+        let mid_epoch_root = H256::repeat_byte(2);
+
+        storage.database.put_batch_raw(vec![
+            serialize(BlockRootBySlot(0), epoch_start_root)?,
+            serialize(FinalizedBlockByRoot(epoch_start_root), block_with_slot(0))?,
+            serialize(BlockRootBySlot(8), mid_epoch_root)?,
+            serialize(FinalizedBlockByRoot(mid_epoch_root), block_with_slot(8))?,
+        ])?;
+
+        let mut batch = vec![];
+        let mut update_finalized_validators = false;
+
+        storage.append_finalized_states(
+            [
+                (0, epoch_start_root, state_with_slot(0)),
+                (8, mid_epoch_root, state_with_slot(8)),
+            ],
+            0,
+            finalized_validators,
+            &mut batch,
+            &mut update_finalized_validators,
+        )?;
+
+        assert_eq!(
+            storage
+                .stored_state(8, Some(finalized_validators))?
+                .map(|state| state.slot()),
+            Some(8),
+        );
+
+        let OptionalStateStorage::Full((anchor_state, _, _)) =
+            storage.load_state_by_iteration(8, Some(finalized_validators), true)?
+        else {
+            panic!("the state at slot 0 must be found");
+        };
+
+        assert_eq!(anchor_state.slot(), 0);
+
+        let OptionalStateStorage::Full((nearest_state, _, _)) =
+            storage.load_state_by_iteration(8, Some(finalized_validators), false)?
+        else {
+            panic!("the state at slot 8 must be found");
+        };
+
+        assert_eq!(nearest_state.slot(), 8);
 
         Ok(())
     }
