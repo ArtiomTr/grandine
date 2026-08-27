@@ -210,17 +210,17 @@ padded with zeros, if necessary, relaxing constraint to simply
 Review note: *"Remove this check - I wouldn't call it absurd, we probably just emit a warning -
 estimated cache size is more than 80% of currently available RAM."*
 
-- [ ] delete the `MAX_STATE_CACHE_SIZE` constant, its `ensure!` and its explanatory comment
-- [ ] estimate the cache footprint from the configured sizes and a per-state size estimate, and
+- [x] delete the `MAX_STATE_CACHE_SIZE` constant, its `ensure!` and its explanatory comment
+- [x] estimate the cache footprint from the configured sizes and a per-state size estimate, and
       warn when it exceeds 80% of total system memory, naming the estimate and the available RAM
       and saying the node will be OOM-killed once the caches fill
-- [ ] use the memory-probing dependency already in the workspace rather than adding a new one
+- [x] use the memory-probing dependency already in the workspace rather than adding a new one
       (`grep -rn "sysinfo\|available_memory\|total_memory" --include=*.rs --include=Cargo.toml`);
       if none exists, keep the check purely relative to a documented per-state constant and note
       the deviation here with a ⚠️
-- [ ] write tests: an oversized configuration validates successfully (no longer an error)
-- [ ] write tests: the estimator crosses the threshold at the expected size
-- [ ] run tests - must pass before next task
+- [x] write tests: an oversized configuration validates successfully (no longer an error)
+- [x] write tests: the estimator crosses the threshold at the expected size
+- [x] run tests - must pass before next task
 
 ### Task 6: Fold hierarchy recording into `load` and delete the invented migration path
 

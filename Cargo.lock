@@ -6067,6 +6067,7 @@ dependencies = [
  "state_cache",
  "std_ext",
  "strum 0.28.0",
+ "sysinfo 0.38.4",
  "tap",
  "tempfile",
  "test-generator",

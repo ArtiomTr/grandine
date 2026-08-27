@@ -1,9 +1,18 @@
 use anyhow::{Result, ensure};
+use bytesize::ByteSize;
+use logging::warn_with_peers;
+use sysinfo::{MemoryRefreshKind, RefreshKind, System};
 use zstd::DEFAULT_COMPRESSION_LEVEL;
 
 use crate::hierarchy::Hierarchy;
 
-const MAX_STATE_CACHE_SIZE: usize = 1024;
+/// Rough resident size of one cached beacon state on mainnet. Cached entries are whole states,
+/// dominated by the validator registry and balances, so this grows with the registry and is only
+/// accurate to an order of magnitude.
+const ESTIMATED_STATE_SIZE: ByteSize = ByteSize::mib(512);
+
+/// Share of system memory the caches may be estimated to occupy before it is worth warning about.
+const MEMORY_WARNING_PERCENT: u64 = 80;
 
 /// Tuning options for how beacon states are persisted.
 #[derive(Clone, Debug)]
@@ -38,6 +47,22 @@ impl StateStorageConfig {
         [5, 3, 3].into_iter().take(depth).collect()
     }
 
+    /// Memory the state caches are expected to take once every layer is full.
+    #[must_use]
+    pub fn estimated_cache_size(&self) -> ByteSize {
+        let cached_states = self
+            .cache_sizes
+            .iter()
+            .map(|size| u64::try_from(*size).unwrap_or(u64::MAX))
+            .fold(0, u64::saturating_add);
+
+        ByteSize::b(ESTIMATED_STATE_SIZE.as_u64().saturating_mul(cached_states))
+    }
+
+    fn exceeds_memory_share(estimated_cache_size: ByteSize, total_memory: ByteSize) -> bool {
+        estimated_cache_size.as_u64() > total_memory.as_u64() / 100 * MEMORY_WARNING_PERCENT
+    }
+
     pub fn validate(&self, slots_per_epoch: u64) -> Result<()> {
         ensure!(
             self.cache_sizes.len() <= self.hierarchy.depth(),
@@ -47,15 +72,22 @@ impl StateStorageConfig {
             self.hierarchy.depth(),
         );
 
-        // Every cached entry is a whole beacon state, so even the upper bound is far more than any
-        // node can hold. It exists so that an absurd value fails here with a clear message instead
-        // of inside the cache the layers are built from.
-        ensure!(
-            self.cache_sizes
-                .iter()
-                .all(|size| *size <= MAX_STATE_CACHE_SIZE),
-            "state cache sizes must not exceed {MAX_STATE_CACHE_SIZE}",
+        let total_memory = ByteSize::b(
+            System::new_with_specifics(
+                RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()),
+            )
+            .total_memory(),
         );
+
+        let estimated_cache_size = self.estimated_cache_size();
+
+        if Self::exceeds_memory_share(estimated_cache_size, total_memory) {
+            warn_with_peers!(
+                "state caches are estimated to hold up to {estimated_cache_size} of states, \
+                over {MEMORY_WARNING_PERCENT}% of the {total_memory} of memory this machine has; \
+                the node will be OOM-killed once the caches fill",
+            );
+        }
 
         // States are only ever persisted at hierarchy slots, and every read path that loads a
         // persisted state as an anchor requires it to be at an epoch start. The deepest layer is
@@ -140,24 +172,66 @@ mod tests {
     }
 
     #[test]
-    fn state_storage_config_rejects_an_absurd_cache_size() {
-        let too_large = StateStorageConfig {
+    fn state_storage_config_accepts_an_oversized_cache() -> Result<()> {
+        let oversized = StateStorageConfig {
             hierarchy: Hierarchy::new([5]).expect("exponents in tests are valid"),
             cache_sizes: vec![usize::MAX],
             ..StateStorageConfig::default()
         };
 
-        assert!(too_large.validate(MAINNET_SLOTS_PER_EPOCH).is_err());
+        oversized.validate(MAINNET_SLOTS_PER_EPOCH)?;
 
-        let at_the_limit = StateStorageConfig {
-            hierarchy: Hierarchy::new([5]).expect("exponents in tests are valid"),
-            cache_sizes: vec![MAX_STATE_CACHE_SIZE],
+        Ok(())
+    }
+
+    #[test]
+    fn estimated_cache_size_scales_with_the_number_of_cached_states() {
+        let config = StateStorageConfig {
+            hierarchy: Hierarchy::new([9, 5]).expect("exponents in tests are valid"),
+            cache_sizes: vec![5, 3],
             ..StateStorageConfig::default()
         };
 
-        at_the_limit
-            .validate(MAINNET_SLOTS_PER_EPOCH)
-            .expect("a cache size at the limit is accepted");
+        assert_eq!(
+            config.estimated_cache_size(),
+            ByteSize::b(ESTIMATED_STATE_SIZE.as_u64() * 8),
+        );
+
+        let uncached = StateStorageConfig {
+            cache_sizes: vec![],
+            ..StateStorageConfig::default()
+        };
+
+        assert_eq!(uncached.estimated_cache_size(), ByteSize::b(0));
+
+        let saturating = StateStorageConfig {
+            hierarchy: Hierarchy::new([5]).expect("exponents in tests are valid"),
+            cache_sizes: vec![usize::MAX],
+            ..StateStorageConfig::default()
+        };
+
+        assert_eq!(saturating.estimated_cache_size(), ByteSize::b(u64::MAX));
+    }
+
+    #[test]
+    fn the_memory_warning_triggers_at_80_percent_of_total_memory() {
+        let total_memory = ByteSize::b(16_000_000_000);
+        let threshold = ByteSize::b(12_800_000_000);
+
+        assert!(!StateStorageConfig::exceeds_memory_share(
+            threshold,
+            total_memory,
+        ));
+
+        assert!(StateStorageConfig::exceeds_memory_share(
+            ByteSize::b(threshold.as_u64() + 1),
+            total_memory,
+        ));
+
+        assert!(!StateStorageConfig::exceeds_memory_share(
+            ByteSize::b(0),
+            ByteSize::b(0),
+        ));
     }
 
     #[test]
