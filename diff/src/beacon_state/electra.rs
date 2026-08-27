@@ -16,7 +16,7 @@ use crate::{
     beacon_state::{altair::AltairPatch, capella::CapellaPatch, shared::SharedPatch},
     compress::Compressed,
     error::Error,
-    list::{PositionalPatch, QueuePatch},
+    list::QueuePatch,
     patch::{Patch, PatchConfig},
     replace::ReplacePatch,
 };
@@ -74,8 +74,7 @@ pub struct ElectraPatch<P: Preset> {
     earliest_consolidation_epoch: ReplacePatch<Epoch>,
     pending_deposits: Compressed<QueuePatch<PendingDeposit>>,
     pending_partial_withdrawals: Compressed<QueuePatch<PendingPartialWithdrawal>>,
-    // TODO(delta-db): try replacing this with QueuePatch, and measuring performance.
-    pending_consolidations: Compressed<PositionalPatch<PendingConsolidation>>,
+    pending_consolidations: Compressed<QueuePatch<PendingConsolidation>>,
 
     #[ssz(skip)]
     phantom: PhantomData<P>,
@@ -151,5 +150,84 @@ impl<P: Preset, S: PostElectraBeaconState<P>> Patch<S> for ElectraPatch<P> {
             .apply(base.pending_partial_withdrawals_mut())?;
         self.pending_consolidations
             .apply(base.pending_consolidations_mut())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use ssz::{PersistentList, SszListMut as _, SszRead as _, SszWrite as _};
+    use try_from_iterator::TryFromIterator as _;
+    use types::{config::Config, preset::Minimal};
+
+    use super::*;
+
+    type PendingConsolidations =
+        PersistentList<PendingConsolidation, <Minimal as Preset>::PendingConsolidationsLimit>;
+
+    fn consolidations(source_indices: impl IntoIterator<Item = u64>) -> PendingConsolidations {
+        PendingConsolidations::try_from_iter(source_indices.into_iter().map(|source_index| {
+            PendingConsolidation {
+                source_index,
+                target_index: source_index + 1,
+            }
+        }))
+        .expect("length is below the maximum")
+    }
+
+    #[test]
+    fn pending_consolidations_round_trip_through_a_queue_shift() {
+        let mut base = ElectraBeaconState::<Minimal>::default();
+
+        base.pending_consolidations = consolidations(0..8);
+
+        let mut changed = base.clone();
+
+        // The queue is only ever consumed from the front and appended to at the back, which
+        // is the shape `process_pending_consolidations` and `process_consolidation_request`
+        // produce.
+        changed.pending_consolidations = consolidations(3..8);
+
+        changed
+            .pending_consolidations
+            .extend(&mut consolidations(100..103).into_iter().copied())
+            .expect("list is not full");
+
+        let patch = ElectraStatePatchV1::diff(PatchConfig::default(), &base, &changed)
+            .expect("electra patch should represent the change");
+
+        let encoded = patch.to_ssz().expect("patch should serialize");
+        let patch = ElectraStatePatchV1::<Minimal>::from_ssz(&Config::minimal(), encoded)
+            .expect("patch should deserialize");
+
+        let mut applied = base;
+        patch.apply(&mut applied).expect("patch should apply");
+
+        assert_eq!(applied, changed);
+    }
+
+    #[test]
+    fn pending_consolidations_round_trip_when_the_queue_drains_and_refills() {
+        let mut base = ElectraBeaconState::<Minimal>::default();
+
+        base.pending_consolidations = consolidations(0..4);
+
+        for changed_queue in [
+            consolidations(0..0),
+            consolidations(0..4),
+            consolidations(0..6),
+            consolidations(50..53),
+        ] {
+            let mut changed = base.clone();
+
+            changed.pending_consolidations = changed_queue;
+
+            let patch = ElectraStatePatchV1::diff(PatchConfig::default(), &base, &changed)
+                .expect("electra patch should represent the change");
+
+            let mut applied = base.clone();
+            patch.apply(&mut applied).expect("patch should apply");
+
+            assert_eq!(applied, changed);
+        }
     }
 }

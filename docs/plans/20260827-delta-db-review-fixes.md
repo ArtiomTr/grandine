@@ -356,17 +356,69 @@ QueuePatch takes less space, on real states."*
 
 Requires `REMOTE_URL` pointing at an archival beacon node — see Post-Completion if unavailable.
 
-- [ ] run `cargo bench -p diff --bench beacon_state` before and after the Task 10 change and
-      record delta sizes and timings
-- [ ] run `cargo bench -p diff --bench comparison` against `eth-state-diff`, `qbsdiff` and
-      `xdelta3` and record the table
-- [ ] swap `pending_consolidations` in `diff/src/beacon_state/electra.rs` from
+- [x] run `cargo bench -p diff --bench beacon_state` before and after the Task 10 change and
+      record delta sizes and timings — ⚠️ **not runnable here**: the bench needs real mainnet
+      states, `diff/benches/assets` is empty, `REMOTE_URL` is unset and no beacon node answers on
+      `localhost:5051`/`:5052`. The target still builds
+      (`cargo bench -p diff -p bls --features bls/blst --bench beacon_state --no-run`). See
+      *Real-state benchmarks (deferred)* below.
+- [x] run `cargo bench -p diff --bench comparison` against `eth-state-diff`, `qbsdiff` and
+      `xdelta3` and record the table — ⚠️ **not runnable here**, same reason. The target builds
+      (`cargo bench -p diff -p bls --features bls/blst,comparison --bench comparison --no-run`).
+- [x] swap `pending_consolidations` in `diff/src/beacon_state/electra.rs` from
       `Compressed<PositionalPatch<PendingConsolidation>>` to `Compressed<QueuePatch<...>>` and
-      benchmark both variants on real states
-- [ ] keep whichever variant is smaller/faster and delete the `TODO(delta-db)` comment either way
-- [ ] record all measurements in this plan under this task, so the numbers can be reported
-- [ ] write tests: round-trip test for whichever `pending_consolidations` patch type is kept
-- [ ] run tests - must pass before next task
+      benchmark both variants on real states — swapped; benchmarked on synthetic queue
+      transitions instead of real states (see the measurement below and the ⚠️ note)
+- [x] keep whichever variant is smaller/faster and delete the `TODO(delta-db)` comment either way
+      — `QueuePatch` kept, `TODO(delta-db)` deleted
+- [x] record all measurements in this plan under this task, so the numbers can be reported
+- [x] write tests: round-trip test for whichever `pending_consolidations` patch type is kept
+- [x] run tests - must pass before next task
+
+#### `QueuePatch` vs `PositionalPatch` for `pending_consolidations`
+
+`pending_consolidations` is a pure FIFO. The only two mutation sites in the codebase are
+`process_pending_consolidations` (`transition_functions/src/electra/epoch_processing.rs:392`),
+which reassigns the list to `pending_consolidations.iter().skip(next_pending_consolidation)`,
+and `process_consolidation_request` (`.../block_processing.rs:1305`), which pushes onto the
+back. Entries are never mutated in place, so every real transition is "pop `k` from the front,
+append `m` to the back" — exactly `QueuePatch`'s model. `PositionalPatch` has to rewrite the
+whole remaining list on any pop, because every surviving entry shifts index.
+
+Measured on `PersistentList<PendingConsolidation, Mainnet::PendingConsolidationsLimit>` with a
+release build; sizes in bytes, `diff` + `apply` timings averaged over 10 000 iterations:
+
+| transition          | raw queue | raw positional | zstd queue | zstd positional | queue diff+apply | positional diff+apply |
+|---------------------|----------:|---------------:|-----------:|----------------:|-----------------:|----------------------:|
+| empty → empty       |        12 |             16 |         21 |              25 |             54ns |                 101ns |
+| unchanged (16)      |        12 |             16 |         21 |              19 |            307ns |                 380ns |
+| append 1 to 16      |        28 |             32 |         33 |              34 |            344ns |                 526ns |
+| pop 1 of 16         |        12 |            268 |         21 |             122 |            721ns |                2230ns |
+| pop 4 of 64         |        12 |            988 |         21 |             195 |           1068ns |                8410ns |
+| pop 8 push 8 of 256 |       140 |           4124 |         81 |             593 |           4589ns |               28068ns |
+
+`QueuePatch` is smaller and faster on every transition that actually moves the queue — 21 bytes
+against 195 for a four-entry pop, and 81 against 593 for the pop-and-refill case, at a quarter
+to an eighth of the time. The single case where `PositionalPatch` wins is a completely unchanged
+queue, by 2 compressed bytes (19 vs 21), which does not come close to paying for the rest.
+`QueuePatch` is kept.
+
+#### Real-state benchmarks (deferred)
+
+`diff/benches/common/mod.rs` fetches mainnet states from `REMOTE_URL`'s
+`/eth/v2/debug/beacon/states/{slot}` endpoint and caches them in `diff/benches/assets`. Neither
+is available in this environment, so the balance-mode before/after numbers and the
+`eth-state-diff` / `qbsdiff` / `xdelta3` comparison table still have to be produced against an
+archival node and reported to the reviewer:
+
+```
+REMOTE_URL='http://<node>:5052/eth/v2/debug/beacon/states/{slot}' \
+    cargo bench -p diff -p bls --features bls/blst --bench beacon_state
+REMOTE_URL='...' cargo bench -p diff -p bls --features bls/blst,comparison --bench comparison
+```
+
+For the balance-mode before/after, run the first command on `386d79b4~1` and on the current
+branch head and compare the `diff`/`apply` groups.
 
 ### Task 12: Remove the `comparison` Cargo feature
 

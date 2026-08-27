@@ -37,7 +37,9 @@ impl BalancesPatch {
 
             let after = i64::try_from(after).map_err(|_| Error::InvalidBalanceDelta)?;
             let before = i64::try_from(before).map_err(|_| Error::InvalidBalanceDelta)?;
-            let delta = after.checked_sub(before).ok_or(Error::InvalidBalanceDelta)?;
+            let delta = after
+                .checked_sub(before)
+                .ok_or(Error::InvalidBalanceDelta)?;
 
             let count = counts.entry(zigzag(delta)).or_insert(0_usize);
             *count = count.saturating_add(1);
