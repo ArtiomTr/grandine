@@ -250,13 +250,24 @@ Task 6 stays behaviour-preserving there; Task 7 deletes it.
 Review note: *"needs double checking - probably this thing isn't necessary, because either way,
 store is initialized through .load() first."*
 
-- [ ] trace every path reaching `archive_back_sync_states` and confirm `Storage::load` always ran
+- [x] trace every path reaching `archive_back_sync_states` and confirm `Storage::load` always ran
       first; record the finding in this task's notes
-- [ ] if confirmed, delete the call at `fork_choice_control/src/storage_back_sync.rs:41`;
+- [x] if confirmed, delete the call at `fork_choice_control/src/storage_back_sync.rs:41`;
       if a path is found that bypasses `load`, keep the check and note the path here with a ⚠️
-- [ ] update `storage_back_sync.rs` tests that pre-seed `StateHierarchyKey` for this call
-- [ ] write tests: back-sync archival succeeds on a store initialized through `load`
-- [ ] run tests - must pass before next task
+- [x] update `storage_back_sync.rs` tests that pre-seed `StateHierarchyKey` for this call
+- [x] write tests: back-sync archival succeeds on a store initialized through `load`
+- [x] run tests - must pass before next task
+
+Trace finding: `Storage::archive_back_sync_states` is `pub(crate)` and has exactly one caller,
+`Controller::archive_back_sync_states` (`fork_choice_control/src/controller.rs:867`), which in
+turn is reached only from `p2p/src/back_sync.rs:228`. Reaching it therefore requires a
+`Controller`, and both `Controller::new` call sites — `runtime/src/runtime.rs:312` and
+`http_api/src/context.rs:174` — construct one only after `storage.load(..)` has already returned
+(`runtime.rs:275`, `context.rs:156`). No path bypasses `load`, so the record-or-verify block was
+deleted. `archive_back_sync_states_refuses_a_mismatched_hierarchy` went with it; the mismatch is
+still covered by `loading_rejects_a_mismatched_hierarchy` in `storage.rs`, and the new
+`archive_back_sync_states_runs_on_a_store_initialized_through_load` archives over a `load`-
+initialized store and asserts the hierarchy `load` recorded is still there.
 
 ### Task 8: Remove the anchor-change warning
 

@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use anyhow::{Error as AnyhowError, Result, bail, ensure};
+use anyhow::{Error as AnyhowError, Result, bail};
 use database::Database;
 use genesis::AnchorCheckpointProvider;
 use logging::{debug_with_peers, info_with_peers, warn_with_peers};
@@ -20,10 +20,9 @@ use types::{
 
 use crate::{
     Storage,
-    hierarchy::Hierarchy,
     storage::{
         ARCHIVED_STATES_BEFORE_FLUSH, BlockRootBySlot, Error, FinalizedBlockByRoot,
-        SlotByStateRoot, StateHierarchyKey, get, save, serialize,
+        SlotByStateRoot, get, serialize,
     },
 };
 
@@ -39,18 +38,6 @@ impl<P: Preset> Storage<P> {
         is_exiting: &Arc<AtomicBool>,
         finalized_validators: &dyn SszValidatorList,
     ) -> Result<()> {
-        if let Some(stored) = get::<Hierarchy>(&self.database, StateHierarchyKey)? {
-            ensure!(
-                stored.exponents() == self.hierarchy.exponents(),
-                Error::StateHierarchyMismatch {
-                    stored: stored.to_string(),
-                    configured: self.hierarchy.to_string(),
-                },
-            );
-        } else {
-            save(&self.database, StateHierarchyKey, &self.hierarchy)?;
-        }
-
         let WithOrigin { value, origin } = anchor_checkpoint_provider.checkpoint();
 
         let FinalizedCheckpoint {
@@ -246,6 +233,7 @@ mod tests {
     use pubkey_cache::PubkeyCache;
     use types::{nonstandard::StorageMode, phase0::consts::GENESIS_SLOT, traits::BeaconState as _};
 
+    use reqwest::Client;
     use ssz::{H256, SszRead as _, SszWrite as _};
     use types::{combined::BeaconState, preset::Mainnet};
 
@@ -253,7 +241,7 @@ mod tests {
     use crate::{
         hierarchy::Hierarchy,
         state_storage_config::StateStorageConfig,
-        storage::{StateHierarchyKey, save},
+        storage::{StateHierarchyKey, StateLoadStrategy},
     };
 
     #[test]
@@ -394,36 +382,51 @@ mod tests {
     }
 
     #[test]
-    fn archive_back_sync_states_refuses_a_mismatched_hierarchy() -> Result<()> {
+    fn archive_back_sync_states_runs_on_a_store_initialized_through_load() -> Result<()> {
         let genesis_state = mainnet::GENESIS_BEACON_STATE.force().clone_arc();
         let finalized_validators = genesis_state.validators().clone_boxed();
-        let database = Database::in_memory();
+        let blocks = mainnet::BEACON_BLOCKS_UP_TO_SLOT_128.force();
+        let storage = build_test_storage::<Mainnet>();
 
-        save(&database, StateHierarchyKey, Hierarchy::new([11, 9, 5])?)?;
+        let anchor_checkpoint_provider =
+            AnchorCheckpointProvider::custom_from_genesis(genesis_state);
 
-        let storage = Storage::<Mainnet>::new(
-            Arc::new(Mainnet::default_config()),
-            Arc::new(PubkeyCache::default()),
-            database,
-            StorageMode::default(),
-            StateStorageConfig::default(),
-            None,
+        let FinalizedCheckpoint {
+            state: anchor_state,
+            block: anchor_block,
+        } = anchor_checkpoint_provider.checkpoint().value;
+
+        futures::executor::block_on(storage.load(
+            &Client::new(),
+            StateLoadStrategy::Anchor {
+                block: anchor_block,
+                state: anchor_state,
+            },
+        ))?;
+
+        storage.store_back_sync_blocks(blocks.iter().cloned())?;
+
+        storage.archive_back_sync_states(
+            0,
+            128,
+            &anchor_checkpoint_provider,
+            &Arc::new(AtomicBool::new(false)),
+            &*finalized_validators,
+        )?;
+
+        assert_eq!(
+            get::<Hierarchy>(&storage.database, StateHierarchyKey)?
+                .expect("`load` records the configured hierarchy")
+                .exponents(),
+            StateStorageConfig::default().hierarchy.exponents(),
         );
 
-        let error = storage
-            .archive_back_sync_states(
-                0,
-                128,
-                &AnchorCheckpointProvider::custom_from_genesis(genesis_state),
-                &Arc::new(AtomicBool::new(false)),
-                &*finalized_validators,
-            )
-            .expect_err("a mismatched hierarchy must be rejected");
-
-        assert!(matches!(
-            error.downcast_ref::<Error>(),
-            Some(Error::StateHierarchyMismatch { .. }),
-        ));
+        assert_eq!(
+            storage
+                .stored_state(128, Some(&*finalized_validators))?
+                .map(|state| state.slot()),
+            Some(128),
+        );
 
         Ok(())
     }
