@@ -12,7 +12,7 @@ pub struct StateStorageConfig {
     pub hierarchy: Hierarchy,
     /// Number of states cached in memory for every hierarchy layer, starting
     /// from the shallowest one - the full state snapshot, in the same order
-    /// `hierarchy` exponents are listed in.
+    /// `hierarchy` exponents are listed in. Layers left unlisted are uncached.
     pub cache_sizes: Vec<usize>,
     /// zstd compression level used for state frames and deltas.
     pub compression_level: i32,
@@ -35,17 +35,13 @@ impl StateStorageConfig {
     /// layers are worth caching - they are the ones every deeper read has to walk through.
     #[must_use]
     pub fn default_cache_sizes(depth: usize) -> Vec<usize> {
-        [5, 3, 3]
-            .into_iter()
-            .chain(core::iter::repeat(0))
-            .take(depth)
-            .collect()
+        [5, 3, 3].into_iter().take(depth).collect()
     }
 
     pub fn validate(&self, slots_per_epoch: u64) -> Result<()> {
         ensure!(
-            self.cache_sizes.len() == self.hierarchy.depth(),
-            "number of state cache sizes ({}) must match the number of \
+            self.cache_sizes.len() <= self.hierarchy.depth(),
+            "number of state cache sizes ({}) must not exceed the number of \
             hierarchy layers ({})",
             self.cache_sizes.len(),
             self.hierarchy.depth(),
@@ -101,28 +97,46 @@ mod tests {
     const MAINNET_SLOTS_PER_EPOCH: u64 = 32;
 
     #[test]
-    fn state_storage_config_validates_cache_sizes_against_hierarchy_depth() -> Result<()> {
+    fn state_storage_config_accepts_fewer_cache_sizes_than_hierarchy_layers() -> Result<()> {
         let config = StateStorageConfig::default();
 
-        assert_eq!(config.cache_sizes.len(), config.hierarchy.depth());
+        assert!(config.cache_sizes.len() < config.hierarchy.depth());
         config.validate(MAINNET_SLOTS_PER_EPOCH)?;
 
-        let too_few = StateStorageConfig {
+        let single = StateStorageConfig {
+            cache_sizes: vec![5],
+            ..StateStorageConfig::default()
+        };
+
+        single.validate(MAINNET_SLOTS_PER_EPOCH)?;
+
+        let exactly_as_deep = StateStorageConfig {
+            hierarchy: Hierarchy::new([9, 5]).expect("exponents in tests are valid"),
             cache_sizes: vec![5, 3],
             ..StateStorageConfig::default()
         };
 
-        assert!(too_few.validate(MAINNET_SLOTS_PER_EPOCH).is_err());
+        exactly_as_deep.validate(MAINNET_SLOTS_PER_EPOCH)?;
 
+        Ok(())
+    }
+
+    #[test]
+    fn state_storage_config_rejects_more_cache_sizes_than_hierarchy_layers() {
         let too_many = StateStorageConfig {
             hierarchy: Hierarchy::new([9, 5]).expect("exponents in tests are valid"),
             cache_sizes: vec![5, 3, 3],
             ..StateStorageConfig::default()
         };
 
-        assert!(too_many.validate(MAINNET_SLOTS_PER_EPOCH).is_err());
+        let error = too_many
+            .validate(MAINNET_SLOTS_PER_EPOCH)
+            .expect_err("3 cache sizes do not fit into 2 hierarchy layers");
 
-        Ok(())
+        assert_eq!(
+            error.to_string(),
+            "number of state cache sizes (3) must not exceed the number of hierarchy layers (2)",
+        );
     }
 
     #[test]
@@ -147,13 +161,10 @@ mod tests {
     }
 
     #[test]
-    fn default_cache_sizes_match_any_hierarchy_depth() {
+    fn default_cache_sizes_are_truncated_to_the_hierarchy_depth() {
         assert_eq!(StateStorageConfig::default_cache_sizes(1), vec![5]);
         assert_eq!(StateStorageConfig::default_cache_sizes(3), vec![5, 3, 3]);
-        assert_eq!(
-            StateStorageConfig::default_cache_sizes(5),
-            vec![5, 3, 3, 0, 0],
-        );
+        assert_eq!(StateStorageConfig::default_cache_sizes(5), vec![5, 3, 3]);
     }
 
     #[test]

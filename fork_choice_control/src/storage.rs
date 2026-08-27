@@ -104,6 +104,13 @@ impl<P: Preset> Storage<P> {
             compression_level,
         } = state_storage_config;
 
+        // `FrameCache` needs one entry per layer, but `cache_sizes` may list only the shallowest
+        // ones. The layers left unlisted are uncached.
+        let cache_sizes = cache_sizes
+            .into_iter()
+            .chain(core::iter::repeat(0))
+            .take(hierarchy.depth());
+
         let anchor_slot = Arc::new(AtomicU64::new(GENESIS_SLOT));
 
         let forward_spine = Arc::new(Spine::new(
@@ -3716,6 +3723,60 @@ mod tests {
 
         assert!(storage.frame_cache.get(1, &anchor_root)?.is_none());
         assert!(storage.frame_cache.get(0, &parent_root)?.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn cache_sizes_shorter_than_the_hierarchy_leave_the_deeper_layers_uncached() -> Result<()> {
+        let storage = Storage::<Mainnet>::new(
+            Arc::new(Config::mainnet()),
+            Arc::new(PubkeyCache::default()),
+            Database::in_memory(),
+            StorageMode::default(),
+            StateStorageConfig {
+                cache_sizes: vec![5],
+                ..StateStorageConfig::default()
+            },
+            None,
+        );
+
+        let validator_source = state_with_slot(0);
+        let finalized_validators = validator_source.validators();
+
+        let mut batch = vec![];
+        let mut update_finalized_validators = false;
+
+        let anchor_root = H256::repeat_byte(1);
+        let parent_root = H256::repeat_byte(2);
+
+        storage.append_finalized_states(
+            [
+                (0, anchor_root, state_with_slot(0)),
+                (512, parent_root, state_with_slot(512)),
+            ],
+            0,
+            finalized_validators,
+            &mut batch,
+            &mut update_finalized_validators,
+        )?;
+
+        storage.forward_spine().clear();
+
+        storage
+            .state_with_key_by_block_root(parent_root, Some(finalized_validators))?
+            .expect("the state must be readable through the uncached layer");
+
+        // The single configured size covers layer 0; the layers it does not name are padded with
+        // zeros, which disables caching for them without making them invalid.
+        assert!(storage.frame_cache.get(0, &anchor_root)?.is_some());
+        assert!(storage.frame_cache.get(1, &parent_root)?.is_none());
+        assert!(
+            storage
+                .frame_cache
+                .get(Hierarchy::default().depth() - 1, &parent_root)?
+                .is_none()
+        );
 
         Ok(())
     }

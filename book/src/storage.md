@@ -51,7 +51,7 @@ A database written before this check existed has no stored hierarchy. Grandine a
 
 #### State caches
 
-`--state-cache-sizes` sets how many states are kept in memory per hierarchy layer, so that repeated reads and delta computations do not have to go back to disk. It takes a comma separated list with one value per layer, starting from the shallowest layer — the full state snapshot — which is the reverse of the order `--state-hierarchy` exponents are listed in. The number of values must equal the number of exponents. A size of `0` disables caching for that layer. When the flag is not given, the sizes default to `5,3,3` followed by a `0` for every remaining layer, so changing `--state-hierarchy` alone does not require setting this too.
+`--state-cache-sizes` sets how many states are kept in memory per hierarchy layer, so that repeated reads and delta computations do not have to go back to disk. It takes a comma separated list starting from the shallowest layer — the full state snapshot — in the same order `--state-hierarchy` exponents are listed in. The list may be shorter than the hierarchy; the layers it does not name are not cached. A size of `0` disables caching for that layer too. When the flag is not given, the sizes default to `5,3,3`, so changing `--state-hierarchy` alone does not require setting this too.
 
 Shallow layers hold full or near-full states, so raising their sizes costs considerably more memory per cached entry than raising the deeper ones.
 
@@ -79,7 +79,7 @@ Together they show how much space and CPU each layer costs, which is what `--sta
 ### Relevant command line options
 
 * `--state-hierarchy` - comma separated list of slot exponents defining the state storage layout, deepest layer first (default: `5,9,11,13,16,18,21`);
-* `--state-cache-sizes` - number of states cached in memory per hierarchy layer, shallowest layer first (default: `5,3,3` followed by a `0` for every remaining layer);
+* `--state-cache-sizes` - number of states cached in memory per hierarchy layer, shallowest layer first; may be shorter than the hierarchy (default: `5,3,3`);
 * `--state-compression-level` - zstd compression level for stored states (default: `3`);
 * `--archive-storage` - retains all blocks, blobs and stored states by disabling pruning; mutually exclusive with `--prune-storage` (default: disabled);
 * `--force-reset-beacon-db` - deletes the existing beacon node databases on startup, which is the escape hatch for a `--state-hierarchy` mismatch (default: disabled);

@@ -189,17 +189,21 @@ cache_sizes no longer have to be the same length, as hierarchy exponents. Instea
 padded with zeros, if necessary, relaxing constraint to simply
 `self.cache_sizes.len() <= self.hierarchy.depth()`."*
 
-- [ ] change the `ensure!` in `StateStorageConfig::validate` to `cache_sizes.len() <= hierarchy.depth()`
+- [x] change the `ensure!` in `StateStorageConfig::validate` to `cache_sizes.len() <= hierarchy.depth()`
       with a message naming both counts
-- [ ] pad `cache_sizes` with zeros up to `hierarchy.depth()` where the layers are built, so
+- [x] pad `cache_sizes` with zeros up to `hierarchy.depth()` where the layers are built, so
       `FrameCache::new` still receives one entry per layer
-- [ ] simplify `default_cache_sizes` now that trailing zeros are implied — it can return `[5, 3, 3]`
+- [x] simplify `default_cache_sizes` now that trailing zeros are implied — it can return `[5, 3, 3]`
       truncated to `depth`, without the `repeat(0)` chain
-- [ ] write tests: a shorter-than-depth `cache_sizes` is accepted and pads to depth
-- [ ] write tests: a longer-than-depth `cache_sizes` is rejected with the expected message
-- [ ] write tests: `--state-cache-sizes 5` on the default hierarchy starts successfully
-      (update `state_cache_sizes_must_match_the_hierarchy_depth` in `grandine_args.rs`)
-- [ ] run tests - must pass before next task
+- [x] write tests: a shorter-than-depth `cache_sizes` is accepted and pads to depth
+- [x] write tests: a longer-than-depth `cache_sizes` is rejected with the expected message
+- [x] write tests: `--state-cache-sizes 5` on the default hierarchy starts successfully
+      (update `state_cache_sizes_must_match_the_hierarchy_depth` in `grandine_args.rs`, renamed to
+      `state_cache_sizes_may_be_shorter_than_the_hierarchy_depth` /
+      `state_cache_sizes_must_not_exceed_the_hierarchy_depth`)
+- [x] run tests - must pass before next task
+- ➕ [x] update the `--state-cache-sizes` help text, `book/src/cli_options.md` and
+      `book/src/storage.md` to describe the relaxed constraint
 
 ### Task 5: Replace the `MAX_STATE_CACHE_SIZE` hard error with a memory warning
 

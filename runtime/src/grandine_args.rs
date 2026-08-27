@@ -357,9 +357,9 @@ struct BeaconNodeOptions {
     /// Number of states to keep in memory for every state storage hierarchy
     /// layer, as a comma separated list starting from the shallowest one - the
     /// full state snapshot, in the same order --state-hierarchy exponents are
-    /// listed in. Must contain as many values as there are layers in
-    /// --state-hierarchy
-    /// [default: 5,3,3 followed by a 0 for every remaining layer]
+    /// listed in. May be shorter than --state-hierarchy, in which case the
+    /// remaining layers are not cached
+    /// [default: 5,3,3]
     #[clap(long, num_args = 1.., value_delimiter = ',')]
     state_cache_sizes: Option<Vec<usize>>,
 
@@ -1976,9 +1976,23 @@ mod tests {
     }
 
     #[test]
-    fn state_cache_sizes_must_match_the_hierarchy_depth() {
-        try_config_from_args(["--state-hierarchy", "11,9,5", "--state-cache-sizes", "1,2"])
-            .expect_err("cache sizes must match the hierarchy depth");
+    fn state_cache_sizes_may_be_shorter_than_the_hierarchy_depth() {
+        let config = config_from_args(["--state-cache-sizes", "5"]);
+        let state_storage_config = &config.storage_config.state_storage_config;
+
+        assert!(state_storage_config.cache_sizes.len() < state_storage_config.hierarchy.depth());
+        assert_eq!(state_storage_config.cache_sizes, [5]);
+    }
+
+    #[test]
+    fn state_cache_sizes_must_not_exceed_the_hierarchy_depth() {
+        try_config_from_args([
+            "--state-hierarchy",
+            "11,9,5",
+            "--state-cache-sizes",
+            "1,2,3,4",
+        ])
+        .expect_err("cache sizes must not exceed the hierarchy depth");
     }
 
     #[test]
