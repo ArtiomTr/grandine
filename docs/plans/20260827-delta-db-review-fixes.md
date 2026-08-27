@@ -425,20 +425,20 @@ branch head and compare the `diff`/`apply` groups.
 Review notes: *"remove this feature please"*, *"move these into dev-dependencies"*,
 *"Comparison feature isn't needed - prune it from everywhere"*. The benchmark itself stays.
 
-- [ ] move `eth-state-diff`, `qbsdiff`, `rkyv` and `xdelta3` from `[dependencies]` to
+- [x] move `eth-state-diff`, `qbsdiff`, `rkyv` and `xdelta3` from `[dependencies]` to
       `[dev-dependencies]` in `diff/Cargo.toml`, dropping `optional = true`
-- [ ] keep the one-line per-dependency comments explaining what each one is; delete the paragraph
+- [x] keep the one-line per-dependency comments explaining what each one is; delete the paragraph
       about optionality and the C toolchain
-- [ ] delete the `[features]` section and the `required-features = ['comparison']` line from the
+- [x] delete the `[features]` section and the `required-features = ['comparison']` line from the
       `comparison` bench target
-- [ ] delete the `#[cfg(feature = "comparison")]` re-exports and their comment in `diff/src/lib.rs`,
+- [x] delete the `#[cfg(feature = "comparison")]` re-exports and their comment in `diff/src/lib.rs`,
       moving whatever `diff/benches/comparison.rs` needs into the bench itself
-- [ ] update the benchmark section of `CLAUDE.md`: `cargo bench -p diff --bench comparison` no
+- [x] update the benchmark section of `CLAUDE.md`: `cargo bench -p diff --bench comparison` no
       longer needs `--features comparison`, and the C toolchain is now needed for any
       `diff` dev-dependency build
-- [ ] run `cargo bench -p diff --bench comparison --no-run` and `cargo test -p diff -p bls --features bls/blst`
+- [x] run `cargo bench -p diff --bench comparison --no-run` and `cargo test -p diff -p bls --features bls/blst`
       to confirm both still build
-- [ ] run tests - must pass before next task
+- [x] run tests - must pass before next task
 
 ### Task 13: Narrow `diff::list::Unlimited` to `pub(crate)`
 

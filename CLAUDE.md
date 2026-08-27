@@ -32,14 +32,14 @@ REMOTE_URL='http://<node>:5052/eth/v2/debug/beacon/states/{slot}' \
 
 Downloaded states are cached in `diff/benches/assets` (gitignored) and reused.
 The `comparison` bench measures our encoder against third-party ones
-(`eth-state-diff`, `qbsdiff` and `xdelta3`, declared only in `diff/Cargo.toml`).
-They sit behind the `comparison` feature, so that bench needs it:
+(`eth-state-diff`, `qbsdiff` and `xdelta3`, declared only in `diff/Cargo.toml`):
 
 ```
-REMOTE_URL='...' cargo bench -p diff --features comparison --bench comparison
+REMOTE_URL='...' cargo bench -p diff --bench comparison
 ```
 
-`xdelta3` is built from source, so a C toolchain is needed for that feature.
+`xdelta3` is built from source, so a C toolchain is needed to build any `diff`
+dev-dependency, including its tests and benches.
 
 ## Code style
 
