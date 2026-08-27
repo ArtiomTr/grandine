@@ -16,4 +16,4 @@ pub use validators::ValidatorListPatch;
 pub use vector::VectorPatch;
 
 /// A large value, used as "unlimited" value for containers.
-pub type Unlimited = U10000000000000000000;
+pub(crate) type Unlimited = U10000000000000000000;

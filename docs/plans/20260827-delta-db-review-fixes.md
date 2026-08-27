@@ -444,11 +444,11 @@ Review notes: *"remove this feature please"*, *"move these into dev-dependencies
 
 Review note: *"this should be pub(crate) instead - not published to everything."*
 
-- [ ] change `pub type Unlimited` to `pub(crate) type Unlimited` in `diff/src/list.rs`
-- [ ] check whether `Unlimited` appears in any public signature (`grep -rn "Unlimited" diff/`);
-      if it does, keep those types private too or note the blocker here with a ⚠️
-- [ ] run `cargo test -p diff -p bls --features bls/blst` to confirm the crate still builds
-- [ ] run tests - must pass before next task
+- [x] change `pub type Unlimited` to `pub(crate) type Unlimited` in `diff/src/list.rs`
+- [x] check whether `Unlimited` appears in any public signature (`grep -rn "Unlimited" diff/`);
+      all uses are private struct fields and `pub(crate)` fns inside the crate, so nothing leaked
+- [x] run `cargo test -p diff -p bls --features bls/blst` to confirm the crate still builds
+- [x] run tests - must pass before next task
 
 ### Task 14: Delete the over-explanatory doc comments
 
