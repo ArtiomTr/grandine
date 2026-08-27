@@ -274,13 +274,21 @@ initialized store and asserts the hierarchy `load` recorded is still there.
 Review note: *"That is absolutely idiotic explanation for a user - user don't care about it.
 No need to emit warning at all."*
 
-- [ ] delete the `stored_hierarchy_anchor.is_some_and(...)` warning block in `Storage::load`
-- [ ] drop the `warn_with_peers` import if nothing else in the file uses it
-- [ ] trim the matching paragraph in `book/src/storage.md` so it no longer promises a warning
+- [x] delete the `stored_hierarchy_anchor.is_some_and(...)` warning block in `Storage::load`
+- [x] drop the `warn_with_peers` import if nothing else in the file uses it (kept - six other call
+      sites in `storage.rs` still use it; `stored_hierarchy_anchor` was inlined into the `if let`
+      instead, since the warning was its only other use)
+- [x] trim the matching paragraph in `book/src/storage.md` so it no longer promises a warning
       (the behaviour it describes — old-anchor states stay readable until pruning reaches them —
       is still true and worth keeping)
-- [ ] write tests: loading over a database with a different anchor still succeeds
-- [ ] run tests - must pass before next task
+- [x] write tests: loading over a database with a different anchor still succeeds
+- [x] run tests - must pass before next task
+
+The warning only fired on the `loaded_from_remote` path, which needs a live checkpoint-sync
+server and has no mock infrastructure in this crate. `loading_over_a_database_with_a_different_anchor_succeeds`
+covers the reachable half: it loads an anchor at slot 2048 over a database that recorded anchor
+slot 0, asserts the load succeeds, that the recorded anchor still describes the states written
+under it, and that the new anchor state is stored.
 
 ### Task 9: Replace `ArchivalPermits` with a managed archival thread pool
 

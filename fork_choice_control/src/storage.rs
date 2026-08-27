@@ -315,9 +315,7 @@ impl<P: Preset> Storage<P> {
 
         let mut delete_batch = Vec::new();
 
-        let stored_hierarchy_anchor = self.get::<Slot>(StateAnchorKey)?;
-
-        if !loaded_from_remote && let Some(hierarchy_anchor) = stored_hierarchy_anchor {
+        if !loaded_from_remote && let Some(hierarchy_anchor) = self.get::<Slot>(StateAnchorKey)? {
             self.anchor_slot.store(hierarchy_anchor, Ordering::SeqCst);
 
             let mut update_finalized_validators = false;
@@ -336,16 +334,6 @@ impl<P: Preset> Storage<P> {
                 delete_batch.push(to_delete);
             }
         } else {
-            if stored_hierarchy_anchor.is_some_and(|stored| stored != anchor_slot) {
-                warn_with_peers!(
-                    "state hierarchy anchor changed; states stored relative to \
-                    the old anchor are kept as they are - they stay readable \
-                    until pruning reaches them, and a state whose delta parent \
-                    has been pruned is served by replaying blocks from an \
-                    older one instead"
-                );
-            }
-
             batch.push(serialize(StateAnchorKey, anchor_slot)?);
 
             self.anchor_slot.store(anchor_slot, Ordering::SeqCst);
@@ -2437,6 +2425,36 @@ mod tests {
                 .exponents(),
             [11, 9, 5],
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn loading_over_a_database_with_a_different_anchor_succeeds() -> Result<()> {
+        let directory = TempDir::new()?;
+
+        {
+            let storage = storage_with_hierarchy(&directory, [11, 9, 5])?;
+            load_anchor(&storage, state_with_slot(0))?;
+        }
+
+        let storage = storage_with_hierarchy(&directory, [11, 9, 5])?;
+        let block = Arc::new(block_with_slot(2048));
+        let block_root = block.message().hash_tree_root();
+
+        futures::executor::block_on(storage.load(
+            &Client::new(),
+            StateLoadStrategy::Anchor {
+                block,
+                state: state_with_slot(2048),
+            },
+        ))?;
+
+        // States written under the old anchor stay where they are, so the recorded
+        // anchor keeps describing them.
+        assert_eq!(storage.get::<Slot>(StateAnchorKey)?, Some(0));
+
+        assert!(storage.state_key_by_block_root(block_root)?.is_some());
 
         Ok(())
     }
