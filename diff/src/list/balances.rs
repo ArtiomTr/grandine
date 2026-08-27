@@ -27,30 +27,27 @@ pub struct BalancesPatch {
 }
 
 impl BalancesPatch {
-    /// Finds the most common balance increase between `base` and `changed`.
-    ///
-    /// Balances that did not change are excluded, as they are not stored in the patch at all.
-    /// Decreases are excluded too, because the mode is encoded as a [`Gwei`],
-    /// which leaves no room for a sign.
-    ///
-    /// Returns 0 if no balance increased, which makes the deltas plain differences.
-    fn estimate_mode<C: SszList<Gwei> + ?Sized>(base: &C, changed: &C) -> Gwei {
+    fn estimate_mode<C: SszList<Gwei> + ?Sized>(base: &C, changed: &C) -> Result<Gwei, Error> {
         let mut counts = HashMap::new();
 
         for (&before, &after) in base.iter().zip(changed.iter()) {
-            let Some(increase) = after.checked_sub(before).filter(|delta| *delta != 0) else {
+            if before == after || after == 0 {
                 continue;
-            };
+            }
 
-            let count = counts.entry(increase).or_insert(0_usize);
+            let after = i64::try_from(after).map_err(|_| Error::InvalidBalanceDelta)?;
+            let before = i64::try_from(before).map_err(|_| Error::InvalidBalanceDelta)?;
+            let delta = after.checked_sub(before).ok_or(Error::InvalidBalanceDelta)?;
+
+            let count = counts.entry(zigzag(delta)).or_insert(0_usize);
             *count = count.saturating_add(1);
         }
 
-        counts
+        Ok(counts
             .into_iter()
-            // Ties are broken by the smaller increase to keep diffs deterministic.
-            .max_by_key(|&(increase, count)| (count, Reverse(increase)))
-            .map_or(0, |(increase, _)| increase)
+            // Ties are broken by the smaller zigzagged delta to keep diffs deterministic.
+            .max_by_key(|&(delta, count)| (count, Reverse(delta)))
+            .map_or(0, |(delta, _)| delta))
     }
 }
 
@@ -61,8 +58,8 @@ impl<C: SszListMut<Gwei> + ?Sized> Patch<C> for BalancesPatch {
         }
 
         let mut positions = PositionSet::builder(base.len_usize());
-        let mode = Self::estimate_mode(base, changed);
-        let mode = i64::try_from(mode).map_err(|_| Error::InvalidBalanceDelta)?;
+        let mode = Self::estimate_mode(base, changed)?;
+        let mode_delta = unzigzag(mode);
 
         let mut buffer = unsigned_varint::encode::u64_buffer();
         let mut deltas = Vec::new();
@@ -81,7 +78,7 @@ impl<C: SszListMut<Gwei> + ?Sized> Patch<C> for BalancesPatch {
                 let delta = after
                     .checked_sub(before)
                     .ok_or(Error::InvalidBalanceDelta)?
-                    .checked_sub(mode)
+                    .checked_sub(mode_delta)
                     .ok_or(Error::InvalidBalanceDelta)?;
 
                 zigzag(delta)
@@ -93,8 +90,6 @@ impl<C: SszListMut<Gwei> + ?Sized> Patch<C> for BalancesPatch {
 
             positions.record(index);
         }
-
-        let mode = u64::try_from(mode).expect("mode should be conversible back into u64");
 
         Ok(Self {
             base_len: u32::try_from(base.len_usize()).map_err(|_| Error::PatchListLimitExceeded)?,
@@ -120,7 +115,7 @@ impl<C: SszListMut<Gwei> + ?Sized> Patch<C> for BalancesPatch {
             return Err(Error::PatchBaseLengthMismatch);
         }
 
-        let mode = i64::try_from(mode).map_err(|_| Error::InvalidPatchEncoding)?;
+        let mode = unzigzag(mode);
         let mut deltas = deltas.as_bytes();
 
         positions.apply(base, |balance| {
@@ -234,5 +229,102 @@ mod tests {
             .expect_err("the patch was diffed against a twenty-balance list");
 
         assert!(matches!(error, Error::PatchBaseLengthMismatch));
+    }
+
+    #[test]
+    fn a_uniform_decrease_is_picked_as_the_mode() {
+        type List = PersistentList<Gwei, U64>;
+
+        let base = List::try_from_iter((0..20).map(|index| 32_000_000_000 + index))
+            .expect("length is below the maximum");
+
+        let changed = List::try_from_iter((0..20).map(|index| 31_999_900_000 + index))
+            .expect("length is below the maximum");
+
+        let patch = BalancesPatch::diff(PatchConfig::default(), &base, &changed)
+            .expect("balances patch should represent the change");
+
+        assert_eq!(patch.mode, zigzag(-100_000));
+
+        // Every balance moved by the mode, so every delta encodes as the single byte 1.
+        assert_eq!(patch.deltas.as_bytes(), [1; 20]);
+
+        let mut applied = base.clone();
+        patch.apply(&mut applied).expect("patch should apply");
+
+        assert_eq!(applied, changed);
+    }
+
+    #[test]
+    fn zeroed_balances_do_not_contribute_to_the_mode() {
+        type List = PersistentList<Gwei, U64>;
+
+        let base = List::try_from_iter([10, 10, 10, 40]).expect("length is below the maximum");
+        let changed = List::try_from_iter([0, 0, 0, 47]).expect("length is below the maximum");
+
+        let patch = BalancesPatch::diff(PatchConfig::default(), &base, &changed)
+            .expect("balances patch should represent the change");
+
+        // The -10 of the three zeroings is the most repeated delta, but zeroings are skipped,
+        // which leaves the lone +7.
+        assert_eq!(patch.mode, zigzag(7));
+
+        // The zeroings encode as the set-to-zero opcode, the increase as the mode itself.
+        assert_eq!(patch.deltas.as_bytes(), [0, 0, 0, 1]);
+
+        let mut applied = base.clone();
+        patch.apply(&mut applied).expect("patch should apply");
+
+        assert_eq!(applied, changed);
+    }
+
+    #[test]
+    fn round_trips_mixed_increases_and_decreases() {
+        type List = PersistentList<Gwei, U64>;
+
+        let base = List::try_from_iter((0..20).map(|index| 32_000_000_000 + index * 1_000))
+            .expect("length is below the maximum");
+
+        let changed = List::try_from_iter((0..20).map(|index| {
+            if index % 2 == 0 {
+                32_000_000_000 + index * 1_000 + 500
+            } else {
+                32_000_000_000 + index * 1_000 - 700
+            }
+        }))
+        .expect("length is below the maximum");
+
+        let patch = BalancesPatch::diff(PatchConfig::default(), &base, &changed)
+            .expect("balances patch should represent the change");
+
+        let mut applied = base.clone();
+        patch.apply(&mut applied).expect("patch should apply");
+
+        assert_eq!(applied, changed);
+    }
+
+    #[test]
+    fn round_trips_a_base_shorter_than_the_changed_list() {
+        type List = PersistentList<Gwei, U64>;
+
+        let base = List::try_from_iter((0..10).map(|index| 32_000_000_000 + index))
+            .expect("length is below the maximum");
+
+        let changed = List::try_from_iter(
+            (0..10)
+                .map(|index| 31_999_000_000 + index)
+                .chain((0..4).map(|index| 32_000_000_000 + index)),
+        )
+        .expect("length is below the maximum");
+
+        let patch = BalancesPatch::diff(PatchConfig::default(), &base, &changed)
+            .expect("balances patch should represent the change");
+
+        assert_eq!(patch.mode, zigzag(-1_000_000));
+
+        let mut applied = base.clone();
+        patch.apply(&mut applied).expect("patch should apply");
+
+        assert_eq!(applied, changed);
     }
 }

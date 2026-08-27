@@ -332,21 +332,21 @@ cases where balances don't change, or after == 0 (set to zero operation); for al
 balances, compute delta, and zigzag encode it; choose the most repeated value. When applying
 mode, it should be zigzag decoded."*
 
-- [ ] rewrite `BalancesPatch::estimate_mode` in `diff/src/list/balances.rs`: skip unchanged
+- [x] rewrite `BalancesPatch::estimate_mode` in `diff/src/list/balances.rs`: skip unchanged
       balances and skip `after == 0`, compute the signed `after - before` delta for the rest,
       zigzag-encode it, and return the most repeated zigzagged value
-- [ ] store the mode zigzag-encoded in the `mode: Gwei` field and unzigzag it in both `diff` and
+- [x] store the mode zigzag-encoded in the `mode: Gwei` field and unzigzag it in both `diff` and
       `apply`, so decreases can be the mode
-- [ ] delete the `estimate_mode` doc comment — the review asks for it to go, and it documents
+- [x] delete the `estimate_mode` doc comment — the review asks for it to go, and it documents
       the assumption being removed
-- [ ] keep the deterministic tie-break, restated in terms of the zigzagged value
-- [ ] write tests: a uniform *decrease* across balances is picked as the mode and encodes to
+- [x] keep the deterministic tie-break, restated in terms of the zigzagged value
+- [x] write tests: a uniform *decrease* across balances is picked as the mode and encodes to
       minimal deltas (this is the case the old algorithm missed entirely)
-- [ ] write tests: `after == 0` entries never contribute to the mode and still round-trip as the
+- [x] write tests: `after == 0` entries never contribute to the mode and still round-trip as the
       set-to-zero opcode
-- [ ] write tests: diff/apply round-trips for mixed increases and decreases, and for a base
+- [x] write tests: diff/apply round-trips for mixed increases and decreases, and for a base
       shorter than the changed list
-- [ ] run tests - must pass before next task
+- [x] run tests - must pass before next task
 
 ### Task 11: Measure the balance-mode fix and the `pending_consolidations` patch choice
 
