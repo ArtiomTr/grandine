@@ -1,7 +1,7 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use anyhow::{Error as AnyhowError, Result, bail};
+use anyhow::{Error as AnyhowError, Result, bail, ensure};
 use database::Database;
 use genesis::AnchorCheckpointProvider;
 use logging::{debug_with_peers, info_with_peers, warn_with_peers};
@@ -20,9 +20,10 @@ use types::{
 
 use crate::{
     Storage,
+    hierarchy::Hierarchy,
     storage::{
         ARCHIVED_STATES_BEFORE_FLUSH, BlockRootBySlot, Error, FinalizedBlockByRoot,
-        SlotByStateRoot, get, serialize,
+        SlotByStateRoot, StateHierarchyKey, get, save, serialize,
     },
 };
 
@@ -38,7 +39,17 @@ impl<P: Preset> Storage<P> {
         is_exiting: &Arc<AtomicBool>,
         finalized_validators: &dyn SszValidatorList,
     ) -> Result<()> {
-        self.verify_or_record_hierarchy()?;
+        if let Some(stored) = get::<Hierarchy>(&self.database, StateHierarchyKey)? {
+            ensure!(
+                stored.exponents() == self.hierarchy.exponents(),
+                Error::StateHierarchyMismatch {
+                    stored: stored.to_string(),
+                    configured: self.hierarchy.to_string(),
+                },
+            );
+        } else {
+            save(&self.database, StateHierarchyKey, &self.hierarchy)?;
+        }
 
         let WithOrigin { value, origin } = anchor_checkpoint_provider.checkpoint();
 

@@ -171,42 +171,6 @@ impl<P: Preset> Storage<P> {
         self.storage_mode.is_prune()
     }
 
-    /// Record the configured state hierarchy in a database that names none, or
-    /// verify that it matches the one already recorded.
-    ///
-    /// A mismatch is fatal rather than a warning: pruning derives its retention
-    /// set from the configured layout, so running against chains written under a
-    /// different one deletes frames those chains depend on.
-    pub(crate) fn verify_or_record_hierarchy(&self) -> Result<()> {
-        let Some(stored) = self.get::<Hierarchy>(StateHierarchyKey)? else {
-            // A database written before the hierarchy was recorded names none,
-            // so the configured layout is adopted without being verifiable
-            // against the chains already on disk.
-            if self.get::<Slot>(StateAnchorKey)?.is_some() {
-                warn_with_peers!(
-                    "database predates state hierarchy recording; \
-                     adopting the configured hierarchy {}; \
-                     if the database was written with a different one, pruning will \
-                     delete states that other states are delta-encoded against - \
-                     re-sync with --force-reset-beacon-db if unsure",
-                    self.hierarchy,
-                );
-            }
-
-            return save(&self.database, StateHierarchyKey, &self.hierarchy);
-        };
-
-        ensure!(
-            stored.exponents() == self.hierarchy.exponents(),
-            Error::StateHierarchyMismatch {
-                stored: stored.to_string(),
-                configured: self.hierarchy.to_string(),
-            },
-        );
-
-        Ok(())
-    }
-
     #[expect(clippy::too_many_lines)]
     #[expect(clippy::cast_precision_loss)]
     pub async fn load(
@@ -214,7 +178,19 @@ impl<P: Preset> Storage<P> {
         client: &Client,
         state_load_strategy: StateLoadStrategy<P>,
     ) -> Result<(StateStorage<'_, P>, bool)> {
-        self.verify_or_record_hierarchy()?;
+        // A mismatch is fatal rather than a warning: pruning derives its retention set from the
+        // configured layout, so running against chains written under a different one deletes
+        // frames those chains depend on.
+        match self.get::<Hierarchy>(StateHierarchyKey)? {
+            Some(stored) => ensure!(
+                stored.exponents() == self.hierarchy.exponents(),
+                Error::StateHierarchyMismatch {
+                    stored: stored.to_string(),
+                    configured: self.hierarchy.to_string(),
+                },
+            ),
+            None => save(&self.database, StateHierarchyKey, &self.hierarchy)?,
+        }
 
         let anchor_block;
         let anchor_state;
@@ -2406,8 +2382,20 @@ mod tests {
         ))
     }
 
+    fn load_anchor(storage: &Storage<Mainnet>, state: Arc<BeaconState<Mainnet>>) -> Result<()> {
+        futures::executor::block_on(storage.load(
+            &Client::new(),
+            StateLoadStrategy::Anchor {
+                block: Arc::new(block_with_slot(state.slot())),
+                state,
+            },
+        ))?;
+
+        Ok(())
+    }
+
     #[test]
-    fn hierarchy_check_records_the_configured_hierarchy_in_a_fresh_database() -> Result<()> {
+    fn loading_records_the_configured_hierarchy_in_a_fresh_database() -> Result<()> {
         let directory = TempDir::new()?;
         let storage = storage_with_hierarchy(&directory, [11, 9, 5])?;
 
@@ -2418,7 +2406,7 @@ mod tests {
             None,
         );
 
-        storage.verify_or_record_hierarchy()?;
+        load_anchor(&storage, state_with_slot(0))?;
 
         let stored = storage
             .get::<Hierarchy>(StateHierarchyKey)?
@@ -2430,14 +2418,14 @@ mod tests {
     }
 
     #[test]
-    fn hierarchy_check_accepts_a_matching_hierarchy_repeatedly() -> Result<()> {
+    fn loading_accepts_a_matching_hierarchy_repeatedly() -> Result<()> {
         let directory = TempDir::new()?;
 
         // LMDB refuses a second concurrent open of the same environment, so
         // every reopen has to outlive the previous one.
         for _ in 0..3 {
             let storage = storage_with_hierarchy(&directory, [11, 9, 5])?;
-            storage.verify_or_record_hierarchy()?;
+            load_anchor(&storage, state_with_slot(0))?;
         }
 
         let storage = storage_with_hierarchy(&directory, [11, 9, 5])?;
@@ -2454,18 +2442,17 @@ mod tests {
     }
 
     #[test]
-    fn hierarchy_check_rejects_a_mismatched_hierarchy() -> Result<()> {
+    fn loading_rejects_a_mismatched_hierarchy() -> Result<()> {
         let directory = TempDir::new()?;
 
         {
             let storage = storage_with_hierarchy(&directory, [11, 9, 5])?;
-            storage.verify_or_record_hierarchy()?;
+            load_anchor(&storage, state_with_slot(0))?;
         }
 
         let storage = storage_with_hierarchy(&directory, [13, 9, 5])?;
 
-        let error = storage
-            .verify_or_record_hierarchy()
+        let error = load_anchor(&storage, state_with_slot(0))
             .expect_err("a mismatched hierarchy must be rejected");
 
         assert_eq!(

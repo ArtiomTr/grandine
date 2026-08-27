@@ -229,18 +229,21 @@ directly"* and *"It is not possible to have StateAnchorKey but not StateHierarch
 POINT IN TIME, THERE WAS A DELTA DATABASE WITHOUT HIERARCHY KEY WRITTEN. THIS MEANS WE DON'T
 NEED TO HANDLE THIS CASE."*
 
-- [ ] delete the `StateAnchorKey`-present branch and its `warn_with_peers!` entirely: a database
+- [x] delete the `StateAnchorKey`-present branch and its `warn_with_peers!` entirely: a database
       with no `StateHierarchyKey` simply records the configured hierarchy
-- [ ] inline the remaining record-or-verify logic into `Storage::load` and delete
+- [x] inline the remaining record-or-verify logic into `Storage::load` and delete
       `verify_or_record_hierarchy`
-- [ ] delete the method's doc comment (*"Record the configured state hierarchy in a database that
+- [x] delete the method's doc comment (*"Record the configured state hierarchy in a database that
       names none, or verify that it matches..."*)
-- [ ] keep the mismatch `ensure!` fatal, with the message that names both hierarchies and
+- [x] keep the mismatch `ensure!` fatal, with the message that names both hierarchies and
       `--force-reset-beacon-db`
-- [ ] update the `verify_or_record_hierarchy` tests in `storage.rs` to drive `load` instead
-- [ ] write tests: a fresh database records the configured hierarchy on load
-- [ ] write tests: a database with a different stored hierarchy fails to load with the mismatch error
-- [ ] run tests - must pass before next task
+- [x] update the `verify_or_record_hierarchy` tests in `storage.rs` to drive `load` instead
+- [x] write tests: a fresh database records the configured hierarchy on load
+- [x] write tests: a database with a different stored hierarchy fails to load with the mismatch error
+- [x] run tests - must pass before next task
+
+➕ `archive_back_sync_states` kept the record-or-verify logic inline (duplicated from `load`) so
+Task 6 stays behaviour-preserving there; Task 7 deletes it.
 
 ### Task 7: Drop the hierarchy check from `archive_back_sync_states`
 
