@@ -1589,12 +1589,12 @@ impl<P: Preset> Storage<P> {
                     continue;
                 };
 
-                if let Some(state) = self.state_by_block_root(block_root, finalized_validators)? {
-                    if !epoch_start_only || misc::is_epoch_start::<P>(state.slot()) {
-                        let blocks = self.blocks_by_roots(block_roots);
+                if let Some(state) = self.state_by_block_root(block_root, finalized_validators)?
+                    && (!epoch_start_only || misc::is_epoch_start::<P>(state.slot()))
+                {
+                    let blocks = self.blocks_by_roots(block_roots);
 
-                        return Ok(OptionalStateStorage::Full((state, block, blocks)));
-                    }
+                    return Ok(OptionalStateStorage::Full((state, block, blocks)));
                 }
             }
 
@@ -3837,6 +3837,56 @@ mod tests {
                 .get(Hierarchy::default().depth() - 1, &parent_root)?
                 .is_none()
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn an_empty_cache_sizes_list_leaves_every_layer_uncached() -> Result<()> {
+        let storage = Storage::<Mainnet>::new(
+            Arc::new(Config::mainnet()),
+            Arc::new(PubkeyCache::default()),
+            Database::in_memory(),
+            StorageMode::default(),
+            StateStorageConfig {
+                cache_sizes: vec![],
+                ..StateStorageConfig::default()
+            },
+            None,
+        );
+
+        let validator_source = state_with_slot(0);
+        let finalized_validators = validator_source.validators();
+
+        let mut batch = vec![];
+        let mut update_finalized_validators = false;
+
+        let anchor_root = H256::repeat_byte(1);
+        let parent_root = H256::repeat_byte(2);
+
+        storage.append_finalized_states(
+            [
+                (0, anchor_root, state_with_slot(0)),
+                (512, parent_root, state_with_slot(512)),
+            ],
+            0,
+            finalized_validators,
+            &mut batch,
+            &mut update_finalized_validators,
+        )?;
+
+        storage.forward_spine().clear();
+
+        let (_, state) = storage
+            .state_with_key_by_block_root(parent_root, Some(finalized_validators))?
+            .expect("the state must be readable with every layer uncached");
+
+        assert_eq!(state.slot(), 512);
+
+        for layer in 0..Hierarchy::default().depth() {
+            assert!(storage.frame_cache.get(layer, &anchor_root)?.is_none());
+            assert!(storage.frame_cache.get(layer, &parent_root)?.is_none());
+        }
 
         Ok(())
     }

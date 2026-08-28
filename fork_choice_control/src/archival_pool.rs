@@ -190,7 +190,7 @@ mod tests {
     }
 
     #[test]
-    fn work_submitted_from_several_threads_is_not_dropped() -> Result<()> {
+    fn work_submitted_from_several_threads_is_not_dropped() {
         const SUBMITTERS: usize = 8;
         const TASKS_PER_SUBMITTER: usize = 32;
 
@@ -232,8 +232,6 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(completed, expected);
-
-        Ok(())
     }
 
     #[test]

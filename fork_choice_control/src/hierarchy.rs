@@ -802,14 +802,13 @@ mod tests {
         let tz = u8::try_from(slot.trailing_zeros()).expect("trailing zero count must fit in u8");
 
         let parent_exponent = match ascending.iter().rposition(|&e| e <= tz) {
-            Some(index) if index + 1 < ascending.len() => ascending[index + 1],
-            Some(_) => return None,
+            Some(index) => *ascending.get(index.saturating_add(1))?,
             None => ascending[0],
         };
 
         let step = 1u64 << parent_exponent;
 
-        Some((slot - 1) & !(step - 1))
+        Some(slot.saturating_sub(1) & !step.saturating_sub(1))
     }
 
     fn reference_is_leaf(ascending: &[u8], slot: Slot) -> bool {

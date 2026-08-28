@@ -364,7 +364,7 @@ Requires `REMOTE_URL` pointing at an archival beacon node — see Post-Completio
       *Real-state benchmarks (deferred)* below.
 - [x] run `cargo bench -p diff --bench comparison` against `eth-state-diff`, `qbsdiff` and
       `xdelta3` and record the table — ⚠️ **not runnable here**, same reason. The target builds
-      (`cargo bench -p diff -p bls --features bls/blst,comparison --bench comparison --no-run`).
+      (`cargo bench -p diff -p bls --features bls/blst --bench comparison --no-run`).
 - [x] swap `pending_consolidations` in `diff/src/beacon_state/electra.rs` from
       `Compressed<PositionalPatch<PendingConsolidation>>` to `Compressed<QueuePatch<...>>` and
       benchmark both variants on real states — swapped; benchmarked on synthetic queue
@@ -414,7 +414,7 @@ archival node and reported to the reviewer:
 ```
 REMOTE_URL='http://<node>:5052/eth/v2/debug/beacon/states/{slot}' \
     cargo bench -p diff -p bls --features bls/blst --bench beacon_state
-REMOTE_URL='...' cargo bench -p diff -p bls --features bls/blst,comparison --bench comparison
+REMOTE_URL='...' cargo bench -p diff -p bls --features bls/blst --bench comparison
 ```
 
 For the balance-mode before/after, run the first command on `386d79b4~1` and on the current
@@ -499,13 +499,44 @@ This is the largest correctness change; it lands last because it touches the rea
 
 ### Task 16: Verify acceptance criteria
 
-- [ ] verify every review note in the Overview has a corresponding landed change
-- [ ] verify edge cases are handled (one-layer hierarchy, sub-epoch deepest exponent, empty
-      `cache_sizes`, mid-epoch anchor)
-- [ ] run the full test suite: `make test` with limited parallelism
-- [ ] run `cargo clippy --workspace --all-targets` - all issues must be fixed
-- [ ] run `cargo fmt --check`
-- [ ] verify test coverage of the changed modules meets the project standard
+- [x] verify every review note in the Overview has a corresponding landed change — groups 1-3 all
+      land: `estimate_mode` skips unchanged and zeroed entries and stores a zigzagged mode,
+      `validate` bounds `cache_sizes` with `<=` and no longer requires an epoch-aligned deepest
+      interval, `Hierarchy::default` is `[21, 18, 16, 13, 11, 9, 5]`, `ArchivalPermits` is gone in
+      favour of `ArchivalPool`, `Hierarchy` implements `SszRead`/`SszWrite`, `StateStorageConfig`
+      has its own module, and `MAX_STATE_CACHE_SIZE`, `verify_or_record_hierarchy`, the
+      `StateAnchorKey` migration branch, the anchor-change warning, the back-sync hierarchy check,
+      the `comparison` feature and the `TODO(delta-db)` are all deleted. Group 4 (docs) is Task 17.
+- [x] verify edge cases are handled (one-layer hierarchy, sub-epoch deepest exponent, empty
+      `cache_sizes`, mid-epoch anchor) — covered by `is_leaf_is_always_false_in_a_one_level_hierarchy`
+      and the `vec![5]`/`vec![63, 0]` SSZ round-trips in `hierarchy.rs`,
+      `state_storage_config_accepts_a_sub_epoch_deepest_layer` and
+      `state_hierarchy_accepts_a_sub_epoch_deepest_layer`,
+      `an_empty_cache_sizes_list_leaves_every_layer_uncached`, and
+      `a_mid_epoch_hierarchy_state_is_readable_but_is_never_picked_as_an_anchor`
+- [x] run the full test suite: `make test` with limited parallelism — ran
+      `cargo test --release --features default-networks,stub-grandine-version` over the `make test`
+      package set with `-j 8 -- --test-threads=8 --no-fail-fast`: **70812 passed, 2 failed**. Both
+      failures are pre-existing and were reproduced with identical output at `e49e73cf` (the
+      pre-review-fix tip):
+      `fulu_minimal_compliance_shuffling_..._shuffling_test_2_287695503_6` panics at
+      `helpers.rs:934` with the same `0x14e7838c…` / `0x878591d2…` pair, and
+      `minimal_rapid_upgrade_all_keys_..._built_in_validator` fails on the same request
+      (`281-take-messages-slot-41-propose`) with the same six differing JSON atom paths.
+      The `ssz` package is excluded because its test target cannot compile here: `spec_tests.rs`
+      still globs `consensus-spec-tests/tests/general/*/ssz_generic/…`, but `af604648` (which
+      predates this plan's range) moved those vectors to `ssz-spec-tests/fixtures/ssz`. Repointing
+      353 globs is out of scope for these review fixes.
+- [x] run `cargo clippy --workspace --all-targets` - all issues must be fixed — clean. The literal
+      command cannot run: the root lint table trips `clippy::lint_groups_priority` on the pinned
+      toolchain, which is why CI uses `scripts/ci/clippy.bash` (it already passes
+      `--allow clippy::lint_groups_priority`). Ran that script with `--deny warnings` over every
+      package but `ssz`; the only warnings emitted come from the third-party `bls-blst` crate.
+- [x] run `cargo fmt --check` — clean
+- [x] verify test coverage of the changed modules meets the project standard — every changed module
+      carries unit tests: `hierarchy.rs` 27, `storage.rs` 33, `state_storage_config.rs` 8,
+      `balances.rs` 6, `archival_pool.rs` 4, `electra.rs` 2, `storage_back_sync.rs` 2, and
+      `grandine_args.rs` 87
 
 ### Task 17: [Final] Update documentation
 

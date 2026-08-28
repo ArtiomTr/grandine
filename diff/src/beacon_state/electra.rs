@@ -168,7 +168,7 @@ mod tests {
         PendingConsolidations::try_from_iter(source_indices.into_iter().map(|source_index| {
             PendingConsolidation {
                 source_index,
-                target_index: source_index + 1,
+                target_index: source_index.saturating_add(1),
             }
         }))
         .expect("length is below the maximum")
@@ -176,9 +176,10 @@ mod tests {
 
     #[test]
     fn pending_consolidations_round_trip_through_a_queue_shift() {
-        let mut base = ElectraBeaconState::<Minimal>::default();
-
-        base.pending_consolidations = consolidations(0..8);
+        let base = ElectraBeaconState::<Minimal> {
+            pending_consolidations: consolidations(0..8),
+            ..ElectraBeaconState::default()
+        };
 
         let mut changed = base.clone();
 
@@ -207,9 +208,10 @@ mod tests {
 
     #[test]
     fn pending_consolidations_round_trip_when_the_queue_drains_and_refills() {
-        let mut base = ElectraBeaconState::<Minimal>::default();
-
-        base.pending_consolidations = consolidations(0..4);
+        let base = ElectraBeaconState::<Minimal> {
+            pending_consolidations: consolidations(0..4),
+            ..ElectraBeaconState::default()
+        };
 
         for changed_queue in [
             consolidations(0..0),

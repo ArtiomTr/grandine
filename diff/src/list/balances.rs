@@ -247,7 +247,7 @@ mod tests {
         // Every balance moved by the mode, so every delta encodes as the single byte 1.
         assert_eq!(patch.deltas.as_bytes(), [1; 20]);
 
-        let mut applied = base.clone();
+        let mut applied = base;
         patch.apply(&mut applied).expect("patch should apply");
 
         assert_eq!(applied, changed);
@@ -270,7 +270,7 @@ mod tests {
         // The zeroings encode as the set-to-zero opcode, the increase as the mode itself.
         assert_eq!(patch.deltas.as_bytes(), [0, 0, 0, 1]);
 
-        let mut applied = base.clone();
+        let mut applied = base;
         patch.apply(&mut applied).expect("patch should apply");
 
         assert_eq!(applied, changed);
@@ -295,7 +295,7 @@ mod tests {
         let patch = BalancesPatch::diff(PatchConfig::default(), &base, &changed)
             .expect("balances patch should represent the change");
 
-        let mut applied = base.clone();
+        let mut applied = base;
         patch.apply(&mut applied).expect("patch should apply");
 
         assert_eq!(applied, changed);
@@ -320,7 +320,7 @@ mod tests {
 
         assert_eq!(patch.mode, zigzag(-1_000_000));
 
-        let mut applied = base.clone();
+        let mut applied = base;
         patch.apply(&mut applied).expect("patch should apply");
 
         assert_eq!(applied, changed);

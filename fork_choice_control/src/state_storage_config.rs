@@ -59,8 +59,12 @@ impl StateStorageConfig {
         ByteSize::b(ESTIMATED_STATE_SIZE.as_u64().saturating_mul(cached_states))
     }
 
-    fn exceeds_memory_share(estimated_cache_size: ByteSize, total_memory: ByteSize) -> bool {
-        estimated_cache_size.as_u64() > total_memory.as_u64() / 100 * MEMORY_WARNING_PERCENT
+    const fn exceeds_memory_share(estimated_cache_size: ByteSize, total_memory: ByteSize) -> bool {
+        estimated_cache_size.as_u64()
+            > total_memory
+                .as_u64()
+                .saturating_div(100)
+                .saturating_mul(MEMORY_WARNING_PERCENT)
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -127,6 +131,15 @@ mod tests {
         };
 
         exactly_as_deep.validate()?;
+
+        let empty = StateStorageConfig {
+            cache_sizes: vec![],
+            ..StateStorageConfig::default()
+        };
+
+        empty.validate()?;
+
+        assert_eq!(empty.estimated_cache_size(), ByteSize::b(0));
 
         Ok(())
     }
