@@ -12,9 +12,9 @@ Grandine allows starting the Beacon Node from an earlier stored checkpoint by us
 
 ### State hierarchy
 
-Finalized states are not all written as full copies. Instead they are written into a *hierarchy* of layers, configured with `--state-hierarchy` as a comma separated list of slot exponents, sorted ascending. Each exponent defines how often that layer is written: an exponent of `N` means one state every `2^N` slots. The default is `5,9,11,13,16,18,21` — a state every 32 slots (one epoch) in the deepest layer, up to a state every 2097152 slots in the shallowest one.
+Finalized states are not all written as full copies. Instead they are written into a *hierarchy* of layers, configured with `--state-hierarchy` as a comma separated list of slot exponents, sorted descending — shallowest layer first. Each exponent defines how often that layer is written: an exponent of `N` means one state every `2^N` slots. The default is `21,18,16,13,11,9,5` — a state every 2097152 slots in the shallowest layer, down to a state every 32 slots (one epoch) in the deepest one.
 
-Only the shallowest layer — the *last* exponent in the list — is written as a full state, called a snapshot or frame. Every other layer is written as a delta against the closest state in the next shallower layer. Reading a state means loading the snapshot it descends from and applying the chain of deltas down to it. This trades a small amount of CPU on read for a large reduction in disk usage compared to writing full states.
+Only the shallowest layer — the *first* exponent in the list — is written as a full state, called a snapshot or frame. Every other layer is written as a delta against the closest state in the next shallower layer. Reading a state means loading the snapshot it descends from and applying the chain of deltas down to it. This trades a small amount of CPU on read for a large reduction in disk usage compared to writing full states.
 
 Finalized states whose slots are not part of the hierarchy at all are not written to disk. They are reconstructed on demand by loading the closest older stored state and replaying the blocks in between, which is slower than applying deltas but costs no disk space. Unfinalized states pushed out of memory by `--unfinalized-states-in-memory` are the exception: each is written as a full snapshot regardless of the hierarchy, and finalized-state archival re-encodes it as a delta later.
 
@@ -22,15 +22,15 @@ The hierarchy is anchored to the later of the current phase's first slot and the
 
 Lowering the exponents stores states more densely: faster historical API responses, more disk usage. Raising them does the opposite. Adding layers makes delta chains longer, which makes each individual write cheaper and each read more expensive.
 
-The deepest exponent must write states at least one full epoch apart — `2^N` has to be a whole number of slots per epoch, which means `N >= 5` on Mainnet and `N >= 3` on the minimal preset. States are loaded as anchors on startup and every anchor has to be at an epoch start, so Grandine refuses to start with a denser deepest layer.
+The deepest exponent may write states more often than once per epoch. `--state-hierarchy 21,16,4` stores one state every 16 slots and is accepted, as is any exponent down to `0`. Such states are stored, pruned and served over the historical APIs like any other, but they are not eligible as startup anchors: an anchor has to sit at an epoch start, so startup skips a mid-epoch state and loads the closest older epoch-start state instead, replaying the blocks in between. A sub-epoch deepest layer therefore buys faster historical reads inside an epoch and does not speed up startup.
 
-The list itself must be non-empty, strictly increasing — deepest layer first — and every exponent at most `63`. `--state-hierarchy 21,16,5` is rejected, not silently reordered.
+The list itself must be non-empty, strictly decreasing — shallowest layer first — and every exponent at most `63`. `--state-hierarchy 5,16,21` is rejected, not silently reordered.
 
 #### Upgrading from `--archival-epoch-interval`
 
-Earlier releases stored one full state every `--archival-epoch-interval` epochs, `32` by default, i.e. one state every 1024 slots on Mainnet. The default hierarchy stores a state every 32 slots instead, and all but the shallowest layer as deltas. The flag is now ignored, so a node that raised it to control disk usage loses that setting on upgrade.
+Earlier releases wrote a full state at every epoch start once the node was forward synced, and used `--archival-epoch-interval` — `32` by default — only to throttle back-fill while catching up. The steady-state density was therefore one full state per epoch, not one every `--archival-epoch-interval` epochs. The flag is now ignored.
 
-To reproduce the old density, set the deepest exponent to `log2(interval × SLOTS_PER_EPOCH)`: `--archival-epoch-interval 32` on Mainnet corresponds to a deepest exponent of `10`, so `--state-hierarchy 10,13,16,18,21`. Note that this is not a like-for-like comparison of disk usage — the default hierarchy stores many more states, but each one is a delta rather than a full copy.
+The default hierarchy already stores a state every 32 slots, so a forward-synced node keeps the density it had, and writes all but the shallowest layer as deltas rather than full copies. The old behaviour can be replicated exactly with `--state-hierarchy 5`, but a single-layer hierarchy makes every stored state a full copy: far more disk than the default hierarchy, and slower reads, because every read has to decompress a whole state. It is not recommended.
 
 #### Database compatibility
 
@@ -41,17 +41,15 @@ States written by earlier Grandine releases stay readable, and archival re-encod
 The hierarchy is written into the database on first use, and Grandine refuses to start if the configured `--state-hierarchy` does not match the stored one:
 
 ```
-database was written with state hierarchy 5,9,11, but 5,9,13 is configured;
-pass --state-hierarchy 5,9,11 to keep using this database or --force-reset-beacon-db to discard it
+database was written with state hierarchy 11,9,5, but 13,9,5 is configured;
+pass --state-hierarchy 11,9,5 to keep using this database or --force-reset-beacon-db to discard it
 ```
 
 This is not a cosmetic check. Pruning derives the set of states it must retain from the configured layout. If the layout does not describe the delta chains actually on disk, pruning deletes states that other, still-retained states are encoded against, silently corrupting the database. Either keep using the stored hierarchy, or discard the database with `--force-reset-beacon-db` and re-sync.
 
-A database written before this check existed has no stored hierarchy. Grandine adopts the configured one and records it on startup. It warns while doing so only if the database also records a state hierarchy anchor, which means it was written by an earlier build of this feature and may already hold delta chains whose layout cannot be recovered - pass the `--state-hierarchy` it was written with, or re-sync with `--force-reset-beacon-db` if that is not known. Databases from released versions hold only full snapshots, which no other state is encoded against, so they are adopted silently.
-
 #### State caches
 
-`--state-cache-sizes` sets how many states are kept in memory per hierarchy layer, so that repeated reads and delta computations do not have to go back to disk. It takes a comma separated list starting from the shallowest layer — the full state snapshot — in the same order `--state-hierarchy` exponents are listed in. The list may be shorter than the hierarchy; the layers it does not name are not cached. A size of `0` disables caching for that layer too. When the flag is not given, the sizes default to `5,3,3`, so changing `--state-hierarchy` alone does not require setting this too.
+`--state-cache-sizes` sets how many states are kept in memory per hierarchy layer, so that repeated reads and delta computations do not have to go back to disk. It takes a comma separated list starting from the shallowest layer — the full state snapshot — in the same order `--state-hierarchy` exponents are listed in. The list may be shorter than the hierarchy, in which case it is padded with zeros, and a size of `0` disables caching for that layer, so `--state-cache-sizes 5` caches only the snapshot layer. A list longer than the hierarchy is rejected. When the flag is not given, the sizes default to `5,3,3`, truncated to the number of layers, so changing `--state-hierarchy` alone does not require setting this too.
 
 Shallow layers hold full or near-full states, so raising their sizes costs considerably more memory per cached entry than raising the deeper ones.
 
@@ -78,8 +76,8 @@ Together they show how much space and CPU each layer costs, which is what `--sta
 
 ### Relevant command line options
 
-* `--state-hierarchy` - comma separated list of slot exponents defining the state storage layout, deepest layer first (default: `5,9,11,13,16,18,21`);
-* `--state-cache-sizes` - number of states cached in memory per hierarchy layer, shallowest layer first; may be shorter than the hierarchy (default: `5,3,3`);
+* `--state-hierarchy` - comma separated list of slot exponents defining the state storage layout, shallowest layer first (default: `21,18,16,13,11,9,5`);
+* `--state-cache-sizes` - number of states cached in memory per hierarchy layer, shallowest layer first; may be shorter than the hierarchy, in which case the remaining layers are not cached (default: `5,3,3`);
 * `--state-compression-level` - zstd compression level for stored states (default: `3`);
 * `--archive-storage` - retains all blocks, blobs and stored states by disabling pruning; mutually exclusive with `--prune-storage` (default: disabled);
 * `--force-reset-beacon-db` - deletes the existing beacon node databases on startup, which is the escape hatch for a `--state-hierarchy` mismatch (default: disabled);

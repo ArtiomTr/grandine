@@ -540,7 +540,7 @@ This is the largest correctness change; it lands last because it touches the rea
 
 ### Task 17: [Final] Update documentation
 
-- [ ] rewrite the `--archival-epoch-interval` section of `book/src/storage.md`. The current text
+- [x] rewrite the `--archival-epoch-interval` section of `book/src/storage.md`. The current text
       is wrong: because the old code stored a state at **every** epoch start once forward-synced
       (`(store.is_forward_synced() && is_epoch_start) || is_archival_epoch_start`), the interval
       only ever throttled back-fill. The old effective density is therefore one state per epoch,
@@ -548,18 +548,20 @@ This is the largest correctness change; it lands last because it touches the rea
       single-layer hierarchy makes every stored state a full copy — far more disk than the
       default hierarchy, and slower reads because every read decompresses a whole state — so it
       is not recommended.
-- [ ] update the `--state-hierarchy` prose and every example in `book/src/storage.md` to the
+- [x] update the `--state-hierarchy` prose and every example in `book/src/storage.md` to the
       rotated, shallowest-first order (`21,18,16,13,11,9,5`), including the
       *"must be non-empty, strictly increasing"* sentence and the `21,16,5` rejection example
       (which is now the *valid* form)
-- [ ] update the `--state-cache-sizes` paragraph: the list may now be shorter than the hierarchy
+- [x] update the `--state-cache-sizes` paragraph: the list may now be shorter than the hierarchy
       and is zero-padded, and it is no longer in the reverse order of `--state-hierarchy`
-- [ ] update the deepest-exponent paragraph for the relaxed sub-epoch rule (Task 15)
-- [ ] update the "database written before this check existed" paragraph — that path no longer
+- [x] update the deepest-exponent paragraph for the relaxed sub-epoch rule (Task 15)
+- [x] update the "database written before this check existed" paragraph — that path no longer
       exists (Task 6)
-- [ ] regenerate/refresh `book/src/cli_options.md` so the `--state-hierarchy` help text matches
+- [x] regenerate/refresh `book/src/cli_options.md` so the `--state-hierarchy` help text matches
       the rotated order; leave the `--force-reset-beacon-db` entry in place
-- [ ] update `CLAUDE.md` if the benchmark or test invocations changed
+- [x] update `CLAUDE.md` if the benchmark or test invocations changed — the invocations themselves
+      are unchanged (Task 12 already dropped `--features comparison`); only the sentence naming
+      `eth-state-diff`/`qbsdiff`/`xdelta3` now says they are dev-dependencies
 
 *Note: ralphex automatically moves completed plans to `docs/plans/completed/`*
 

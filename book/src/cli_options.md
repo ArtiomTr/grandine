@@ -52,7 +52,7 @@ The list of command line options:
       --prune-storage
           Enable prune storage mode, where only a single checkpoint state and block are stored in the database [default: disabled]
       --state-hierarchy <STATE_HIERARCHY>
-          Hierarchy of state storage, defined as a comma separated list of slot exponents, starting from the deepest layer. The list must be non-empty, strictly increasing, and every exponent at most 63. Full states are written at the frequency of the last exponent, all other layers are stored as deltas [default: 5,9,11,13,16,18,21]
+          Hierarchy of state storage, defined as a comma separated list of slot exponents, starting from the shallowest layer. The list must be non-empty, strictly decreasing, and every exponent at most 63. Full states are written at the frequency of the first exponent, all other layers are stored as deltas [default: 21,18,16,13,11,9,5]
       --state-cache-sizes <STATE_CACHE_SIZES>...
           Number of states to keep in memory for every state storage hierarchy layer, as a comma separated list starting from the shallowest one - the full state snapshot, in the same order --state-hierarchy exponents are listed in. May be shorter than --state-hierarchy, in which case the remaining layers are not cached [default: 5,3,3]
       --state-compression-level <STATE_COMPRESSION_LEVEL>
