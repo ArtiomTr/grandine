@@ -66,16 +66,24 @@ impl Pool {
         let mut state = self.state.lock();
 
         if state.workers < self.max_workers {
-            let pool = self.clone_arc();
-
-            Builder::new()
-                .name("archiver".to_owned())
-                .spawn(move || Worker::new(pool).run())?;
+            self.spawn_worker()?;
 
             state.workers = state.workers.saturating_add(1);
         }
 
         state.queue.push_back(work);
+
+        Ok(())
+    }
+
+    /// Spawns a worker without touching [`State::workers`]. Callers hold the state lock and
+    /// account for the slot themselves.
+    fn spawn_worker(self: &Arc<Self>) -> Result<()> {
+        let pool = self.clone_arc();
+
+        Builder::new()
+            .name("archiver".to_owned())
+            .spawn(move || Worker::new(pool).run())?;
 
         Ok(())
     }
@@ -85,8 +93,8 @@ impl Pool {
 ///
 /// Retiring happens under the same lock that observes the empty queue, so a task pushed by a
 /// submitter that saw this worker still alive is always picked up before the worker exits. The
-/// `Drop` impl covers the remaining case: a task that panics unwinds out of [`Worker::run`], and
-/// without it the pool would count a worker that no longer exists and eventually stop spawning.
+/// `Drop` impl covers the remaining case: a task that panics unwinds out of [`Worker::run`],
+/// abandoning both the slot and whatever is still queued behind it.
 struct Worker {
     pool: Arc<Pool>,
     retired: bool,
@@ -94,11 +102,20 @@ struct Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        if !self.retired {
-            let mut state = self.pool.state.lock();
-
-            state.workers = state.workers.saturating_sub(1);
+        if self.retired {
+            return;
         }
+
+        let mut state = self.pool.state.lock();
+
+        // Nothing else will drain the queue: submitters only spawn while below the cap, and this
+        // slot is still counted. Hand it to a replacement instead of releasing it, or the queued
+        // tasks - each holding a store snapshot alive - wait for the next submission.
+        if !state.queue.is_empty() && self.pool.spawn_worker().is_ok() {
+            return;
+        }
+
+        state.workers = state.workers.saturating_sub(1);
     }
 }
 
@@ -312,6 +329,44 @@ mod tests {
         pool.submit(move || sender.send(()).expect("the receiver is still alive"))?;
 
         assert_eq!(receiver.recv_timeout(RETIREMENT_TIMEOUT)?, ());
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_panicking_task_does_not_strand_the_work_queued_behind_it() -> Result<()> {
+        let pool = ArchivalPool::with_max_workers(1);
+
+        // The panic is expected, so its backtrace would only be noise in the test output.
+        let hook = std::panic::take_hook();
+
+        std::panic::set_hook(Box::new(|_| ()));
+
+        let (release_sender, release_receiver) = mpsc::channel();
+        let entered = Arc::new(Barrier::new(2));
+        let task_entered = entered.clone_arc();
+
+        pool.submit(move || {
+            task_entered.wait();
+
+            release_receiver.recv().expect("the sender is still alive");
+
+            panic!("archival work panicked");
+        })?;
+
+        // The only worker is now inside the panicking task, so the next task is queued behind it
+        // rather than picked up by a worker of its own.
+        entered.wait();
+
+        let (sender, receiver) = mpsc::channel();
+
+        pool.submit(move || sender.send(()).expect("the receiver is still alive"))?;
+
+        release_sender.send(())?;
+
+        assert_eq!(receiver.recv_timeout(RETIREMENT_TIMEOUT)?, ());
+
+        std::panic::set_hook(hook);
 
         Ok(())
     }
