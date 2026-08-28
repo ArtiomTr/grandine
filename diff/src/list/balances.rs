@@ -302,6 +302,80 @@ mod tests {
     }
 
     #[test]
+    fn a_base_longer_than_the_changed_list_is_unsupported() {
+        type List = PersistentList<Gwei, U64>;
+
+        let base = List::try_from_iter((0..20).map(|index| 32_000_000_000 + index))
+            .expect("length is below the maximum");
+
+        let changed = List::try_from_iter((0..10).map(|index| 32_000_000_000 + index))
+            .expect("length is below the maximum");
+
+        let error = BalancesPatch::diff(PatchConfig::default(), &base, &changed)
+            .expect_err("balances are never removed, so a shrinking list is not encodable");
+
+        assert!(matches!(error, Error::UnsupportedDiff));
+    }
+
+    #[test]
+    fn truncated_and_overlong_delta_bytes_are_rejected() {
+        type List = PersistentList<Gwei, U64>;
+
+        let base = || List::try_from_iter([10, 20, 30]).expect("length is below the maximum");
+        let changed = List::try_from_iter([11, 22, 33]).expect("length is below the maximum");
+
+        let patch = BalancesPatch::diff(PatchConfig::default(), &base(), &changed)
+            .expect("balances patch should represent the change");
+
+        let truncated = BalancesPatch {
+            deltas: ByteList::try_from(vec![]).expect("an empty byte list is valid"),
+            ..patch.clone()
+        };
+
+        let error = truncated
+            .apply(&mut base())
+            .expect_err("three recorded positions need three deltas");
+
+        assert!(matches!(error, Error::InvalidPatchEncoding));
+
+        let mut overlong_bytes = patch.deltas.as_bytes().to_vec();
+        overlong_bytes.push(1);
+
+        let overlong = BalancesPatch {
+            deltas: ByteList::try_from(overlong_bytes).expect("length is below the maximum"),
+            ..patch
+        };
+
+        let error = overlong
+            .apply(&mut base())
+            .expect_err("a delta no position claims must not be silently dropped");
+
+        assert!(matches!(error, Error::InvalidPatchEncoding));
+    }
+
+    #[test]
+    fn a_delta_that_drives_a_balance_negative_is_rejected() {
+        type List = PersistentList<Gwei, U64>;
+
+        let base = List::try_from_iter([100]).expect("length is below the maximum");
+        let changed = List::try_from_iter([50]).expect("length is below the maximum");
+
+        let patch = BalancesPatch::diff(PatchConfig::default(), &base, &changed)
+            .expect("balances patch should represent the change");
+
+        assert_eq!(patch.mode, zigzag(-50));
+
+        // The same length, so the base length check passes and the negative mode is applied.
+        let mut smaller = List::try_from_iter([10]).expect("length is below the maximum");
+
+        let error = patch
+            .apply(&mut smaller)
+            .expect_err("a balance cannot go below zero");
+
+        assert!(matches!(error, Error::InvalidBalanceDelta));
+    }
+
+    #[test]
     fn round_trips_a_base_shorter_than_the_changed_list() {
         type List = PersistentList<Gwei, U64>;
 

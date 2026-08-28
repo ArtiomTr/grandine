@@ -18,6 +18,7 @@ pub use vector::VectorPatch;
 /// A large value, used as "unlimited" value for containers.
 #[expect(
     clippy::redundant_pub_crate,
-    reason = "keep the patch types out of the public API"
+    reason = "`list` being private already hides this, but `pub(crate)` states that it is never \
+              meant to appear in the crate's public API"
 )]
 pub(crate) type Unlimited = U10000000000000000000;
