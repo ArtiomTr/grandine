@@ -27,10 +27,10 @@ use doppelganger_protection::DoppelgangerProtection;
 use eth1::{Eth1Chain, Eth1Config};
 use eth1_api::{
     Auth, Eth1Api, Eth1ApiToMetrics, Eth1ConnectionData, Eth1ExecutionEngine, Eth1Metrics,
-    ExecutionBlobFetcher, ExecutionService, RealController,
+    ExecutionBlobFetcher, ExecutionService, RealController, reconstruct_stored_blocks,
 };
 use features::Feature;
-use fork_choice_control::{Controller, EventChannels, StateLoadStrategy, Storage, StoredBlock};
+use fork_choice_control::{Controller, EventChannels, StateLoadStrategy, Storage};
 use fork_choice_store::StoreConfig;
 use futures::{
     channel::{
@@ -278,7 +278,27 @@ pub async fn run_after_genesis<P: Preset>(
         .load(signer_snapshot.client(), state_load_strategy)
         .await?;
 
-    let unfinalized_blocks = stored_blocks.map(|result| result.and_then(StoredBlock::into_full));
+    // Blocks persisted after the last checkpoint state are finalized and thus stored blinded when
+    // payload storage is off. The fork choice store re-validates them against the execution
+    // client, so their payloads have to be reconstructed before it can be seeded with them.
+    // They only restore the part of the chain above the anchor, so an execution client that is
+    // not reachable yet must not keep the node from starting: sync them from peers instead.
+    // Failures of the database itself are not tolerated the same way, or a corrupted record would
+    // look like a transient execution client problem.
+    let stored_blocks = stored_blocks.collect::<Result<Vec<_>>>()?;
+
+    let unfinalized_blocks = reconstruct_stored_blocks(&eth1_api, stored_blocks)
+        .await
+        .unwrap_or_else(|error| {
+            warn!(
+                "unable to restore blocks stored after the last checkpoint: {error:#}; \
+                 they will be synced from peers instead",
+            );
+
+            vec![]
+        })
+        .into_iter()
+        .map(Ok);
 
     let is_anchor_genesis = anchor_block.message().slot() == GENESIS_SLOT;
 

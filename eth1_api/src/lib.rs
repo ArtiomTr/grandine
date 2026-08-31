@@ -9,6 +9,10 @@ pub use crate::{
     execution_service::ExecutionService,
     messages::{BlobFetcherToP2p, Eth1ApiToMetrics, Eth1ConnectionData, Eth1Metrics},
     misc::{ApiController, ClientCode, ClientVersionV1, RealController, WithClientVersions},
+    payload_reconstruction::{
+        Error as PayloadReconstructionError, reconstruct_stored_blocks,
+        reconstruct_stored_blocks_in_range,
+    },
     tasks::spawn_exchange_capabilities_and_versions_task,
 };
 
@@ -25,4 +29,5 @@ mod execution_blob_fetcher;
 mod execution_service;
 mod messages;
 mod misc;
+mod payload_reconstruction;
 mod tasks;
