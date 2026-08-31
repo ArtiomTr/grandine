@@ -1291,6 +1291,7 @@ pub async fn block_id_headers<P: Preset, W: Wait>(
 pub async fn block<P: Preset, W: Wait>(
     State(controller): State<ApiController<P, W>>,
     State(anchor_checkpoint_provider): State<AnchorCheckpointProvider<P>>,
+    State(eth1_api): State<Arc<Eth1Api>>,
     EthPath(block_id): EthPath<BlockId>,
     headers: HeaderMap,
 ) -> Result<EthResponse<Arc<SignedBeaconBlock<P>>, (), JsonOrSsz>, Error> {
@@ -1298,9 +1299,13 @@ pub async fn block<P: Preset, W: Wait>(
         value: block,
         status,
         finalized,
-    } = block_id::stored_block(block_id, &controller, &anchor_checkpoint_provider)?;
-
-    let block = block.into_full().map_err(Error::Internal)?;
+    } = block_id::block(
+        block_id,
+        &controller,
+        &anchor_checkpoint_provider,
+        &eth1_api,
+    )
+    .await?;
 
     let version = block.phase();
 
@@ -1402,11 +1407,13 @@ pub async fn blinded_block<P: Preset, W: Wait>(
 /// `GET /eth/v1/beacon/blob_sidecars/{block_id}`
 #[expect(clippy::type_complexity)]
 #[instrument(skip_all, level = "debug", name = "http_api::blob_sidecars")]
+#[expect(clippy::too_many_arguments)]
 pub async fn blob_sidecars<P: Preset, W: Wait>(
     State(controller): State<ApiController<P, W>>,
     State(metrics): State<Option<Arc<Metrics>>>,
     State(anchor_checkpoint_provider): State<AnchorCheckpointProvider<P>>,
     State(dedicated_executor): State<Arc<DedicatedExecutor>>,
+    State(eth1_api): State<Arc<Eth1Api>>,
     EthPath(block_id): EthPath<BlockId>,
     EthQuery(query): EthQuery<BlobSidecarsQuery>,
     headers: HeaderMap,
@@ -1445,7 +1452,9 @@ pub async fn blob_sidecars<P: Preset, W: Wait>(
                 .finalized(finalized));
         };
 
-        let block = block.into_full().map_err(Error::Internal)?;
+        // Only sidecar construction needs the payload, so blocks stored blinded are reconstructed
+        // here rather than for every request.
+        let block = block_id::reconstruct(&eth1_api, block).await?;
 
         let blobs = construct_blobs_from_data_column_sidecars(
             controller.clone_arc(),
@@ -1525,11 +1534,13 @@ pub async fn execution_payload_envelope<P: Preset, W: Wait>(
 
 /// `GET /eth/v1/beacon/blobs/{block_id}`
 #[instrument(skip_all, level = "debug", name = "http_api::blobs")]
+#[expect(clippy::too_many_arguments)]
 pub async fn blobs<P: Preset, W: Wait>(
     State(controller): State<ApiController<P, W>>,
     State(metrics): State<Option<Arc<Metrics>>>,
     State(anchor_checkpoint_provider): State<AnchorCheckpointProvider<P>>,
     State(dedicated_executor): State<Arc<DedicatedExecutor>>,
+    State(eth1_api): State<Arc<Eth1Api>>,
     EthPath(block_id): EthPath<BlockId>,
     EthQuery(query): EthQuery<BlobsQuery>,
     headers: HeaderMap,
@@ -1580,7 +1591,9 @@ pub async fn blobs<P: Preset, W: Wait>(
     };
 
     let blobs = if version.is_peerdas_activated() {
-        let block = block.into_full().map_err(Error::Internal)?;
+        // Only sidecar construction needs the payload, so blocks stored blinded are reconstructed
+        // here rather than for every request.
+        let block = block_id::reconstruct(&eth1_api, block).await?;
 
         let blobs = construct_blobs_from_data_column_sidecars(
             controller.clone_arc(),

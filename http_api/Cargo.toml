@@ -76,6 +76,7 @@ execution_engine = { workspace = true }
 factory = { workspace = true }
 fork_choice_store = { workspace = true }
 hex-literal = { workspace = true }
+httpmock = { workspace = true }
 interop = { workspace = true }
 keymanager = { workspace = true }
 num_cpus = { workspace = true }

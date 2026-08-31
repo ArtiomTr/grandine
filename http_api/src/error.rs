@@ -40,6 +40,11 @@ pub enum Error {
     BlockPreFulu,
     #[error("pre-gloas block has no execution payload envelope")]
     BlockPreGloas,
+    #[error(
+        "block is stored without its execution payload and \
+         the execution client has no body to reconstruct it from"
+    )]
+    PayloadBodyUnavailable,
     #[error(transparent)]
     Canceled(#[from] Canceled),
     #[error("Content-Type header invalid")]
@@ -349,7 +354,8 @@ impl Error {
             Self::BlockNotValidatedForAggregation { .. }
             | Self::HeadFarBehind { .. }
             | Self::HeadIsOptimistic
-            | Self::NodeIsSyncing => StatusCode::SERVICE_UNAVAILABLE,
+            | Self::NodeIsSyncing
+            | Self::PayloadBodyUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
