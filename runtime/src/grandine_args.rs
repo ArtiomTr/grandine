@@ -346,6 +346,14 @@ struct BeaconNodeOptions {
     #[clap(long, conflicts_with("archive_storage"))]
     prune_storage: bool,
 
+    /// Store execution payloads in the database. Applies to the default and
+    /// --archive-storage modes; --prune-storage stores no finalized blocks at
+    /// all. When disabled, finalized blocks are stored blinded and their
+    /// payloads are reconstructed from the execution client on demand
+    /// [default: disabled]
+    #[clap(long)]
+    store_payloads: bool,
+
     /// Number of unfinalized states to keep in memory.
     #[clap(long, default_value_t = StoreConfig::default().unfinalized_states_in_memory)]
     unfinalized_states_in_memory: u64,
@@ -1093,6 +1101,7 @@ impl GrandineArgs {
             archival_epoch_interval,
             archive_storage,
             prune_storage,
+            store_payloads,
             unfinalized_states_in_memory,
             reconstruction_delay,
             request_timeout,
@@ -1509,6 +1518,7 @@ impl GrandineArgs {
             archival_epoch_interval,
             reset_databases: force_reset_beacon_db,
             storage_mode,
+            store_payloads,
         };
 
         network_config_options.print_upnp_warning();
@@ -1876,8 +1886,12 @@ mod tests {
     use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::io::Write as _;
 
+    use database::Database;
+    use fork_choice_control::Storage;
+    use pubkey_cache::PubkeyCache;
     use ssz::Uint256;
     use tempfile::NamedTempFile;
+    use types::preset::Mainnet;
 
     use crate::commands::InterchangeCommand;
 
@@ -2548,6 +2562,53 @@ mod tests {
     fn incompatible_storage_options() {
         try_config_from_args(["--archive-storage", "--prune-storage"])
             .expect_err("incompatible storage options should fail");
+    }
+
+    #[test]
+    fn payload_storage_is_disabled_by_default_in_every_storage_mode() {
+        for arguments in [vec![], vec!["--archive-storage"], vec!["--prune-storage"]] {
+            let config = config_from_args(arguments.iter().copied());
+
+            assert!(!config.storage_config.store_payloads);
+        }
+    }
+
+    #[test]
+    fn store_payloads_option_enables_payload_storage_in_every_storage_mode() {
+        for arguments in [
+            vec!["--store-payloads"],
+            vec!["--store-payloads", "--archive-storage"],
+            vec!["--store-payloads", "--prune-storage"],
+        ] {
+            let config = config_from_args(arguments.iter().copied());
+
+            assert!(config.storage_config.store_payloads);
+        }
+    }
+
+    #[test]
+    fn store_payloads_option_reaches_storage() {
+        for (arguments, expected) in [(vec![], false), (vec!["--store-payloads"], true)] {
+            let config = config_from_args(arguments.iter().copied());
+
+            let StorageConfig {
+                archival_epoch_interval,
+                storage_mode,
+                store_payloads,
+                ..
+            } = config.storage_config;
+
+            let storage = Storage::<Mainnet>::new(
+                config.chain_config,
+                Arc::new(PubkeyCache::default()),
+                Database::in_memory(),
+                archival_epoch_interval,
+                storage_mode,
+                store_payloads,
+            );
+
+            assert_eq!(storage.payload_storage_enabled(), expected);
+        }
     }
 
     #[test]

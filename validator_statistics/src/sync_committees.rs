@@ -5,11 +5,11 @@ use serde::Serialize;
 use typenum::Unsigned as _;
 use types::{
     altair::containers::SyncAggregate,
-    combined::{BeaconState, SignedBeaconBlock},
+    combined::BeaconState,
     nonstandard::UsizeVec,
     phase0::primitives::{H256, Slot, ValidatorIndex},
     preset::Preset,
-    traits::SignedBeaconBlock as _,
+    traits::BeaconBlock,
 };
 
 #[derive(Default, Debug, Serialize)]
@@ -52,14 +52,10 @@ pub fn current_epoch_sync_committee_assignments<P: Preset>(
 }
 
 pub fn sync_aggregate_with_root<P: Preset>(
-    block: &SignedBeaconBlock<P>,
+    block: &dyn BeaconBlock<P>,
 ) -> Option<(SyncAggregate<P>, H256)> {
-    let sync_aggregate = block
-        .message()
-        .body()
-        .with_sync_aggregate()?
-        .sync_aggregate();
-    let parent_root = block.message().parent_root();
+    let sync_aggregate = block.body().with_sync_aggregate()?.sync_aggregate();
+    let parent_root = block.parent_root();
     Some((sync_aggregate, parent_root))
 }
 

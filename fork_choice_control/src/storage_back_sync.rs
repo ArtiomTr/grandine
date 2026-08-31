@@ -8,7 +8,7 @@ use helper_functions::misc;
 use logging::{debug_with_peers, info_with_peers, warn_with_peers};
 use ssz::SszHash as _;
 use std_ext::ArcExt as _;
-use transition_functions::combined;
+use transition_functions::{combined, unphased::StateRootPolicy};
 use types::{
     combined::{DataColumnSidecar, SignedBeaconBlock},
     deneb::containers::BlobSidecar,
@@ -21,10 +21,7 @@ use types::{
 
 use crate::{
     Storage,
-    storage::{
-        BlockRootBySlot, Error, FinalizedBlockByRoot, SlotByStateRoot, StateByBlockRoot, get,
-        serialize,
-    },
+    storage::{BlockRootBySlot, Error, SlotByStateRoot, StateByBlockRoot, get, serialize},
 };
 
 const ARCHIVER_CHECKPOINT_KEY: &str = "carchiver";
@@ -93,12 +90,8 @@ impl<P: Preset> Storage<P> {
             }
 
             if let Some((block, _)) = self.finalized_block_by_slot(slot)? {
-                combined::untrusted_state_transition(
-                    self.config(),
-                    &self.pubkey_cache,
-                    state.make_mut(),
-                    &block,
-                )?;
+                self.replay_block(state.make_mut(), block.clone(), StateRootPolicy::Verify)?;
+
                 previous_block = Some(block);
             } else {
                 combined::process_slots(self.config(), &self.pubkey_cache, state.make_mut(), slot)?;
@@ -169,7 +162,7 @@ impl<P: Preset> Storage<P> {
             let block_root = block.message().hash_tree_root();
 
             batch.push(serialize(BlockRootBySlot(slot), block_root)?);
-            batch.push(serialize(FinalizedBlockByRoot(block_root), block)?);
+            batch.push(self.serialize_finalized_block(block_root, &block)?);
         }
 
         self.database.put_batch(batch)
@@ -294,6 +287,7 @@ mod tests {
             Database::in_memory(),
             NonZeroU64::MIN,
             StorageMode::default(),
+            true,
         )
     }
 }

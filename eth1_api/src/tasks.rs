@@ -14,26 +14,41 @@ use web3::{
 use crate::{
     ClientVersionV1, Eth1Api,
     endpoints::Endpoint,
-    eth1_api::{CAPABILITIES, ENGINE_GET_CLIENT_VERSION_V1},
+    eth1_api::{
+        CAPABILITIES, ENGINE_GET_CLIENT_VERSION_V1, ENGINE_GET_PAYLOAD_BODIES_BY_HASH_V1,
+        ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1,
+    },
 };
 
 const ENGINE_EXCHANGE_CAPABILITIES_TIMEOUT: Duration = Duration::from_secs(1);
 const ENGINE_GET_CLIENT_VERSION_V1_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Exchanges engine API capabilities and client versions with the execution client.
+///
+/// Blocks are served with their payloads reconstructed from the execution client when payload
+/// storage is disabled, so an execution client that does not implement the payload bodies methods
+/// makes historical blocks unservable. Pass `payload_reconstruction_required` to warn about it as
+/// soon as capabilities are known.
 pub fn spawn_exchange_capabilities_and_versions_task(
     eth1_api: Arc<Eth1Api>,
     dedicated_executor: &DedicatedExecutor,
+    payload_reconstruction_required: bool,
 ) {
     dedicated_executor
         .spawn(async move {
-            if let Err(error) = exchange_capabilities_and_versions(&eth1_api).await {
+            if let Err(error) =
+                exchange_capabilities_and_versions(&eth1_api, payload_reconstruction_required).await
+            {
                 warn_with_peers!("failed to exchange capabilities and client versions: {error:?}");
             }
         })
         .detach();
 }
 
-async fn exchange_capabilities_and_versions(eth1_api: &Eth1Api) -> Result<()> {
+async fn exchange_capabilities_and_versions(
+    eth1_api: &Eth1Api,
+    payload_reconstruction_required: bool,
+) -> Result<()> {
     #[cfg(feature = "embed")]
     {
         let response = eth1_api
@@ -47,9 +62,21 @@ async fn exchange_capabilities_and_versions(eth1_api: &Eth1Api) -> Result<()> {
                 let supports_client_version =
                     capabilities.contains(&ENGINE_GET_CLIENT_VERSION_V1.to_owned());
 
+                let supports_payload_bodies = capabilities
+                    .contains(ENGINE_GET_PAYLOAD_BODIES_BY_HASH_V1)
+                    && capabilities.contains(ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1);
+
                 eth1_api.set_capabilities(capabilities);
 
                 info_with_peers!("updated capabilities for embedded EL");
+
+                if payload_reconstruction_required && !supports_payload_bodies {
+                    warn_with_peers!(
+                        "embedded EL does not support {ENGINE_GET_PAYLOAD_BODIES_BY_HASH_V1} \
+                        and {ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1}; blocks cannot be served \
+                        without --store-payloads",
+                    );
+                }
 
                 if supports_client_version {
                     exchange_client_versions(eth1_api).await?;
@@ -94,10 +121,24 @@ async fn exchange_capabilities_and_versions(eth1_api: &Eth1Api) -> Result<()> {
                     let supports_client_version =
                         capabilities.contains(ENGINE_GET_CLIENT_VERSION_V1);
 
+                    let supports_payload_bodies = capabilities
+                        .contains(ENGINE_GET_PAYLOAD_BODIES_BY_HASH_V1)
+                        && capabilities.contains(ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1);
+
                     eth1_api.on_ok_response(endpoint);
                     endpoint.set_capabilities(capabilities);
 
                     info_with_peers!("updated capabilities for eth1 endpoint: {}", endpoint.url());
+
+                    if payload_reconstruction_required && !supports_payload_bodies {
+                        warn_with_peers!(
+                            "eth1 endpoint {} does not support \
+                            {ENGINE_GET_PAYLOAD_BODIES_BY_HASH_V1} and \
+                            {ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1}; blocks cannot be served \
+                            without --store-payloads",
+                            endpoint.url(),
+                        );
+                    }
 
                     if supports_client_version {
                         exchange_client_versions(eth1_api, &api, endpoint).await?;

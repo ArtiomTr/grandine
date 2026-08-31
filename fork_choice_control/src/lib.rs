@@ -28,7 +28,7 @@ pub use crate::{
     storage::{
         BlobSidecarByBlobId, BlockCheckpoint, BlockRootBySlot, DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
         DataColumnSidecarByColumnId, FinalizedBlockByRoot, SlotBlobId, SlotByStateRoot,
-        SlotColumnId, StateByBlockRoot, StateCheckpoint, StateLoadStrategy, Storage,
+        SlotColumnId, StateByBlockRoot, StateCheckpoint, StateLoadStrategy, Storage, StoredBlock,
         UnfinalizedBlockByRoot, get, print_beacon_database_info, save,
     },
     storage_tool::{export_state_and_blocks, replay_blocks},

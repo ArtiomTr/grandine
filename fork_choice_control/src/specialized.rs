@@ -118,6 +118,7 @@ where
             StorageMode::Standard {
                 custom_data_availability_window: None,
             },
+            true,
         ));
 
         let event_channels = Arc::new(EventChannels::default());

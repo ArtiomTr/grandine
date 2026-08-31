@@ -23,6 +23,7 @@ fs-err = { workspace = true }
 futures = { workspace = true }
 genesis = { workspace = true }
 helper_functions = { workspace = true }
+hex = { workspace = true }
 http_api_utils = { workspace = true }
 itertools = { workspace = true }
 logging = { workspace = true }
@@ -55,6 +56,7 @@ typenum = { workspace = true }
 types = { workspace = true }
 
 [dev-dependencies]
+bls = { workspace = true }
 bytesize = { workspace = true }
 duplicate = { workspace = true }
 eth2_cache_utils = { workspace = true }

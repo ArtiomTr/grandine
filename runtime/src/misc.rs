@@ -28,6 +28,7 @@ pub struct StorageConfig {
     pub archival_epoch_interval: NonZeroU64,
     pub reset_databases: bool,
     pub storage_mode: StorageMode,
+    pub store_payloads: bool,
 }
 
 impl StorageConfig {
@@ -143,6 +144,7 @@ impl StorageConfig {
             archival_epoch_interval,
             reset_databases,
             storage_mode,
+            store_payloads,
         } = self;
 
         let new_db_size = ByteSize::b(
@@ -167,6 +169,7 @@ impl StorageConfig {
             archival_epoch_interval,
             reset_databases,
             storage_mode,
+            store_payloads,
         }
     }
 
@@ -195,6 +198,7 @@ mod tests {
             archival_epoch_interval: nonzero!(1_u64),
             reset_databases: false,
             storage_mode: StorageMode::default(),
+            store_payloads: false,
         };
 
         let StorageConfig {
@@ -217,6 +221,7 @@ mod tests {
             archival_epoch_interval: nonzero!(1_u64),
             reset_databases: false,
             storage_mode: StorageMode::default(),
+            store_payloads: false,
         };
 
         assert_eq!(storage_config.db_size, ByteSize::b(u64::MAX));

@@ -42,6 +42,7 @@ use crate::{
     messages::P2pMessage,
     queries::BlockWithRoot,
     specialized::{TestController, TestExecutionEngine},
+    storage::Storage,
 };
 
 pub struct Context<P: Preset> {
@@ -874,6 +875,15 @@ impl<P: Preset> Context<P> {
 
     pub fn blocks_by_range(&self, range: Range<Slot>) -> Result<Vec<BlockWithRoot<P>>> {
         self.controller().blocks_by_range(range)
+    }
+
+    #[must_use]
+    pub fn pubkey_cache(&self) -> Arc<PubkeyCache> {
+        self.pubkey_cache.clone_arc()
+    }
+
+    pub(crate) fn storage(&self) -> &Storage<P> {
+        self.controller().storage()
     }
 
     pub fn assert_genesis_time(&self, expected_time: UnixSeconds) {

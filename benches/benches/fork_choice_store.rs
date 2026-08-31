@@ -76,6 +76,7 @@ impl Criterion {
                     Database::in_memory(),
                     DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
                     StorageMode::default(),
+                    true,
                 ));
 
                 let mut store = Store::new(

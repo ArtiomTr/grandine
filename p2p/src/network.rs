@@ -1532,6 +1532,7 @@ impl<P: Preset, W: Wait> Network<P, W> {
 
                 for block_with_root in blocks {
                     let BlockWithRoot { block, root } = block_with_root;
+                    let block = block.into_full()?;
 
                     debug_with_peers!(
                         "sending BeaconBlocksByRange response chunk \
@@ -1993,6 +1994,8 @@ impl<P: Preset, W: Wait> Network<P, W> {
                 let blocks = controller.blocks_by_root(block_roots)?;
 
                 for block in blocks.into_iter().map(WithStatus::value) {
+                    let block = block.into_full()?;
+
                     debug_with_peers!(
                         "sending BeaconBlocksByRoot response chunk \
                         (inbound_request_id: {inbound_request_id:?}, peer_id: {peer_id}, \

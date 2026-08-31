@@ -2326,7 +2326,7 @@ impl<P: Preset, W: Wait + Sync> Validator<P, W> {
 
         let blob_data_available = self
             .controller
-            .indices_of_missing_data_columns(&block_with_root.block)
+            .indices_of_missing_data_columns(&*block_with_root.block.into_full()?)
             .is_empty();
 
         let (triples, other_data): (Vec<_>, Vec<_>) = tokio::task::block_in_place(|| {

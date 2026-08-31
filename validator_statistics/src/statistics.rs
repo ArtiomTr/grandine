@@ -26,7 +26,6 @@ use types::{
         primitives::{Epoch, Slot, ValidatorIndex},
     },
     preset::Preset,
-    traits::SignedBeaconBlock as _,
 };
 
 use crate::{
@@ -371,7 +370,7 @@ impl ValidatorStatistics {
                 let slot = block_with_root.block.message().slot();
 
                 if let Some(pair) =
-                    sync_committees::sync_aggregate_with_root(&block_with_root.block)
+                    sync_committees::sync_aggregate_with_root(block_with_root.block.message())
                 {
                     sync_aggregates_with_roots.insert(slot, pair);
                 }

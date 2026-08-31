@@ -5,14 +5,15 @@ use anyhow::Result;
 use arithmetic::U64Ext as _;
 use bls::PublicKeyBytes;
 use eth1_api::ApiController;
-use fork_choice_control::Wait;
+use fork_choice_control::{StoredBlock, Wait};
 use futures::channel::mpsc::UnboundedSender;
 use genesis::AnchorCheckpointProvider;
 use helper_functions::{
     accessors, misc, predicates,
-    slot_report::{Delta, SyncAggregateRewards},
+    slot_report::{Delta, RealSlotReport, SyncAggregateRewards},
 };
 use itertools::{Itertools as _, chain, izip};
+use pubkey_cache::PubkeyCache;
 use serde::{Deserialize, Serialize};
 use std_ext::ArcExt as _;
 use thiserror::Error;
@@ -40,7 +41,7 @@ use types::{
         primitives::{Epoch, Gwei, H256, Slot, ValidatorIndex},
     },
     preset::Preset,
-    traits::{BeaconState as _, SignedBeaconBlock as _},
+    traits::{BeaconBlock as _, BeaconState as _},
 };
 use unwrap_none::UnwrapNone as _;
 use validator::ApiToValidator;
@@ -422,25 +423,19 @@ pub async fn get_validator_statistics<P: Preset, W: Wait>(
         for block_with_root in
             snapshot.blocks_by_range(misc::slots_in_epoch::<P>(previous_epoch)?)?
         {
-            let slot = block_with_root.block.message().slot();
+            let block = block_with_root.block;
+            let slot = block.message().slot();
 
             let slot_report = (slot > GENESIS_SLOT)
                 .then(|| {
-                    combined::state_transition_for_report(
-                        config,
-                        pubkey_cache,
-                        state.make_mut(),
-                        &block_with_root.block,
-                    )
+                    state_transition_for_report(config, pubkey_cache, state.make_mut(), &block)
                 })
                 .transpose()?
                 .unwrap_or_default();
 
             previous_epoch_slot_reports.insert(slot, slot_report);
 
-            if let Some(pair) =
-                validator_statistics::sync_aggregate_with_root(&block_with_root.block)
-            {
+            if let Some(pair) = validator_statistics::sync_aggregate_with_root(block.message()) {
                 previous_epoch_sync_aggregates_with_roots.insert(slot, pair);
             }
         }
@@ -468,25 +463,19 @@ pub async fn get_validator_statistics<P: Preset, W: Wait>(
         for block_with_root in
             snapshot.blocks_by_range(misc::slots_in_epoch::<P>(current_epoch)?)?
         {
-            let slot = block_with_root.block.message().slot();
+            let block = block_with_root.block;
+            let slot = block.message().slot();
 
             let slot_report = (slot > GENESIS_SLOT)
                 .then(|| {
-                    combined::state_transition_for_report(
-                        config,
-                        pubkey_cache,
-                        state.make_mut(),
-                        &block_with_root.block,
-                    )
+                    state_transition_for_report(config, pubkey_cache, state.make_mut(), &block)
                 })
                 .transpose()?
                 .unwrap_or_default();
 
             current_epoch_slot_reports.insert(slot, slot_report);
 
-            if let Some(pair) =
-                validator_statistics::sync_aggregate_with_root(&block_with_root.block)
-            {
+            if let Some(pair) = validator_statistics::sync_aggregate_with_root(block.message()) {
                 current_epoch_sync_aggregates_with_roots.insert(slot, pair);
             }
         }
@@ -690,16 +679,12 @@ pub async fn get_validator_statistics<P: Preset, W: Wait>(
         for block_with_root in
             snapshot.blocks_by_range(misc::slots_in_epoch::<P>(current_epoch)?)?
         {
-            let slot = block_with_root.block.message().slot();
+            let block = block_with_root.block;
+            let slot = block.message().slot();
 
             let slot_report = (slot > GENESIS_SLOT)
                 .then(|| {
-                    combined::state_transition_for_report(
-                        config,
-                        pubkey_cache,
-                        state.make_mut(),
-                        &block_with_root.block,
-                    )
+                    state_transition_for_report(config, pubkey_cache, state.make_mut(), &block)
                 })
                 .transpose()?
                 .unwrap_or_default();
@@ -927,6 +912,45 @@ pub async fn get_validator_registered<P: Preset, W: Wait>(
         .collect();
 
     Ok(validator_indices)
+}
+
+/// Applies a stored block to `state`, collecting the rewards report.
+///
+/// Blinded blocks produce the same post-state and the same report as full ones, so the execution
+/// payload never has to be reconstructed here.
+pub fn state_transition_for_report<P: Preset>(
+    config: &Config,
+    pubkey_cache: &PubkeyCache,
+    state: &mut BeaconState<P>,
+    block: &StoredBlock<P>,
+) -> Result<RealSlotReport> {
+    let block = match block {
+        StoredBlock::Full(block) => {
+            return combined::state_transition_for_report(config, pubkey_cache, state, block);
+        }
+        StoredBlock::Blinded(block) => block,
+    };
+
+    let (message, _) = block.as_ref().clone().split();
+    let mut slot_report = RealSlotReport::default();
+
+    // The state may already be at the slot of the block, just like in the full block path, which
+    // goes through `ProcessSlots::IfNeeded`.
+    if state.slot() != message.slot() {
+        combined::process_slots(config, pubkey_cache, state, message.slot())?;
+    }
+
+    combined::process_trusted_blinded_block(
+        config,
+        pubkey_cache,
+        state,
+        &message,
+        &mut slot_report,
+    )?;
+
+    state.set_cached_root(message.state_root());
+
+    Ok(slot_report)
 }
 
 fn previous_epoch_proposal_assignments(

@@ -7,6 +7,7 @@ use types::{
 
 use crate::unphased::Error;
 
+#[derive(Clone, Copy)]
 pub enum StateRootPolicy {
     Verify,
     Trust,

@@ -6014,6 +6014,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "bls",
  "bytesize",
  "cached",
  "clock",
@@ -6032,6 +6033,7 @@ dependencies = [
  "futures",
  "genesis",
  "helper_functions",
+ "hex",
  "http_api_utils",
  "itertools 0.14.0",
  "logging",

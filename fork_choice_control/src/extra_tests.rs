@@ -11,7 +11,6 @@
 #![expect(clippy::similar_names)]
 #![expect(clippy::too_many_lines)]
 
-#[cfg(feature = "eth2-cache")]
 use std::sync::Arc;
 
 #[cfg(feature = "eth2-cache")]
@@ -19,12 +18,13 @@ use eth2_cache_utils::medalla;
 #[cfg(feature = "eth2-cache")]
 use eth2_libp2p::GossipId;
 use helper_functions::misc;
-#[cfg(feature = "eth2-cache")]
 use std_ext::ArcExt as _;
 #[cfg(feature = "eth2-cache")]
-use types::{config::Config, preset::Medalla};
+use types::preset::Medalla;
 use types::{
-    nonstandard::PayloadStatus,
+    combined::SignedBlindedBeaconBlock,
+    config::Config,
+    nonstandard::{PayloadStatus, Phase},
     phase0::{
         consts::{GENESIS_EPOCH, GENESIS_SLOT},
         primitives::H256,
@@ -33,7 +33,10 @@ use types::{
     traits::SignedBeaconBlock as _,
 };
 
-use crate::helpers::{Context, Status, epoch_at_slot, is_at_start_of_epoch, start_of_epoch};
+use crate::{
+    helpers::{Context, Status, epoch_at_slot, is_at_start_of_epoch, start_of_epoch},
+    storage::{BlockRootBySlot, FinalizedBlockByRoot, serialize},
+};
 
 #[cfg(feature = "eth2-cache")]
 use crate::specialized::TestController;
@@ -1942,9 +1945,97 @@ fn controller_blocks_by_range_can_access_all_blocks_in_a_segment() {
         .blocks_by_range(GENESIS_SLOT..u64::MAX)
         .expect("arguments passed to blocks_by_range are valid")
         .into_iter()
-        .map(|block_with_root| block_with_root.block);
+        .map(|block_with_root| {
+            block_with_root
+                .block
+                .into_full()
+                .expect("blocks kept in memory are never blinded")
+        });
 
     itertools::assert_equal(actual_blocks, expected_blocks);
+}
+
+// Blocks below the anchor come from the database, where they may be blinded, while blocks in the
+// store are always full. `blocks_by_range` has to stitch both forms into a single response.
+#[test]
+fn blocks_by_range_spans_blinded_stored_blocks_and_full_in_memory_ones() {
+    let builder = Context::bellatrix_minimal();
+
+    let (_, state_0) = builder.genesis();
+    let (block_1, _) =
+        builder.block_with_payload(&state_0, 1, H256::default(), H256::repeat_byte(1));
+    let (block_8, state_8) = builder.block_with_payload(
+        &state_0,
+        start_of_epoch(1),
+        H256::default(),
+        H256::repeat_byte(8),
+    );
+    let (block_9, _) = builder.block_with_payload(
+        &state_8,
+        start_of_epoch(1) + 1,
+        H256::default(),
+        H256::repeat_byte(9),
+    );
+
+    // Anchor the store at `block_8`, leaving `block_1` reachable only through the database.
+    let mut context = Context::new(
+        Arc::new(Config::minimal().start_and_stay_in(Phase::Bellatrix)),
+        builder.pubkey_cache(),
+        block_8.clone_arc(),
+        state_8,
+        true,
+        None,
+    );
+
+    let block_1_root = block_1.message().hash_tree_root();
+
+    let blinded_block_1 = SignedBlindedBeaconBlock::try_from(block_1.as_ref().clone())
+        .expect("Bellatrix blocks have a blindable payload");
+
+    context
+        .storage()
+        .database
+        .put_batch(vec![
+            serialize(BlockRootBySlot(1), block_1_root).expect("block root should be serializable"),
+            serialize(
+                FinalizedBlockByRoot::blinded(block_1_root),
+                &blinded_block_1,
+            )
+            .expect("blinded block should be serializable"),
+        ])
+        .expect("in-memory database should accept writes");
+
+    context.on_slot(start_of_epoch(1) + 1);
+    context.on_acceptable_block(&block_9);
+
+    let blocks = context
+        .blocks_by_range(GENESIS_SLOT..u64::MAX)
+        .expect("arguments passed to blocks_by_range are valid");
+
+    // Every other slot below the anchor is absent from the database and simply skipped.
+    itertools::assert_equal(
+        blocks.iter().map(|block_with_root| block_with_root.root),
+        [
+            block_1_root,
+            block_8.message().hash_tree_root(),
+            block_9.message().hash_tree_root(),
+        ],
+    );
+
+    itertools::assert_equal(
+        blocks
+            .iter()
+            .map(|block_with_root| block_with_root.block.is_blinded()),
+        [true, false, false],
+    );
+
+    // The blinded block still answers everything that does not live in the payload.
+    assert_eq!(
+        blocks[0].block.message().hash_tree_root(),
+        block_1.message().hash_tree_root(),
+    );
+
+    drop(builder);
 }
 
 #[test]

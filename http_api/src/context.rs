@@ -144,6 +144,7 @@ impl<P: Preset> Context<P> {
             Database::in_memory(),
             DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
             StorageMode::default(),
+            true,
         ));
 
         let state_load_strategy = StateLoadStrategy::Anchor {
@@ -214,6 +215,7 @@ impl<P: Preset> Context<P> {
             dedicated_executor.clone_arc(),
             execution_service_rx,
             execution_service_to_blob_fetcher_tx,
+            false,
         );
 
         let signer = Arc::new(Signer::new(

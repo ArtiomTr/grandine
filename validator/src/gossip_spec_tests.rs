@@ -120,6 +120,7 @@ impl<P: Preset> Context<P> {
             Database::in_memory(),
             DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
             StorageMode::default(),
+            true,
         ));
 
         let event_channels = Arc::new(EventChannels::default());

@@ -40,7 +40,7 @@ use crate::{
     controller::Controller,
     messages::AttestationVerifierMessage,
     misc::{VerifyAggregateAndProofResult, VerifyAttestationResult},
-    storage::Storage,
+    storage::{Storage, StoredBlock},
     unbounded_sink::UnboundedSink,
     wait::Wait,
 };
@@ -499,12 +499,9 @@ where
             .contains_block_and_data_available(block_root)
     }
 
-    pub fn block_by_root(
-        &self,
-        block_root: H256,
-    ) -> Result<Option<WithStatus<Arc<SignedBeaconBlock<P>>>>> {
+    pub fn block_by_root(&self, block_root: H256) -> Result<Option<WithStatus<StoredBlock<P>>>> {
         if let Some(with_status) = self.store_snapshot().block(block_root) {
-            return Ok(Some(with_status.cloned()));
+            return Ok(Some(with_status.cloned().map(StoredBlock::Full)));
         }
 
         if let Some(block) = self.storage().finalized_block_by_root(block_root)? {
@@ -512,7 +509,9 @@ where
         }
 
         if let Some(block) = self.storage().unfinalized_block_by_root(block_root)? {
-            return Ok(Some(WithStatus::valid_and_unfinalized(block)));
+            return Ok(Some(WithStatus::valid_and_unfinalized(StoredBlock::Full(
+                block,
+            ))));
         }
 
         Ok(None)
@@ -524,7 +523,7 @@ where
         if let Some(chain_link) = store.chain_link_before_or_at(slot)
             && chain_link.slot() == slot
         {
-            let block = chain_link.block.clone_arc();
+            let block = StoredBlock::Full(chain_link.block.clone_arc());
             let root = chain_link.block_root;
 
             return Ok(Some(WithStatus {
@@ -676,7 +675,7 @@ where
     pub fn blocks_by_root(
         &self,
         block_roots: impl IntoIterator<Item = H256> + Send,
-    ) -> Result<Vec<WithStatus<Arc<SignedBeaconBlock<P>>>>> {
+    ) -> Result<Vec<WithStatus<StoredBlock<P>>>> {
         block_roots
             .into_iter()
             .map(|root| self.block_by_root(root))
@@ -1028,7 +1027,7 @@ where
         block_seen: bool,
         origin: &DataColumnSidecarOrigin,
         validate_block_presence: bool,
-        parent_fn: impl FnOnce() -> Option<(Arc<SignedBeaconBlock<P>>, PayloadStatus)>,
+        parent_fn: impl FnOnce() -> Option<(Slot, PayloadStatus)>,
         state_fn: impl FnOnce() -> Option<Arc<BeaconState<P>>>,
     ) -> Result<DataColumnSidecarAction<P>> {
         self.store_snapshot()
@@ -1210,7 +1209,7 @@ impl<P: Preset> From<(&ChainLink<P>, bool)> for ForkTip {
 }
 
 pub struct BlockWithRoot<P: Preset> {
-    pub block: Arc<SignedBeaconBlock<P>>,
+    pub block: StoredBlock<P>,
     pub root: H256,
 }
 
@@ -1435,7 +1434,7 @@ impl<P: Preset> Snapshot<'_, P> {
             .skip_while(|chain_link| end <= chain_link.slot())
             .take_while(|chain_link| start <= chain_link.slot())
             .map(|chain_link| BlockWithRoot {
-                block: chain_link.block.clone_arc(),
+                block: StoredBlock::Full(chain_link.block.clone_arc()),
                 root: chain_link.block_root,
             })
             .collect_vec();

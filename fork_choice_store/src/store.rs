@@ -3470,7 +3470,7 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
         block_seen: bool,
         origin: &DataColumnSidecarOrigin,
         validate_block_presence: bool,
-        parent_info: impl FnOnce() -> Option<(Arc<SignedBeaconBlock<P>>, PayloadStatus)>,
+        parent_info: impl FnOnce() -> Option<(Slot, PayloadStatus)>,
         state_fn: impl FnOnce() -> Option<Arc<BeaconState<P>>>,
         metrics: Option<&Arc<Metrics>>,
     ) -> Result<DataColumnSidecarAction<P>> {
@@ -3621,7 +3621,7 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
 
             // [IGNORE] The sidecar's block's parent (defined by block_header.parent_root) has been seen (via both gossip and non-gossip sources)
             // (a client MAY queue sidecars for processing once the parent block is retrieved).
-            let Some((parent, parent_payload_status)) = parent_info() else {
+            let Some((parent_slot, parent_payload_status)) = parent_info() else {
                 return Ok(DataColumnSidecarAction::DelayUntilParent(
                     data_column_sidecar,
                 ));
@@ -3637,8 +3637,6 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
             );
 
             // [REJECT] The sidecar is from a higher slot than the sidecar's block's parent (defined by block_header.parent_root).
-            let parent_slot = parent.message().slot();
-
             ensure!(
                 block_header.slot > parent_slot,
                 Error::DataColumnSidecarNotNewerThanBlockParent {
@@ -3746,7 +3744,7 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
         let parent_info = || {
             block_header_opt.and_then(|block_header| {
                 self.chain_link(block_header.parent_root)
-                    .map(|chain_link| (chain_link.block.clone_arc(), chain_link.payload_status))
+                    .map(|chain_link| (chain_link.slot(), chain_link.payload_status))
             })
         };
 

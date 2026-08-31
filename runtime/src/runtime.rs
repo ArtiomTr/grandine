@@ -30,7 +30,7 @@ use eth1_api::{
     ExecutionBlobFetcher, ExecutionService, RealController,
 };
 use features::Feature;
-use fork_choice_control::{Controller, EventChannels, StateLoadStrategy, Storage};
+use fork_choice_control::{Controller, EventChannels, StateLoadStrategy, Storage, StoredBlock};
 use fork_choice_store::StoreConfig;
 use futures::{
     channel::{
@@ -171,6 +171,7 @@ pub async fn run_after_genesis<P: Preset>(
         ref directories,
         archival_epoch_interval,
         storage_mode,
+        store_payloads,
         ..
     } = storage_config;
 
@@ -245,6 +246,7 @@ pub async fn run_after_genesis<P: Preset>(
     eth1_api::spawn_exchange_capabilities_and_versions_task(
         eth1_api.clone_arc(),
         &dedicated_executor_low_priority,
+        !store_payloads,
     );
 
     let execution_engine = Arc::new(Eth1ExecutionEngine::new(
@@ -269,11 +271,14 @@ pub async fn run_after_genesis<P: Preset>(
         storage_database,
         archival_epoch_interval,
         storage_mode,
+        store_payloads,
     ));
 
-    let ((anchor_state, anchor_block, unfinalized_blocks), loaded_from_remote) = storage
+    let ((anchor_state, anchor_block, stored_blocks), loaded_from_remote) = storage
         .load(signer_snapshot.client(), state_load_strategy)
         .await?;
+
+    let unfinalized_blocks = stored_blocks.map(|result| result.and_then(StoredBlock::into_full));
 
     let is_anchor_genesis = anchor_block.message().slot() == GENESIS_SLOT;
 
@@ -341,6 +346,7 @@ pub async fn run_after_genesis<P: Preset>(
         dedicated_executor_low_priority.clone_arc(),
         execution_service_rx,
         execution_service_to_blob_fetcher_tx,
+        !store_payloads,
     );
 
     let execution_blob_fetcher = ExecutionBlobFetcher::new(
@@ -1720,6 +1726,7 @@ fn handle_command<P: Preset>(
     let StorageConfig {
         archival_epoch_interval,
         storage_mode,
+        store_payloads,
         ..
     } = storage_config;
 
@@ -1742,6 +1749,7 @@ fn handle_command<P: Preset>(
                 storage_database,
                 *archival_epoch_interval,
                 *storage_mode,
+                *store_payloads,
             );
 
             let output_dir = output_dir.unwrap_or(std::env::current_dir()?);

@@ -21,7 +21,7 @@ use types::{
         primitives::{CommitteeIndex, Epoch, H256, Slot, ValidatorIndex},
     },
     preset::Preset,
-    traits::{Attestation as _, SignedBeaconBlock as _},
+    traits::Attestation as _,
 };
 
 use crate::{

@@ -129,7 +129,15 @@ impl GrandineConfig {
             ),
         }
 
-        info!("storage mode: {:?}", storage_config.storage_mode);
+        info!(
+            "storage mode: {:?} (execution payloads {})",
+            storage_config.storage_mode,
+            if storage_config.store_payloads {
+                "stored"
+            } else {
+                "not stored"
+            },
+        );
         info!("data directory: {}", data_dir.display());
 
         self.storage_config.print_db_sizes();

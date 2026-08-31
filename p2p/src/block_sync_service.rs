@@ -153,7 +153,7 @@ impl<P: Preset> BlockSyncService<P> {
 
         let (archiver_to_sync_tx, archiver_to_sync_rx) = if back_sync_enabled {
             if loaded_from_remote {
-                let anchor_checkpoint = controller.anchor_block().as_ref().into();
+                let anchor_checkpoint = controller.anchor_block().message().into();
 
                 let latest_finalized_back_sync_checkpoint =
                     get_latest_finalized_back_sync_checkpoint(&db)?;
@@ -169,7 +169,7 @@ impl<P: Preset> BlockSyncService<P> {
                                 .checkpoint()
                                 .value
                                 .block
-                                .as_ref()
+                                .message()
                                 .into()
                         } else {
                             let terminus_epoch = controller.min_checked_block_availability_epoch();
@@ -323,7 +323,7 @@ impl<P: Preset> BlockSyncService<P> {
                     None => Either::Right(futures::future::pending()),
                 }, if self.fork_choice_to_sync_rx.is_some() => match message {
                     SyncMessage::Finalized(block) => {
-                        let checkpoint = block.as_ref().into();
+                        let checkpoint = block.message().into();
 
                         debug_with_peers!("saving latest finalized back-sync checkpoint: {checkpoint:?}");
 
@@ -1243,7 +1243,7 @@ impl<P: Preset> BlockSyncService<P> {
         column_indices: HashSet<u64>,
         previous_earliest_available_slot: Slot,
     ) -> Result<()> {
-        let current: SyncCheckpoint = self.controller.head().value.block.as_ref().into();
+        let current: SyncCheckpoint = self.controller.head().value.block.message().into();
 
         if current.slot == GENESIS_SLOT {
             return Ok(());

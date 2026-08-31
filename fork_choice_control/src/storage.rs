@@ -2,24 +2,31 @@ use core::{cell::OnceCell, marker::PhantomData, num::NonZeroU64};
 use std::{borrow::Cow, sync::Arc};
 
 use anyhow::{Context as _, Error as AnyhowError, Result, bail, ensure};
-use database::{Database, PrefixableKey};
+use database::{Database, PrefixableKey, decompress};
 use derive_more::Display;
 use fork_choice_store::{ChainLink, Store};
 use genesis::AnchorCheckpointProvider;
-use helper_functions::{accessors, misc};
+use helper_functions::{
+    accessors,
+    error::SignatureKind,
+    misc,
+    signing::SignForSingleFork as _,
+    slot_report::NullSlotReport,
+    verifier::{SingleVerifier, Verifier as _},
+};
 use itertools::Itertools as _;
 use logging::{debug_with_peers, info_with_peers, warn_with_peers};
 use nonzero_ext::nonzero;
 use pubkey_cache::PubkeyCache;
 use reqwest::Client;
-use ssz::{Ssz, SszRead, SszReadDefault, SszWrite};
+use ssz::{Ssz, SszHash as _, SszRead, SszReadDefault, SszWrite};
 use std_ext::ArcExt as _;
 use thiserror::Error;
 use tracing::info;
-use transition_functions::combined;
+use transition_functions::{combined, unphased::StateRootPolicy};
 use typenum::Unsigned as _;
 use types::{
-    combined::{BeaconState, DataColumnSidecar, SignedBeaconBlock},
+    combined::{BeaconState, DataColumnSidecar, SignedBeaconBlock, SignedBlindedBeaconBlock},
     config::Config,
     deneb::{
         containers::{BlobIdentifier, BlobSidecar},
@@ -28,21 +35,26 @@ use types::{
     fulu::{containers::DataColumnIdentifier, primitives::ColumnIndex},
     gloas::containers::SignedExecutionPayloadEnvelope,
     nonstandard::{
-        BlobSidecarWithId, DataColumnSidecarWithId, FinalizedCheckpoint, PubkeyList, StorageMode,
+        BlobSidecarWithId, DataColumnSidecarWithId, FinalizedCheckpoint, Phase, PubkeyList,
+        StorageMode,
     },
     phase0::{
         consts::GENESIS_SLOT,
+        containers::SignedBeaconBlockHeader,
         primitives::{Epoch, H256, Slot},
     },
     preset::Preset,
     redacting_url::RedactingUrl,
-    traits::{BeaconState as _, SignedBeaconBlock as _, SszValidatorList},
+    traits::{BeaconBlock, BeaconState as _, SignedBeaconBlock as _, SszValidatorList},
 };
 
 use crate::checkpoint_sync;
 
 pub const DEFAULT_ARCHIVAL_EPOCH_INTERVAL: NonZeroU64 = nonzero!(32_u64);
 pub const MAX_DATA_COLUMN_EPOCHS_TO_PRUNE: usize = 100;
+
+/// Suffix distinguishing a blinded finalized block from a full one.
+const BLINDED_BLOCK_SUFFIX: &str = "bl";
 
 pub enum StateLoadStrategy<P: Preset> {
     Auto {
@@ -67,6 +79,7 @@ pub struct Storage<P> {
     pub(crate) archival_epoch_interval: NonZeroU64,
     storage_mode: StorageMode,
     pub(crate) pubkey_cache: Arc<PubkeyCache>,
+    store_payloads: bool,
     phantom: PhantomData<P>,
 }
 
@@ -78,6 +91,7 @@ impl<P: Preset> Storage<P> {
         database: Database,
         archival_epoch_interval: NonZeroU64,
         storage_mode: StorageMode,
+        store_payloads: bool,
     ) -> Self {
         Self {
             config,
@@ -85,6 +99,7 @@ impl<P: Preset> Storage<P> {
             database: Arc::new(database),
             archival_epoch_interval,
             storage_mode,
+            store_payloads,
             phantom: PhantomData,
         }
     }
@@ -104,12 +119,17 @@ impl<P: Preset> Storage<P> {
         self.storage_mode.is_prune()
     }
 
+    #[must_use]
+    pub const fn payload_storage_enabled(&self) -> bool {
+        self.store_payloads
+    }
+
     #[expect(clippy::too_many_lines)]
     pub async fn load(
         &self,
         client: &Client,
         state_load_strategy: StateLoadStrategy<P>,
-    ) -> Result<(StateStorage<'_, P>, bool)> {
+    ) -> Result<(LoadedStateStorage<'_, P>, bool)> {
         let anchor_block;
         let anchor_state;
         let unfinalized_blocks: UnfinalizedBlocks<P>;
@@ -122,10 +142,42 @@ impl<P: Preset> Storage<P> {
                 anchor_checkpoint_provider,
             } => 'block: {
                 // Attempt to load local state first: either latest or from specified slot.
-                let local_state_storage = match state_slot {
+                let mut local_state_storage = match state_slot {
                     Some(slot) => self.load_state_by_iteration(slot, None)?,
                     None => self.load_latest_state(None)?,
                 };
+
+                // The anchor block seeds the fork choice store, which needs its real
+                // `hash_tree_root` and therefore the full block. Only the checkpoint record keeps
+                // a block whole when payload storage is off, and iteration bypasses that record,
+                // so `--state-slot` may find a state it cannot use. The latest checkpoint is the
+                // only usable replacement; it may be newer than the requested slot, which does not
+                // honor the rewind, but the alternative is falling back to the anchor checkpoint
+                // and resyncing from it.
+                if state_slot.is_some()
+                    && let OptionalStateStorage::Full((state, block, _)) = &local_state_storage
+                    && block.is_blinded()
+                {
+                    warn_with_peers!(
+                        "block of the stored state in slot {} is missing its execution payload",
+                        state.slot(),
+                    );
+
+                    let latest_state_storage = self.load_latest_state(None)?;
+
+                    if let OptionalStateStorage::Full((latest_state, latest_block, _)) =
+                        &latest_state_storage
+                        && !latest_block.is_blinded()
+                    {
+                        warn_with_peers!(
+                            "falling back to the stored checkpoint in slot {}; \
+                            pass --store-payloads to make --state-slot reach past it",
+                            latest_state.slot(),
+                        );
+
+                        local_state_storage = latest_state_storage;
+                    }
+                }
 
                 if let Some(url) = checkpoint_sync_url {
                     if local_state_storage.is_none() {
@@ -161,8 +213,27 @@ impl<P: Preset> Storage<P> {
                 }
 
                 match local_state_storage {
-                    OptionalStateStorage::Full(state_storage) => {
-                        (anchor_state, anchor_block, unfinalized_blocks) = state_storage;
+                    // The anchor block seeds the fork choice store, which needs its real
+                    // `hash_tree_root` and therefore the full block. Blocks written as
+                    // checkpoints are always stored full, so this only rejects anchors found
+                    // by iteration on a database whose checkpoint record is missing.
+                    OptionalStateStorage::Full((state, block, blocks)) if !block.is_blinded() => {
+                        anchor_state = state;
+                        anchor_block = block.into_full()?;
+                        unfinalized_blocks = blocks;
+                    }
+                    OptionalStateStorage::Full((_, _, local_unfinalized_blocks)) => {
+                        warn_with_peers!(
+                            "stored anchor block is missing its execution payload; \
+                             falling back to the anchor checkpoint",
+                        );
+
+                        let FinalizedCheckpoint { block, state } =
+                            anchor_checkpoint_provider.checkpoint().value;
+
+                        anchor_block = block;
+                        anchor_state = state;
+                        unfinalized_blocks = local_unfinalized_blocks;
                     }
                     // State might not be found but unfinalized blocks could be present.
                     OptionalStateStorage::UnfinalizedOnly(local_unfinalized_blocks) => {
@@ -226,7 +297,7 @@ impl<P: Preset> Storage<P> {
         let anchor_validators = anchor_state.validators();
 
         let mut batch = vec![
-            serialize(FinalizedBlockByRoot(anchor_block_root), &anchor_block)?,
+            serialize(FinalizedBlockByRoot::full(anchor_block_root), &anchor_block)?,
             serialize(BlockRootBySlot(anchor_slot), anchor_block_root)?,
             serialize(SlotByStateRoot(anchor_state_root), anchor_slot)?,
             serialize(
@@ -306,7 +377,7 @@ impl<P: Preset> Storage<P> {
             if !self.prune_storage_enabled() {
                 if finalized && !self.contains_finalized_block(block_root)? {
                     slots.finalized.push(state_slot);
-                    batch.push(serialize(FinalizedBlockByRoot(block_root), block)?);
+                    batch.push(self.serialize_finalized_block(block_root, block)?);
                 } else if !self.contains_unfinalized_block(block_root)? {
                     slots.unfinalized.push(state_slot);
                     batch.push(serialize(UnfinalizedBlockByRoot(block_root), block)?);
@@ -494,7 +565,15 @@ impl<P: Preset> Storage<P> {
         for block_root_bytes in block_roots_to_remove {
             let block_root = H256::from_ssz_default(block_root_bytes)?;
 
-            keys_to_remove.push(FinalizedBlockByRoot(block_root).to_string().into());
+            // The block may be stored either full or blinded, so delete whichever key exists.
+            let block_prefix = FinalizedBlockByRoot::prefix(block_root);
+            let block_keys = self.database.keys_ascending(block_prefix.as_bytes()..)?;
+
+            keys_to_remove.extend(itertools::process_results(block_keys, |keys| {
+                keys.take_while(|key| key.starts_with(block_prefix.as_bytes()))
+                    .collect::<Vec<_>>()
+            })?);
+
             keys_to_remove.push(StateByBlockRoot(block_root).to_string().into());
         }
 
@@ -705,8 +784,33 @@ impl<P: Preset> Storage<P> {
             .map_err(Into::into)
     }
 
+    /// Serialize a finalized block for storage, blinding it when payload storage is off.
+    ///
+    /// Pre-Bellatrix and Gloas blocks are always stored as they are: the former have no
+    /// execution payload and the latter keep theirs in separate envelope records. Pre-Merge
+    /// Bellatrix blocks are stored as they are too, because blinded block processing assumes every
+    /// blinded block is post-Merge and rejects the default payload header they would be blinded to.
+    pub(crate) fn serialize_finalized_block(
+        &self,
+        block_root: H256,
+        block: &Arc<SignedBeaconBlock<P>>,
+    ) -> Result<(String, Vec<u8>)> {
+        let blindable = block.has_blindable_payload()
+            && block
+                .execution_block_hash()
+                .is_some_and(|block_hash| !block_hash.is_zero());
+
+        if self.store_payloads || !blindable {
+            return serialize(FinalizedBlockByRoot::full(block_root), block);
+        }
+
+        let blinded = SignedBlindedBeaconBlock::try_from(block.as_ref().clone())?;
+
+        serialize(FinalizedBlockByRoot::blinded(block_root), &blinded)
+    }
+
     pub(crate) fn contains_finalized_block(&self, block_root: H256) -> Result<bool> {
-        self.contains_key(FinalizedBlockByRoot(block_root))
+        self.contains_prefixed_key(FinalizedBlockByRoot::prefix(block_root))
     }
 
     pub(crate) fn contains_unfinalized_block(&self, block_root: H256) -> Result<bool> {
@@ -716,8 +820,32 @@ impl<P: Preset> Storage<P> {
     pub(crate) fn finalized_block_by_root(
         &self,
         block_root: H256,
-    ) -> Result<Option<Arc<SignedBeaconBlock<P>>>> {
-        self.get(FinalizedBlockByRoot(block_root))
+    ) -> Result<Option<StoredBlock<P>>> {
+        // The full key carries the payload variant as a suffix, so a single lookup for the
+        // first key at or after `b{block_root}` resolves both existence and variant.
+        let prefix = FinalizedBlockByRoot::prefix(block_root);
+
+        let Some((full_key, raw_value)) = self.database.next_raw(&prefix)? else {
+            return Ok(None);
+        };
+
+        // The key we received is only known to be lexicographically greater than or equal to
+        // the prefix, so it may belong to an unrelated block.
+        if !full_key.starts_with(prefix.as_bytes()) {
+            return Ok(None);
+        }
+
+        let key = FinalizedBlockByRoot::try_from(full_key.as_slice())?;
+        let value_bytes = decompress(&raw_value)?;
+
+        let block = match key.payload {
+            StoredPayload::Full => StoredBlock::Full(Arc::from_ssz(&*self.config, value_bytes)?),
+            StoredPayload::Blinded => {
+                StoredBlock::Blinded(Arc::from_ssz(&*self.config, value_bytes)?)
+            }
+        };
+
+        Ok(Some(block))
     }
 
     pub(crate) fn unfinalized_block_by_root(
@@ -782,7 +910,7 @@ impl<P: Preset> Storage<P> {
     pub(crate) fn finalized_block_by_slot(
         &self,
         slot: Slot,
-    ) -> Result<Option<(Arc<SignedBeaconBlock<P>>, H256)>> {
+    ) -> Result<Option<(StoredBlock<P>, H256)>> {
         let Some(block_root) = self.block_root_by_slot(slot)? else {
             return Ok(None);
         };
@@ -812,13 +940,7 @@ impl<P: Preset> Storage<P> {
         // State may be persisted only once in several epochs.
         // `blocks` here are needed to transition state closer to `slot`.
         for result in blocks.rev() {
-            let block = result?;
-            combined::trusted_state_transition(
-                &self.config,
-                &self.pubkey_cache,
-                state.make_mut(),
-                &block,
-            )?;
+            self.replay_block(state.make_mut(), result?, StateRootPolicy::Trust)?;
         }
 
         if state.slot() < slot {
@@ -855,7 +977,7 @@ impl<P: Preset> Storage<P> {
 
             if let Some(block) = self.unfinalized_block_by_root(block_root)? {
                 block_root = block.message().parent_root();
-                blocks.push(block);
+                blocks.push(StoredBlock::Full(block));
                 continue;
             }
 
@@ -863,15 +985,91 @@ impl<P: Preset> Storage<P> {
         };
 
         for block in blocks.into_iter().rev() {
-            combined::trusted_state_transition(
-                &self.config,
-                &self.pubkey_cache,
-                state.make_mut(),
-                &block,
-            )?;
+            self.replay_block(state.make_mut(), block, StateRootPolicy::Trust)?;
         }
 
         Ok(Some(state))
+    }
+
+    /// Apply a stored block to `state`.
+    ///
+    /// Blinded blocks go through blinded block processing, which produces the same post-state
+    /// as full block processing, so historical state replay never needs the execution payload.
+    pub(crate) fn replay_block(
+        &self,
+        state: &mut BeaconState<P>,
+        block: StoredBlock<P>,
+        state_root_policy: StateRootPolicy,
+    ) -> Result<()> {
+        let block = match block {
+            StoredBlock::Full(block) => {
+                return match state_root_policy {
+                    StateRootPolicy::Trust => combined::trusted_state_transition(
+                        &self.config,
+                        &self.pubkey_cache,
+                        state,
+                        &block,
+                    ),
+                    StateRootPolicy::Verify => combined::untrusted_state_transition(
+                        &self.config,
+                        &self.pubkey_cache,
+                        state,
+                        &block,
+                    ),
+                };
+            }
+            StoredBlock::Blinded(block) => block,
+        };
+
+        let slot = block.message().slot();
+        let in_block = block.message().state_root();
+        let (message, signature) = Arc::unwrap_or_clone(block).split();
+
+        combined::process_slots(&self.config, &self.pubkey_cache, state, slot)?;
+
+        match state_root_policy {
+            StateRootPolicy::Trust => {
+                combined::process_trusted_blinded_block(
+                    &self.config,
+                    &self.pubkey_cache,
+                    state,
+                    &message,
+                    NullSlotReport,
+                )?;
+
+                state.set_cached_root(in_block);
+            }
+            StateRootPolicy::Verify => {
+                // Blinded block processing only sees the message, so the proposer signature has to
+                // be verified separately to match what full block processing does.
+                let pubkey = accessors::public_key(state, message.proposer_index())?;
+
+                SingleVerifier.verify_singular(
+                    message.signing_root(&self.config, state),
+                    signature,
+                    self.pubkey_cache.get_or_insert(*pubkey)?,
+                    SignatureKind::Block,
+                )?;
+
+                combined::process_untrusted_blinded_block(
+                    &self.config,
+                    &self.pubkey_cache,
+                    state,
+                    &message,
+                    NullSlotReport,
+                    false,
+                )?;
+
+                let computed = state.hash_tree_root();
+
+                ensure!(
+                    computed == in_block,
+                    Error::StateRootMismatch { computed, in_block },
+                );
+            }
+        }
+
+        Ok(())
     }
 
     pub(crate) fn stored_state_by_state_root(
@@ -923,7 +1121,7 @@ impl<P: Preset> Storage<P> {
                     },
                 );
 
-                block
+                StoredBlock::Full(block)
             } else {
                 self.finalized_block_by_root(block_root)?
                     .ok_or(Error::BlockNotFound { block_root })?
@@ -1030,6 +1228,12 @@ impl<P: Preset> Storage<P> {
         self.database.contains_key(key_string)
     }
 
+    fn contains_prefixed_key(&self, key: impl core::fmt::Display) -> Result<bool> {
+        let key_string = key.to_string();
+
+        self.database.contains_prefixed_key(key_string)
+    }
+
     fn get<V: SszRead<Config>>(&self, key: impl core::fmt::Display) -> Result<Option<V>> {
         let key_string = key.to_string();
 
@@ -1048,7 +1252,7 @@ impl<P: Preset> Storage<P> {
             }
 
             if let Some(block) = self.unfinalized_block_by_root(block_root)? {
-                return Ok(block);
+                return Ok(StoredBlock::Full(block));
             }
 
             bail!(Error::BlockNotFound { block_root })
@@ -1127,7 +1331,7 @@ impl<P: Preset> Storage<P> {
     pub fn finalized_block_count(&self) -> Result<usize> {
         let results = self
             .database
-            .iterator_ascending(FinalizedBlockByRoot(H256::zero()).to_string()..)?;
+            .iterator_ascending_raw(FinalizedBlockByRoot::full(H256::zero()).to_string()..)?;
 
         itertools::process_results(results, |pairs| {
             pairs
@@ -1218,8 +1422,64 @@ pub struct AppendedBlockSlots {
     pub unfinalized: Vec<Slot>,
 }
 
+/// A finalized block as it is held in the database.
+///
+/// Blocks are stored blinded when payload storage is off, so every read path has to be
+/// prepared for either form. Everything that does not live in the execution payload is
+/// reachable through [`StoredBlock::message`]; callers that genuinely need the payload have
+/// to reconstruct it from the execution client, which `fork_choice_control` cannot do.
+#[derive(Clone, Debug)]
+pub enum StoredBlock<P: Preset> {
+    Full(Arc<SignedBeaconBlock<P>>),
+    Blinded(Arc<SignedBlindedBeaconBlock<P>>),
+}
+
+impl<P: Preset> StoredBlock<P> {
+    #[must_use]
+    pub fn message(&self) -> &dyn BeaconBlock<P> {
+        match self {
+            Self::Full(block) => block.message(),
+            Self::Blinded(block) => block.message(),
+        }
+    }
+
+    /// The block header, which never depends on the execution payload.
+    #[must_use]
+    pub fn to_header(&self) -> SignedBeaconBlockHeader {
+        match self {
+            Self::Full(block) => block.to_header(),
+            Self::Blinded(block) => block
+                .message()
+                .to_header()
+                .with_signature(block.signature()),
+        }
+    }
+
+    #[must_use]
+    pub fn phase(&self) -> Phase {
+        match self {
+            Self::Full(block) => block.phase(),
+            Self::Blinded(block) => block.phase(),
+        }
+    }
+
+    #[must_use]
+    pub const fn is_blinded(&self) -> bool {
+        matches!(self, Self::Blinded(_))
+    }
+
+    pub fn into_full(self) -> Result<Arc<SignedBeaconBlock<P>>> {
+        match self {
+            Self::Full(block) => Ok(block),
+            Self::Blinded(block) => bail!(Error::BlockPayloadNotStored {
+                block_root: block.message().hash_tree_root(),
+            }),
+        }
+    }
+}
+
 type UnfinalizedBlocks<'storage, P> =
-    Box<dyn DoubleEndedIterator<Item = Result<Arc<SignedBeaconBlock<P>>>> + Send + 'storage>;
+    Box<dyn DoubleEndedIterator<Item = Result<StoredBlock<P>>> + Send + 'storage>;
 
 // Internal type for state storage that can be missing or have missing elements.
 // E.g. non-finalized storage that has only unfinalized blocks stored.
@@ -1236,6 +1496,16 @@ impl<P: Preset> OptionalStateStorage<'_, P> {
 }
 
 type StateStorage<'storage, P> = (
+    Arc<BeaconState<P>>,
+    StoredBlock<P>,
+    UnfinalizedBlocks<'storage, P>,
+);
+
+/// Anchor as handed to the fork choice store.
+///
+/// The anchor block is always full, but the blocks that follow it may be stored blinded, so the
+/// caller has to reconstruct them before the fork choice store can re-validate them.
+type LoadedStateStorage<'storage, P> = (
     Arc<BeaconState<P>>,
     Arc<SignedBeaconBlock<P>>,
     UnfinalizedBlocks<'storage, P>,
@@ -1306,12 +1576,84 @@ impl PrefixableKey for BlockRootBySlot {
     const PREFIX: &'static str = "r";
 }
 
-#[derive(Display)]
-#[display("{}{_0:x}", Self::PREFIX)]
-pub struct FinalizedBlockByRoot(pub H256);
+/// Whether a stored finalized block carries its execution payload.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoredPayload {
+    Full,
+    Blinded,
+}
+
+/// Key of a finalized block.
+///
+/// Full blocks keep the bare `b{block_root}` key they have always had, so databases written
+/// by older versions load unchanged. Blinded blocks append [`BLINDED_BLOCK_SUFFIX`], which
+/// lets a single `next_key` over `b{block_root}` resolve both existence and variant.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FinalizedBlockByRoot {
+    pub block_root: H256,
+    pub payload: StoredPayload,
+}
 
 impl PrefixableKey for FinalizedBlockByRoot {
     const PREFIX: &'static str = "b";
+}
+
+impl core::fmt::Display for FinalizedBlockByRoot {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}{:x}", Self::PREFIX, self.block_root)?;
+
+        if matches!(self.payload, StoredPayload::Blinded) {
+            write!(f, "{BLINDED_BLOCK_SUFFIX}")?;
+        }
+
+        Ok(())
+    }
+}
+
+impl TryFrom<&'_ [u8]> for FinalizedBlockByRoot {
+    type Error = AnyhowError;
+
+    fn try_from(value: &'_ [u8]) -> Result<Self> {
+        let Some(stripped) = value.strip_prefix(Self::PREFIX.as_bytes()) else {
+            bail!("invalid prefix");
+        };
+
+        let (stripped, payload) = match stripped.strip_suffix(BLINDED_BLOCK_SUFFIX.as_bytes()) {
+            Some(stripped) => (stripped, StoredPayload::Blinded),
+            None => (stripped, StoredPayload::Full),
+        };
+
+        let mut block_root = H256::default();
+
+        hex::decode_to_slice(str::from_utf8(stripped)?, &mut block_root.0)?;
+
+        Ok(Self {
+            block_root,
+            payload,
+        })
+    }
+}
+
+impl FinalizedBlockByRoot {
+    #[must_use]
+    pub const fn full(block_root: H256) -> Self {
+        Self {
+            block_root,
+            payload: StoredPayload::Full,
+        }
+    }
+
+    #[must_use]
+    pub const fn blinded(block_root: H256) -> Self {
+        Self {
+            block_root,
+            payload: StoredPayload::Blinded,
+        }
+    }
+
+    pub(crate) fn prefix(block_root: H256) -> String {
+        format!("{}{:x}", Self::PREFIX, block_root)
+    }
 }
 
 #[derive(Display)]
@@ -1451,6 +1793,10 @@ pub enum Error {
     PersistedSlotCannotContainAnchor { slot: Slot },
     #[error("storage key has incorrect prefix: {bytes:?}")]
     IncorrectPrefix { bytes: Vec<u8> },
+    #[error("block {block_root:?} is stored without its execution payload")]
+    BlockPayloadNotStored { block_root: H256 },
+    #[error("state root mismatch (computed: {computed:?}, in block: {in_block:?})")]
+    StateRootMismatch { computed: H256, in_block: H256 },
 }
 
 pub fn save(database: &Database, key: impl core::fmt::Display, value: impl SszWrite) -> Result<()> {
@@ -1519,17 +1865,150 @@ fn prepare_state<P: Preset>(
 
 #[cfg(test)]
 mod tests {
+    use bls::SignatureBytes;
     use bytesize::ByteSize;
     use database::DatabaseMode;
+    use ssz::SszHash as _;
     use tempfile::TempDir;
     use types::{
-        phase0::containers::{
-            BeaconBlock as Phase0BeaconBlock, SignedBeaconBlock as Phase0SignedBeaconBlock,
+        altair::containers::BeaconBlock as AltairBeaconBlock,
+        bellatrix::containers::{
+            BeaconBlock as BellatrixBeaconBlock, BeaconBlockBody as BellatrixBeaconBlockBody,
+            ExecutionPayload as BellatrixExecutionPayload,
         },
-        preset::Mainnet,
+        capella::containers::{
+            BeaconBlock as CapellaBeaconBlock, BeaconBlockBody as CapellaBeaconBlockBody,
+            ExecutionPayload as CapellaExecutionPayload,
+        },
+        combined::BeaconBlock,
+        deneb::containers::{
+            BeaconBlock as DenebBeaconBlock, BeaconBlockBody as DenebBeaconBlockBody,
+            ExecutionPayload as DenebExecutionPayload,
+        },
+        electra::containers::{
+            BeaconBlock as ElectraBeaconBlock, BeaconBlockBody as ElectraBeaconBlockBody,
+        },
+        fulu::containers::{
+            BeaconBlock as FuluBeaconBlock, BeaconBlockBody as FuluBeaconBlockBody,
+        },
+        gloas::containers::BeaconBlock as GloasBeaconBlock,
+        nonstandard::Phase,
+        phase0::{
+            containers::{
+                BeaconBlock as Phase0BeaconBlock, SignedBeaconBlock as Phase0SignedBeaconBlock,
+            },
+            primitives::ExecutionBlockHash,
+        },
+        preset::{Mainnet, Minimal},
     };
 
     use super::*;
+
+    const BLINDABLE_PHASES: [Phase; 5] = [
+        Phase::Bellatrix,
+        Phase::Capella,
+        Phase::Deneb,
+        Phase::Electra,
+        Phase::Fulu,
+    ];
+
+    const UNBLINDABLE_PHASES: [Phase; 3] = [Phase::Phase0, Phase::Altair, Phase::Gloas];
+
+    /// Builds a block at `phase` whose execution payload, if any, is post-Merge.
+    ///
+    /// Only post-Merge blocks are stored blinded, so a default payload would defeat the point of
+    /// most of the tests below.
+    fn block_at_phase(phase: Phase) -> Arc<SignedBeaconBlock<Mainnet>> {
+        let block_hash = ExecutionBlockHash::repeat_byte(1);
+
+        let block = match phase {
+            Phase::Phase0 => BeaconBlock::Phase0(Phase0BeaconBlock::default().into()),
+            Phase::Altair => BeaconBlock::Altair(AltairBeaconBlock::default().into()),
+            Phase::Bellatrix => BeaconBlock::Bellatrix(
+                BellatrixBeaconBlock {
+                    body: BellatrixBeaconBlockBody {
+                        execution_payload: BellatrixExecutionPayload {
+                            block_hash,
+                            ..BellatrixExecutionPayload::default()
+                        },
+                        ..BellatrixBeaconBlockBody::default()
+                    },
+                    ..BellatrixBeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Capella => BeaconBlock::Capella(
+                CapellaBeaconBlock {
+                    body: CapellaBeaconBlockBody {
+                        execution_payload: CapellaExecutionPayload {
+                            block_hash,
+                            ..CapellaExecutionPayload::default()
+                        },
+                        ..CapellaBeaconBlockBody::default()
+                    },
+                    ..CapellaBeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Deneb => BeaconBlock::Deneb(
+                DenebBeaconBlock {
+                    body: DenebBeaconBlockBody {
+                        execution_payload: DenebExecutionPayload {
+                            block_hash,
+                            ..DenebExecutionPayload::default()
+                        },
+                        ..DenebBeaconBlockBody::default()
+                    },
+                    ..DenebBeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Electra => BeaconBlock::Electra(
+                ElectraBeaconBlock {
+                    body: ElectraBeaconBlockBody {
+                        execution_payload: DenebExecutionPayload {
+                            block_hash,
+                            ..DenebExecutionPayload::default()
+                        },
+                        ..ElectraBeaconBlockBody::default()
+                    },
+                    ..ElectraBeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Fulu => BeaconBlock::Fulu(
+                FuluBeaconBlock {
+                    body: FuluBeaconBlockBody {
+                        execution_payload: DenebExecutionPayload {
+                            block_hash,
+                            ..DenebExecutionPayload::default()
+                        },
+                        ..FuluBeaconBlockBody::default()
+                    },
+                    ..FuluBeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Gloas => BeaconBlock::Gloas(GloasBeaconBlock::default().into()),
+        };
+
+        Arc::new(block.with_signature(SignatureBytes::default()))
+    }
+
+    fn storage_with_config(config: Config, store_payloads: bool) -> Storage<Mainnet> {
+        Storage::<Mainnet>::new(
+            Arc::new(config),
+            Arc::new(PubkeyCache::default()),
+            Database::in_memory(),
+            DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
+            StorageMode::default(),
+            store_payloads,
+        )
+    }
+
+    fn storage_with_payload_setting(store_payloads: bool) -> Storage<Mainnet> {
+        storage_with_config(Config::mainnet(), store_payloads)
+    }
 
     fn block_with_slot(slot: Slot) -> SignedBeaconBlock<Mainnet> {
         SignedBeaconBlock::<Mainnet>::Phase0(Phase0SignedBeaconBlock {
@@ -1561,18 +2040,18 @@ mod tests {
         database.put_batch(vec![
             // Slot 1
             serialize(BlockRootBySlot(1), H256::repeat_byte(1))?,
-            serialize(FinalizedBlockByRoot(H256::repeat_byte(1)), &block_1)?,
+            serialize(FinalizedBlockByRoot::full(H256::repeat_byte(1)), &block_1)?,
             serialize(SlotByStateRoot(H256::repeat_byte(1)), 1_u64)?,
             serialize(StateByBlockRoot(H256::repeat_byte(1)), 1_u64)?,
             // Slot 3
             serialize(BlockRootBySlot(3), H256::repeat_byte(3))?,
-            serialize(FinalizedBlockByRoot(H256::repeat_byte(3)), &block_3)?,
+            serialize(FinalizedBlockByRoot::full(H256::repeat_byte(3)), &block_3)?,
             // Slot 5
             serialize(BlockRootBySlot(5), H256::repeat_byte(5))?,
             serialize(UnfinalizedBlockByRoot(H256::repeat_byte(5)), &block_5)?,
             //Slot 6
             serialize(BlockRootBySlot(6), H256::repeat_byte(6))?,
-            serialize(FinalizedBlockByRoot(H256::repeat_byte(6)), &block_6)?,
+            serialize(FinalizedBlockByRoot::full(H256::repeat_byte(6)), &block_6)?,
             serialize(UnfinalizedBlockByRoot(H256::repeat_byte(6)), &block_6)?,
             serialize(SlotByStateRoot(H256::repeat_byte(6)), 6_u64)?,
             serialize(StateByBlockRoot(H256::repeat_byte(6)), 6_u64)?,
@@ -1589,6 +2068,7 @@ mod tests {
             database,
             nonzero!(64_u64),
             StorageMode::default(),
+            true,
         );
 
         // slots 1, 3, 10
@@ -1627,12 +2107,12 @@ mod tests {
         database.put_batch(vec![
             // Slot 1
             serialize(BlockRootBySlot(1), H256::repeat_byte(1))?,
-            serialize(FinalizedBlockByRoot(H256::repeat_byte(1)), &block)?,
+            serialize(FinalizedBlockByRoot::full(H256::repeat_byte(1)), &block)?,
             serialize(SlotByStateRoot(H256::repeat_byte(1)), 1_u64)?,
             serialize(StateByBlockRoot(H256::repeat_byte(1)), 1_u64)?,
             // Slot 3
             serialize(BlockRootBySlot(3), H256::repeat_byte(3))?,
-            serialize(FinalizedBlockByRoot(H256::repeat_byte(3)), &block)?,
+            serialize(FinalizedBlockByRoot::full(H256::repeat_byte(3)), &block)?,
             // Slot 5
             serialize(BlockRootBySlot(5), H256::repeat_byte(5))?,
             serialize(UnfinalizedBlockByRoot(H256::repeat_byte(5)), &block)?,
@@ -1654,6 +2134,7 @@ mod tests {
             database,
             nonzero!(64_u64),
             StorageMode::default(),
+            true,
         );
 
         assert_eq!(storage.finalized_block_count()?, 2);
@@ -1694,6 +2175,7 @@ mod tests {
             database,
             nonzero!(64_u64),
             StorageMode::default(),
+            true,
         );
 
         let blob_id_0 = BlobIdentifier {
@@ -1763,6 +2245,7 @@ mod tests {
             database,
             nonzero!(64_u64),
             StorageMode::default(),
+            true,
         );
 
         assert_eq!(storage.block_root_before_or_at_slot(1)?, None);
@@ -1782,6 +2265,642 @@ mod tests {
             storage.block_root_before_or_at_slot(9)?,
             Some(H256::repeat_byte(6)),
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn finalized_block_key_round_trips() -> Result<()> {
+        let block_root = H256::repeat_byte(7);
+
+        for key in [
+            FinalizedBlockByRoot::full(block_root),
+            FinalizedBlockByRoot::blinded(block_root),
+        ] {
+            let string = key.to_string();
+            let parsed = FinalizedBlockByRoot::try_from(string.as_bytes())?;
+
+            assert_eq!(parsed, key);
+        }
+
+        assert_eq!(
+            FinalizedBlockByRoot::blinded(block_root).to_string(),
+            format!(
+                "{}{BLINDED_BLOCK_SUFFIX}",
+                FinalizedBlockByRoot::full(block_root)
+            ),
+        );
+
+        FinalizedBlockByRoot::try_from(UnfinalizedBlockByRoot(block_root).to_string().as_bytes())
+            .expect_err("an unfinalized block key is not a finalized block key");
+
+        Ok(())
+    }
+
+    #[test]
+    fn post_merge_finalized_blocks_are_stored_blinded_without_payload_storage() -> Result<()> {
+        let storage = storage_with_payload_setting(false);
+
+        for phase in BLINDABLE_PHASES {
+            let block = block_at_phase(phase);
+            let block_root = block.message().hash_tree_root();
+            let blinded = SignedBlindedBeaconBlock::try_from(block.as_ref().clone())?;
+
+            let (key, _) = storage.serialize_finalized_block(block_root, &block)?;
+
+            assert_eq!(key, FinalizedBlockByRoot::blinded(block_root).to_string());
+
+            storage
+                .database
+                .put_batch(vec![storage.serialize_finalized_block(block_root, &block)?])?;
+
+            assert!(storage.contains_finalized_block(block_root)?);
+            assert_eq!(
+                storage
+                    .database
+                    .get(FinalizedBlockByRoot::full(block_root).to_string())?,
+                None,
+            );
+
+            let stored = storage
+                .database
+                .get(key)?
+                .expect("blinded block was just stored");
+
+            assert_eq!(stored, blinded.to_ssz()?);
+            assert_eq!(
+                SignedBlindedBeaconBlock::<Mainnet>::from_ssz(&phase, stored.as_slice())?
+                    .message()
+                    .hash_tree_root(),
+                block.message().hash_tree_root(),
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn finalized_blocks_are_stored_whole_with_payload_storage() -> Result<()> {
+        let storage = storage_with_payload_setting(true);
+
+        for phase in BLINDABLE_PHASES.into_iter().chain(UNBLINDABLE_PHASES) {
+            let block = block_at_phase(phase);
+            let block_root = block.message().hash_tree_root();
+
+            assert_eq!(
+                storage.serialize_finalized_block(block_root, &block)?,
+                serialize(FinalizedBlockByRoot::full(block_root), &block)?,
+            );
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn blocks_without_blindable_payload_are_stored_whole() -> Result<()> {
+        let storage = storage_with_payload_setting(false);
+
+        for phase in UNBLINDABLE_PHASES {
+            let block = block_at_phase(phase);
+            let block_root = block.message().hash_tree_root();
+
+            assert_eq!(
+                storage.serialize_finalized_block(block_root, &block)?,
+                serialize(FinalizedBlockByRoot::full(block_root), &block)?,
+            );
+        }
+
+        Ok(())
+    }
+
+    // Blinded block processing assumes every blinded block is post-Merge, so a pre-Merge Bellatrix
+    // block that got blinded could never be replayed again.
+    #[test]
+    fn pre_merge_blocks_are_stored_whole() -> Result<()> {
+        let storage = storage_with_payload_setting(false);
+        let block = Arc::new(
+            BeaconBlock::<Mainnet>::Bellatrix(BellatrixBeaconBlock::default().into())
+                .with_signature(SignatureBytes::default()),
+        );
+        let block_root = block.message().hash_tree_root();
+
+        assert_eq!(
+            storage.serialize_finalized_block(block_root, &block)?,
+            serialize(FinalizedBlockByRoot::full(block_root), &block)?,
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_prune_old_blocks_and_states_removes_blinded_blocks() -> Result<()> {
+        let storage = storage_with_payload_setting(false);
+        let block = block_at_phase(Phase::Deneb);
+        let blinded = SignedBlindedBeaconBlock::try_from(block.as_ref().clone())?;
+
+        storage.database.put_batch(vec![
+            serialize(BlockRootBySlot(1), H256::repeat_byte(1))?,
+            serialize(
+                FinalizedBlockByRoot::blinded(H256::repeat_byte(1)),
+                &blinded,
+            )?,
+            serialize(BlockRootBySlot(3), H256::repeat_byte(3))?,
+            serialize(FinalizedBlockByRoot::full(H256::repeat_byte(3)), &block)?,
+            serialize(BlockRootBySlot(9), H256::repeat_byte(9))?,
+            serialize(
+                FinalizedBlockByRoot::blinded(H256::repeat_byte(9)),
+                &blinded,
+            )?,
+        ])?;
+
+        assert_eq!(storage.finalized_block_count()?, 3);
+        assert!(storage.contains_finalized_block(H256::repeat_byte(1))?);
+
+        storage.prune_old_blocks_and_states(5)?;
+
+        // Blinded and full blocks alike are pruned; the block in slot 9 is newer than the
+        // pruning threshold and stays.
+        assert_eq!(storage.finalized_block_count()?, 1);
+        assert!(!storage.contains_finalized_block(H256::repeat_byte(1))?);
+        assert!(!storage.contains_finalized_block(H256::repeat_byte(3))?);
+        assert!(storage.contains_finalized_block(H256::repeat_byte(9))?);
+
+        Ok(())
+    }
+
+    // Every graceful shutdown persists the finalized chain up to `last_finalized`, while the
+    // checkpoint state is written at the newest finalized epoch start, so finalized blocks
+    // routinely sit above the checkpoint state and are stored blinded. `load` has to hand them to
+    // the caller as they are instead of demanding their payloads.
+    #[tokio::test]
+    async fn load_hands_out_blinded_blocks_persisted_after_the_checkpoint_state() -> Result<()> {
+        let config = Arc::new(Config::minimal().start_and_stay_in(Phase::Bellatrix));
+        let pubkey_cache = Arc::new(PubkeyCache::default());
+        let (genesis_state, _) = factory::min_genesis_state::<Minimal>(&config, &pubkey_cache)?;
+        let anchor_checkpoint_provider =
+            AnchorCheckpointProvider::custom_from_genesis(genesis_state.clone_arc());
+        let genesis_block = anchor_checkpoint_provider.checkpoint().value.block;
+        let genesis_block_root = genesis_block.message().hash_tree_root();
+
+        let payload = factory::execution_payload(
+            &config,
+            &genesis_state,
+            1,
+            ExecutionBlockHash::repeat_byte(1),
+        )?;
+
+        let (block, _) = factory::block_with_payload(
+            &config,
+            &pubkey_cache,
+            genesis_state.clone_arc(),
+            1,
+            H256::zero(),
+            payload,
+        )?;
+
+        let block_root = block.message().hash_tree_root();
+
+        let storage = Storage::<Minimal>::new(
+            config,
+            pubkey_cache,
+            Database::in_memory(),
+            DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
+            StorageMode::default(),
+            false,
+        );
+
+        let mut batch = vec![
+            serialize(
+                StateCheckpoint::<Minimal>::KEY,
+                StateCheckpoint {
+                    block_root: genesis_block_root,
+                    head_slot: 1,
+                    state: genesis_state.clone_arc(),
+                },
+            )?,
+            serialize(
+                BlockCheckpoint::<Minimal>::KEY,
+                BlockCheckpoint {
+                    block: genesis_block,
+                },
+            )?,
+            serialize(BlockRootBySlot(1), block_root)?,
+            storage.serialize_finalized_block(block_root, &block)?,
+        ];
+
+        storage
+            .append_finalized_validator_pubkeys_to_batch(&mut batch, genesis_state.validators())?;
+
+        storage.database.put_batch(batch)?;
+
+        let ((_, anchor_block, blocks), loaded_from_remote) = storage
+            .load(
+                &Client::new(),
+                StateLoadStrategy::Auto {
+                    state_slot: None,
+                    checkpoint_sync_url: None,
+                    anchor_checkpoint_provider,
+                },
+            )
+            .await?;
+
+        assert!(!loaded_from_remote);
+        assert_eq!(anchor_block.message().hash_tree_root(), genesis_block_root);
+
+        let blinded_flags = blocks
+            .map(|result| result.map(|block| block.is_blinded()))
+            .collect::<Result<Vec<_>>>()?;
+
+        assert_eq!(blinded_flags, [true]);
+
+        Ok(())
+    }
+
+    fn blinded_block_at_phase(phase: Phase) -> Arc<SignedBlindedBeaconBlock<Mainnet>> {
+        let block = block_at_phase(phase);
+
+        Arc::new(
+            SignedBlindedBeaconBlock::try_from(block.as_ref().clone())
+                .expect("phase has a blindable payload"),
+        )
+    }
+
+    #[test]
+    fn finalized_blocks_are_read_back_in_the_form_they_were_stored() -> Result<()> {
+        let storage = storage_with_config(Config::mainnet().start_and_stay_in(Phase::Deneb), false);
+
+        let full_root = H256::repeat_byte(1);
+        let blinded_root = H256::repeat_byte(2);
+        let full = block_at_phase(Phase::Deneb);
+        let blinded = blinded_block_at_phase(Phase::Deneb);
+
+        storage.database.put_batch(vec![
+            // A database written by an older version stores blocks under the bare key.
+            serialize(FinalizedBlockByRoot::full(full_root), &full)?,
+            serialize(FinalizedBlockByRoot::blinded(blinded_root), &blinded)?,
+        ])?;
+
+        let stored = storage
+            .finalized_block_by_root(full_root)?
+            .expect("full block was just stored");
+
+        assert!(!stored.is_blinded());
+        assert_eq!(stored.into_full()?.to_ssz()?, full.to_ssz()?);
+
+        let stored = storage
+            .finalized_block_by_root(blinded_root)?
+            .expect("blinded block was just stored");
+
+        assert!(stored.is_blinded());
+        assert_eq!(
+            stored.message().hash_tree_root(),
+            blinded.message().hash_tree_root(),
+        );
+        stored
+            .into_full()
+            .expect_err("a blinded block has no payload to hand out");
+
+        assert!(
+            storage
+                .finalized_block_by_root(H256::repeat_byte(3))?
+                .is_none()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn unfinalized_blocks_are_not_mistaken_for_finalized_ones() -> Result<()> {
+        let storage = storage_with_config(Config::mainnet().start_and_stay_in(Phase::Deneb), false);
+
+        let block_root = H256::repeat_byte(0xff);
+        let block = block_at_phase(Phase::Deneb);
+
+        storage
+            .database
+            .put_batch(vec![serialize(UnfinalizedBlockByRoot(block_root), &block)?])?;
+
+        assert!(storage.finalized_block_by_root(block_root)?.is_none());
+
+        Ok(())
+    }
+
+    #[test]
+    fn finalized_block_by_slot_resolves_blinded_blocks() -> Result<()> {
+        let storage =
+            storage_with_config(Config::mainnet().start_and_stay_in(Phase::Capella), false);
+
+        let block_root = H256::repeat_byte(4);
+        let blinded = blinded_block_at_phase(Phase::Capella);
+
+        storage.database.put_batch(vec![
+            serialize(BlockRootBySlot(7), block_root)?,
+            serialize(FinalizedBlockByRoot::blinded(block_root), &blinded)?,
+        ])?;
+
+        let (stored, root) = storage
+            .finalized_block_by_slot(7)?
+            .expect("blinded block was just stored");
+
+        assert_eq!(root, block_root);
+        assert!(stored.is_blinded());
+
+        Ok(())
+    }
+
+    #[test]
+    fn blocks_by_roots_carries_both_stored_forms() -> Result<()> {
+        let storage =
+            storage_with_config(Config::mainnet().start_and_stay_in(Phase::Electra), false);
+
+        let blinded_root = H256::repeat_byte(5);
+        let full_root = H256::repeat_byte(6);
+        let unfinalized_root = H256::repeat_byte(7);
+        let block = block_at_phase(Phase::Electra);
+        let blinded = blinded_block_at_phase(Phase::Electra);
+
+        storage.database.put_batch(vec![
+            serialize(FinalizedBlockByRoot::blinded(blinded_root), &blinded)?,
+            serialize(FinalizedBlockByRoot::full(full_root), &block)?,
+            serialize(UnfinalizedBlockByRoot(unfinalized_root), &block)?,
+        ])?;
+
+        let blinded_flags = storage
+            .blocks_by_roots(vec![blinded_root, full_root, unfinalized_root])
+            .map(|result| result.map(|block| block.is_blinded()))
+            .collect::<Result<Vec<_>>>()?;
+
+        assert_eq!(blinded_flags, [true, false, false]);
+
+        storage
+            .blocks_by_roots(vec![H256::repeat_byte(8)])
+            .next()
+            .expect("iterator yields one item per requested root")
+            .expect_err("an unknown block root has no stored block");
+
+        Ok(())
+    }
+
+    #[test]
+    fn replaying_a_blinded_block_yields_the_same_state_as_the_full_one() -> Result<()> {
+        let config = Arc::new(Config::minimal().start_and_stay_in(Phase::Bellatrix));
+        let pubkey_cache = Arc::new(PubkeyCache::default());
+        let (genesis_state, _) = factory::min_genesis_state::<Minimal>(&config, &pubkey_cache)?;
+
+        let payload = factory::execution_payload(
+            &config,
+            &genesis_state,
+            1,
+            ExecutionBlockHash::repeat_byte(1),
+        )?;
+
+        let (block, post_state) = factory::block_with_payload(
+            &config,
+            &pubkey_cache,
+            genesis_state.clone_arc(),
+            1,
+            H256::zero(),
+            payload,
+        )?;
+
+        let storage = Storage::<Minimal>::new(
+            config,
+            pubkey_cache,
+            Database::in_memory(),
+            DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
+            StorageMode::default(),
+            false,
+        );
+
+        let blinded = Arc::new(SignedBlindedBeaconBlock::try_from(block.as_ref().clone())?);
+
+        let mut replayed_from_full = genesis_state.clone_arc();
+        storage.replay_block(
+            replayed_from_full.make_mut(),
+            StoredBlock::Full(block.clone_arc()),
+            StateRootPolicy::Trust,
+        )?;
+
+        let mut replayed_from_blinded = genesis_state;
+        storage.replay_block(
+            replayed_from_blinded.make_mut(),
+            StoredBlock::Blinded(blinded),
+            StateRootPolicy::Trust,
+        )?;
+
+        assert_eq!(replayed_from_full.to_ssz()?, post_state.to_ssz()?);
+        assert_eq!(replayed_from_blinded.to_ssz()?, post_state.to_ssz()?);
+        assert_eq!(
+            replayed_from_blinded.hash_tree_root(),
+            replayed_from_full.hash_tree_root(),
+        );
+
+        Ok(())
+    }
+
+    // Back-sync archiving replays stored blocks with `StateRootPolicy::Verify`, so blinded blocks
+    // have to produce a state whose root matches the one they carry.
+    #[test]
+    fn verified_replay_of_a_blinded_block_checks_the_state_root() -> Result<()> {
+        let config = Arc::new(Config::minimal().start_and_stay_in(Phase::Bellatrix));
+        let pubkey_cache = Arc::new(PubkeyCache::default());
+        let (genesis_state, _) = factory::min_genesis_state::<Minimal>(&config, &pubkey_cache)?;
+
+        let payload = factory::execution_payload(
+            &config,
+            &genesis_state,
+            1,
+            ExecutionBlockHash::repeat_byte(1),
+        )?;
+
+        let (block, post_state) = factory::block_with_payload(
+            &config,
+            &pubkey_cache,
+            genesis_state.clone_arc(),
+            1,
+            H256::zero(),
+            payload,
+        )?;
+
+        let storage = Storage::<Minimal>::new(
+            config,
+            pubkey_cache,
+            Database::in_memory(),
+            DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
+            StorageMode::default(),
+            false,
+        );
+
+        let blinded = SignedBlindedBeaconBlock::try_from(block.as_ref().clone())?;
+
+        let mut replayed = genesis_state.clone_arc();
+        storage.replay_block(
+            replayed.make_mut(),
+            StoredBlock::Blinded(Arc::new(blinded.clone())),
+            StateRootPolicy::Verify,
+        )?;
+
+        assert_eq!(replayed.to_ssz()?, post_state.to_ssz()?);
+
+        let mut tampered = blinded;
+
+        match &mut tampered {
+            SignedBlindedBeaconBlock::Bellatrix(block) => {
+                block.message.state_root = H256::repeat_byte(0xff);
+            }
+            _ => unreachable!("block was built in Bellatrix"),
+        }
+
+        let mut replayed = genesis_state;
+
+        storage
+            .replay_block(
+                replayed.make_mut(),
+                StoredBlock::Blinded(Arc::new(tampered)),
+                StateRootPolicy::Verify,
+            )
+            .expect_err("the tampered state root should not verify");
+
+        Ok(())
+    }
+
+    // Blinded block processing never sees the signature, so `StateRootPolicy::Verify` has to check
+    // the proposer signature separately to match what full block processing does.
+    #[test]
+    fn verified_replay_of_a_blinded_block_checks_the_block_signature() -> Result<()> {
+        let config = Arc::new(Config::minimal().start_and_stay_in(Phase::Bellatrix));
+        let pubkey_cache = Arc::new(PubkeyCache::default());
+        let (genesis_state, _) = factory::min_genesis_state::<Minimal>(&config, &pubkey_cache)?;
+
+        let payload = factory::execution_payload(
+            &config,
+            &genesis_state,
+            1,
+            ExecutionBlockHash::repeat_byte(1),
+        )?;
+
+        let (block, _) = factory::block_with_payload(
+            &config,
+            &pubkey_cache,
+            genesis_state.clone_arc(),
+            1,
+            H256::zero(),
+            payload,
+        )?;
+
+        let storage = Storage::<Minimal>::new(
+            config,
+            pubkey_cache,
+            Database::in_memory(),
+            DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
+            StorageMode::default(),
+            false,
+        );
+
+        let mut tampered = SignedBlindedBeaconBlock::try_from(block.as_ref().clone())?;
+
+        match &mut tampered {
+            SignedBlindedBeaconBlock::Bellatrix(block) => {
+                block.signature = SignatureBytes::default();
+            }
+            _ => unreachable!("block was built in Bellatrix"),
+        }
+
+        let mut replayed = genesis_state;
+
+        storage
+            .replay_block(
+                replayed.make_mut(),
+                StoredBlock::Blinded(Arc::new(tampered)),
+                StateRootPolicy::Verify,
+            )
+            .expect_err("the tampered block signature should not verify");
+
+        Ok(())
+    }
+
+    #[test]
+    fn back_synced_blocks_are_stored_in_the_configured_form() -> Result<()> {
+        for store_payloads in [false, true] {
+            let storage = storage_with_config(
+                Config::mainnet().start_and_stay_in(Phase::Deneb),
+                store_payloads,
+            );
+
+            let block = block_at_phase(Phase::Deneb);
+            let block_root = block.message().hash_tree_root();
+            let slot = block.message().slot();
+
+            storage.store_back_sync_blocks(core::iter::once(block.clone_arc()))?;
+
+            assert_eq!(storage.block_root_by_slot(slot)?, Some(block_root));
+
+            let stored = storage
+                .finalized_block_by_root(block_root)?
+                .expect("back-synced block was just stored");
+
+            assert_eq!(stored.is_blinded(), !store_payloads);
+            assert_eq!(
+                stored.message().hash_tree_root(),
+                block.message().hash_tree_root(),
+            );
+        }
+
+        Ok(())
+    }
+
+    // Turning `--store-payloads` back on must not strand the blocks written while it was off.
+    #[test]
+    fn blinded_blocks_stay_readable_after_payload_storage_is_re_enabled() -> Result<()> {
+        let config = Config::mainnet().start_and_stay_in(Phase::Deneb);
+        let blinded_root = H256::repeat_byte(1);
+        let full_root = H256::repeat_byte(2);
+        let blinded = blinded_block_at_phase(Phase::Deneb);
+        let full = block_at_phase(Phase::Deneb);
+        let database = Database::in_memory();
+
+        database.put_batch(vec![
+            serialize(BlockRootBySlot(3), blinded_root)?,
+            serialize(FinalizedBlockByRoot::blinded(blinded_root), &blinded)?,
+        ])?;
+
+        let storage = Storage::<Mainnet>::new(
+            Arc::new(config),
+            Arc::new(PubkeyCache::default()),
+            database,
+            DEFAULT_ARCHIVAL_EPOCH_INTERVAL,
+            StorageMode::default(),
+            true,
+        );
+
+        // Blocks appended after the restart are stored whole, next to the blinded ones.
+        storage
+            .database
+            .put_batch(vec![storage.serialize_finalized_block(full_root, &full)?])?;
+
+        let stored = storage
+            .finalized_block_by_root(blinded_root)?
+            .expect("blinded block was stored before payload storage was re-enabled");
+
+        assert!(stored.is_blinded());
+        assert_eq!(
+            stored.message().hash_tree_root(),
+            blinded.message().hash_tree_root(),
+        );
+
+        let (stored, root) = storage
+            .finalized_block_by_slot(3)?
+            .expect("blinded block was stored before payload storage was re-enabled");
+
+        assert_eq!(root, blinded_root);
+        assert!(stored.is_blinded());
+
+        let blinded_flags = storage
+            .blocks_by_roots(vec![blinded_root, full_root])
+            .map(|result| result.map(|block| block.is_blinded()))
+            .collect::<Result<Vec<_>>>()?;
+
+        assert_eq!(blinded_flags, [true, false]);
 
         Ok(())
     }

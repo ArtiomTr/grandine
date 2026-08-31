@@ -9,7 +9,6 @@ use types::{
     altair::containers::SyncCommitteeMessage,
     phase0::primitives::{Epoch, H256, Slot, ValidatorIndex},
     preset::Preset,
-    traits::SignedBeaconBlock as _,
 };
 
 #[derive(Debug)]

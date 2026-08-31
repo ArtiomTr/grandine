@@ -33,6 +33,7 @@ pub struct ExecutionService<P: Preset, W: Wait> {
     dedicated_executor: Arc<DedicatedExecutor>,
     rx: UnboundedReceiver<ExecutionServiceMessage<P>>,
     blob_fetcher_tx: UnboundedSender<Eth1ApiToBlobFetcher<P>>,
+    payload_reconstruction_required: bool,
 }
 
 impl<P: Preset, W: Wait> ExecutionService<P, W> {
@@ -43,6 +44,7 @@ impl<P: Preset, W: Wait> ExecutionService<P, W> {
                     spawn_exchange_capabilities_and_versions_task(
                         self.api.clone_arc(),
                         &self.dedicated_executor,
+                        self.payload_reconstruction_required,
                     );
                 }
                 ExecutionServiceMessage::GetBlobs(params) => {

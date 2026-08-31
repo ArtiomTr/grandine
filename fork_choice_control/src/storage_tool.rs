@@ -7,7 +7,7 @@ use pubkey_cache::PubkeyCache;
 use ssz::{SszHash as _, SszRead, SszWrite as _};
 use std_ext::ArcExt as _;
 use thiserror::Error;
-use transition_functions::combined;
+use transition_functions::{combined, unphased::StateRootPolicy};
 use types::{
     combined::BeaconState, config::Config, phase0::primitives::Slot, preset::Preset,
     traits::BeaconState as _,
@@ -38,11 +38,10 @@ pub fn export_state_and_blocks<P: Preset>(
 
                 for current_slot in temporary_state.slot().saturating_add(1)..=state_slot {
                     if let Some((block, _)) = storage.finalized_block_by_slot(current_slot)? {
-                        combined::untrusted_state_transition(
-                            storage.config(),
-                            pubkey_cache,
+                        storage.replay_block(
                             temporary_state.make_mut(),
-                            &block,
+                            block,
+                            StateRootPolicy::Verify,
                         )?;
                     }
                 }
@@ -80,7 +79,10 @@ pub fn export_state_and_blocks<P: Preset>(
             let block_file_name =
                 format!("beacon_block_slot_{current_slot:06}_root_{block_root:?}.ssz");
 
-            fs_err::write(output_dir.join(block_file_name), block.to_ssz()?)?;
+            fs_err::write(
+                output_dir.join(block_file_name),
+                block.into_full()?.to_ssz()?,
+            )?;
         }
     }
 

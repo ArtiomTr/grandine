@@ -27,7 +27,9 @@ use dedicated_executor::DedicatedExecutor;
 use enum_iterator::Sequence as _;
 use eth1_api::{ApiController, ClientVersionV1, Eth1Api};
 use eth2_libp2p::{GossipId, PeerId};
-use fork_choice_control::{Event, EventChannels, ForkChoiceContext, ForkTip, Topic, Wait};
+use fork_choice_control::{
+    Event, EventChannels, ForkChoiceContext, ForkTip, StoredBlock, Topic, Wait,
+};
 use fork_choice_store::{
     AttestationItem, AttestationOrigin, PayloadAttestationItem, PayloadAttestationOrigin,
 };
@@ -126,6 +128,7 @@ use crate::{
     error::{Error, IndexedError},
     extractors::{EthJson, EthJsonOrSsz, EthJsonOrSszWithOptionalPhase, EthPath, EthQuery},
     full_config::FullConfig,
+    gui,
     misc::{
         APIBlock, BlockContents, BroadcastValidation,
         PayloadAttestationMessageListPhaseDeserializer, SignedAPIBlock,
@@ -1295,7 +1298,9 @@ pub async fn block<P: Preset, W: Wait>(
         value: block,
         status,
         finalized,
-    } = block_id::block(block_id, &controller, &anchor_checkpoint_provider)?;
+    } = block_id::stored_block(block_id, &controller, &anchor_checkpoint_provider)?;
+
+    let block = block.into_full().map_err(Error::Internal)?;
 
     let version = block.phase();
 
@@ -1334,7 +1339,7 @@ pub async fn block_attestations<P: Preset, W: Wait>(
         value: block,
         status,
         finalized,
-    } = block_id::block(block_id, &controller, &anchor_checkpoint_provider)?;
+    } = block_id::stored_block(block_id, &controller, &anchor_checkpoint_provider)?;
 
     let attestations = block.message().body().combined_attestations().collect_vec();
 
@@ -1357,7 +1362,7 @@ pub async fn block_attestations_v2<P: Preset, W: Wait>(
         value: block,
         status,
         finalized,
-    } = block_id::block(block_id, &controller, &anchor_checkpoint_provider)?;
+    } = block_id::stored_block(block_id, &controller, &anchor_checkpoint_provider)?;
 
     let attestations = block.message().body().combined_attestations().collect_vec();
 
@@ -1382,11 +1387,9 @@ pub async fn blinded_block<P: Preset, W: Wait>(
         value: block,
         status,
         finalized,
-    } = block_id::block(block_id, &controller, &anchor_checkpoint_provider)?;
+    } = block_id::stored_block(block_id, &controller, &anchor_checkpoint_provider)?;
 
-    let signed_blinded_block: SignedBlindedBeaconBlock<P> = Arc::unwrap_or_clone(block)
-        .try_into()
-        .map_err(AnyhowError::new)?;
+    let signed_blinded_block = block_id::into_blinded(block)?;
 
     let version = signed_blinded_block.phase();
 
@@ -1412,7 +1415,7 @@ pub async fn blob_sidecars<P: Preset, W: Wait>(
         value: block,
         status,
         finalized,
-    } = block_id::block(block_id, &controller, &anchor_checkpoint_provider)?;
+    } = block_id::stored_block(block_id, &controller, &anchor_checkpoint_provider)?;
 
     let version = block.phase();
     let block_root = block.message().hash_tree_root();
@@ -1435,11 +1438,14 @@ pub async fn blob_sidecars<P: Preset, W: Wait>(
             .body()
             .with_blob_kzg_commitments()
             .map(BlockBodyWithBlobKzgCommitments::blob_kzg_commitments)
+            .map(|kzg_commitments| kzg_commitments.iter().copied().collect_vec())
         else {
             return Ok(EthResponse::json_or_ssz(DynamicList::empty(), &headers)?
                 .execution_optimistic(status.is_optimistic())
                 .finalized(finalized));
         };
+
+        let block = block.into_full().map_err(Error::Internal)?;
 
         let blobs = construct_blobs_from_data_column_sidecars(
             controller.clone_arc(),
@@ -1497,7 +1503,7 @@ pub async fn execution_payload_envelope<P: Preset, W: Wait>(
         value: block,
         status,
         finalized,
-    } = block_id::block(block_id, &controller, &anchor_checkpoint_provider)?;
+    } = block_id::stored_block(block_id, &controller, &anchor_checkpoint_provider)?;
 
     let version = block.phase();
 
@@ -1532,7 +1538,7 @@ pub async fn blobs<P: Preset, W: Wait>(
         value: block,
         status,
         finalized,
-    } = block_id::block(block_id, &controller, &anchor_checkpoint_provider)?;
+    } = block_id::stored_block(block_id, &controller, &anchor_checkpoint_provider)?;
 
     let version = block.phase();
     let block_root = block.message().hash_tree_root();
@@ -1574,6 +1580,8 @@ pub async fn blobs<P: Preset, W: Wait>(
     };
 
     let blobs = if version.is_peerdas_activated() {
+        let block = block.into_full().map_err(Error::Internal)?;
+
         let blobs = construct_blobs_from_data_column_sidecars(
             controller.clone_arc(),
             block,
@@ -1977,25 +1985,40 @@ pub async fn block_rewards<P: Preset, W: Wait>(
     EthPath(block_id): EthPath<BlockId>,
 ) -> Result<EthResponse<BlockRewardsResponse>, Error> {
     let WithStatus {
-        value: signed_block,
+        value: stored_block,
         status,
         finalized,
-    } = block_id::block(block_id, &controller, &anchor_checkpoint_provider)?;
+    } = block_id::stored_block(block_id, &controller, &anchor_checkpoint_provider)?;
 
-    let block: BeaconBlock<P> = Arc::unwrap_or_clone(signed_block).into();
-    let block_slot = block.slot();
+    // Rewards come from attestations, slashings and the sync aggregate, so a block stored blinded
+    // is replayed as is rather than reconstructed from the execution client.
+    let (block_slot, proposer_index) = {
+        let message = stored_block.message();
+        (message.slot(), message.proposer_index())
+    };
 
     let block_rewards = (block_slot > GENESIS_SLOT)
         .then(|| {
             tokio::task::block_in_place(|| {
-                let parent_root = block.parent_root();
+                let parent_root = stored_block.message().parent_root();
 
                 let state =
                     controller.preprocessed_state_post_block_blocking(parent_root, block_slot)?;
 
-                controller
-                    .block_processor()
-                    .process_trusted_block_with_report(state, &block)
+                let block_processor = controller.block_processor();
+
+                match stored_block {
+                    StoredBlock::Full(block) => {
+                        let block: BeaconBlock<P> = Arc::unwrap_or_clone(block).into();
+
+                        block_processor.process_trusted_block_with_report(state, &block)
+                    }
+                    StoredBlock::Blinded(block) => {
+                        let (block, _) = Arc::unwrap_or_clone(block).split();
+
+                        block_processor.process_trusted_blinded_block_with_report(state, &block)
+                    }
+                }
             })
         })
         .transpose()?
@@ -2011,7 +2034,7 @@ pub async fn block_rewards<P: Preset, W: Wait>(
     } = block_rewards;
 
     let rewards_response = BlockRewardsResponse {
-        proposer_index: block.proposer_index(),
+        proposer_index,
         total,
         attestations,
         sync_aggregate,
@@ -2033,11 +2056,13 @@ pub async fn sync_committee_rewards<P: Preset, W: Wait>(
     EthPath(block_id): EthPath<BlockId>,
     EthJson(validator_ids): EthJson<Vec<ValidatorId>>,
 ) -> Result<EthResponse<Vec<SyncCommitteeRewardsResponse>>, Error> {
+    // Sync committee rewards come from the sync aggregate, so a block stored blinded is replayed
+    // as is rather than reconstructed from the execution client.
     let WithStatus {
         value: block,
         status,
         finalized,
-    } = block_id::block(block_id, &controller, &anchor_checkpoint_provider)?;
+    } = block_id::stored_block(block_id, &controller, &anchor_checkpoint_provider)?;
 
     let block_slot = block.message().slot();
 
@@ -2053,7 +2078,7 @@ pub async fn sync_committee_rewards<P: Preset, W: Wait>(
         let mut state =
             controller.preprocessed_state_post_block_blocking(parent_root, block_slot)?;
 
-        let sync_committee_deltas = transition_functions::combined::state_transition_for_report(
+        let sync_committee_deltas = gui::state_transition_for_report(
             &chain_config,
             controller.pubkey_cache(),
             state.make_mut(),
@@ -2586,7 +2611,7 @@ pub async fn debug_beacon_data_column_sidecars<P: Preset, W: Wait>(
     headers: HeaderMap,
 ) -> Result<EthResponse<DynamicList<Arc<DataColumnSidecar<P>>>, (), JsonOrSsz>, Error> {
     let block_with_status =
-        match block_id::block(block_id, &controller, &anchor_checkpoint_provider) {
+        match block_id::stored_block(block_id, &controller, &anchor_checkpoint_provider) {
             Ok(block) => block,
             Err(error) => {
                 if matches!(error, Error::BlockNotFound)
@@ -4034,7 +4059,7 @@ pub async fn validator_payload_attestation_data<P: Preset, W: Wait>(
             .state_before_or_at_slot(block_root, slot)
             .ok_or(Error::StateNotFound)?;
         blob_data_available = controller
-            .indices_of_missing_data_columns(&block.value.block)
+            .indices_of_missing_data_columns(&*block.value.block.into_full()?)
             .is_empty();
         block.status.is_optimistic()
     } else {

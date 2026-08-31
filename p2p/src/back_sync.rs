@@ -10,6 +10,7 @@ use database::{Database, PrefixableKey};
 use derive_more::Display;
 use eth1_api::RealController;
 use execution_engine::NullExecutionEngine;
+use fork_choice_control::StoredBlock;
 use fork_choice_store::{
     BlobSidecarAction, BlobSidecarOrigin, DataColumnSidecarAction, DataColumnSidecarOrigin,
     ExecutionPayloadEnvelopeAction, ExecutionPayloadEnvelopeOrigin,
@@ -36,7 +37,7 @@ use types::{
         primitives::{H256, Slot},
     },
     preset::Preset,
-    traits::{BeaconState as _, SignedBeaconBlock as _},
+    traits::{BeaconBlock, BeaconState as _, SignedBeaconBlock as _},
 };
 use wincode::{SchemaRead, SchemaWrite};
 
@@ -404,14 +405,12 @@ impl<P: Preset> Batch<P> {
         &self,
         config: &Config,
         controller: &RealController<P>,
-        block: &Arc<SignedBeaconBlock<P>>,
-        parent: &Arc<SignedBeaconBlock<P>>,
+        block: &dyn BeaconBlock<P>,
+        parent_slot: Slot,
         storage_mode: StorageMode,
         validatable_columns: &HashSet<ColumnIndex>,
         validate_block_presence: bool,
     ) -> Result<Vec<Arc<DataColumnSidecar<P>>>> {
-        let block = block.message();
-
         // `block.phase` has already been checked
         let Some(body) = block.body().with_blob_kzg_commitments() else {
             return Ok(vec![]);
@@ -451,7 +450,7 @@ impl<P: Preset> Batch<P> {
                         true,
                         &DataColumnSidecarOrigin::BackSync,
                         validate_block_presence,
-                        || Some((parent.clone_arc(), PayloadStatus::Optimistic)),
+                        || Some((parent_slot, PayloadStatus::Optimistic)),
                         || Some(head_state.clone_arc()),
                     )
                 })?;
@@ -578,8 +577,8 @@ impl<P: Preset> Batch<P> {
                     let mut data_columns = self.valid_data_column_sidecars_for(
                         config,
                         controller,
-                        block,
-                        parent,
+                        block.message(),
+                        parent.message().slot(),
                         storage_mode,
                         &controller.sampling_columns(),
                         false,
@@ -619,7 +618,7 @@ impl<P: Preset> Batch<P> {
         }
 
         if let Some(earliest_block) = verified_blocks.last() {
-            checkpoint = earliest_block.as_ref().into();
+            checkpoint = earliest_block.message().into();
         }
 
         debug_with_peers!("next batch checkpoint: {checkpoint:?}");
@@ -660,7 +659,7 @@ impl<P: Preset> Batch<P> {
             .collect::<HashSet<_>>();
 
         let mut blocks_with_roots = HashMap::new();
-        let mut earliest_block: Option<Arc<SignedBeaconBlock<P>>> = None;
+        let mut earliest_block: Option<StoredBlock<P>> = None;
 
         for root in block_roots {
             if let Some(block) = controller.block_by_root(root)?.map(WithStatus::value) {
@@ -671,13 +670,14 @@ impl<P: Preset> Batch<P> {
         for block in blocks_with_roots.values() {
             let parent_root = block.message().parent_root();
 
-            let parent = match blocks_with_roots.get(&parent_root) {
-                Some(parent) => parent,
-                None => &match controller
+            // Only the parent's slot is needed, so a blinded parent is as good as a full one.
+            let parent_slot = match blocks_with_roots.get(&parent_root) {
+                Some(parent) => parent.message().slot(),
+                None => match controller
                     .block_by_root(parent_root)?
                     .map(WithStatus::value)
                 {
-                    Some(parent) => parent,
+                    Some(parent) => parent.message().slot(),
                     None => continue,
                 },
             };
@@ -691,8 +691,8 @@ impl<P: Preset> Batch<P> {
             let mut data_columns = self.valid_data_column_sidecars_for(
                 config,
                 controller,
-                block,
-                parent,
+                block.message(),
+                parent_slot,
                 storage_mode,
                 column_indices,
                 false,
@@ -705,7 +705,7 @@ impl<P: Preset> Batch<P> {
                 .map(|block| block_slot < block.message().slot())
                 .unwrap_or(true)
             {
-                earliest_block = Some(block.clone_arc());
+                earliest_block = Some(block.clone());
             }
         }
 
@@ -731,7 +731,7 @@ impl<P: Preset> Batch<P> {
                 break;
             }
 
-            checkpoint = earliest_block.as_ref().into();
+            checkpoint = earliest_block.message().into();
         }
 
         debug_with_peers!("next batch checkpoint: {checkpoint:?}");
@@ -855,10 +855,8 @@ pub struct SyncCheckpoint {
     pub parent_root: H256,
 }
 
-impl<P: Preset> From<&SignedBeaconBlock<P>> for SyncCheckpoint {
-    fn from(block: &SignedBeaconBlock<P>) -> Self {
-        let message = block.message();
-
+impl<P: Preset> From<&dyn BeaconBlock<P>> for SyncCheckpoint {
+    fn from(message: &dyn BeaconBlock<P>) -> Self {
         Self {
             slot: message.slot(),
             block_root: message.hash_tree_root(),
@@ -937,7 +935,16 @@ pub enum Error<P: Preset> {
 
 #[cfg(test)]
 mod tests {
+    use bls::SignatureBytes;
     use database::Database;
+    use types::{
+        combined::{BeaconBlock, SignedBlindedBeaconBlock},
+        deneb::containers::{
+            BeaconBlock as DenebBeaconBlock, BeaconBlockBody as DenebBeaconBlockBody,
+            ExecutionPayload as DenebExecutionPayload,
+        },
+        preset::Mainnet,
+    };
 
     use super::*;
 
@@ -974,6 +981,39 @@ mod tests {
             .remove(&database)?;
 
         assert_eq!(Data::find(&database)?, None);
+
+        Ok(())
+    }
+
+    // Back-sync checkpoints are derived from block headers only, so a batch must make the same
+    // progress whether the blocks it revisits were stored with their payloads or blinded.
+    #[test]
+    fn sync_checkpoint_is_the_same_for_a_blinded_block() -> Result<()> {
+        let block = BeaconBlock::<Mainnet>::Deneb(
+            DenebBeaconBlock {
+                slot: 1_024,
+                parent_root: H256::repeat_byte(1),
+                body: DenebBeaconBlockBody {
+                    execution_payload: DenebExecutionPayload {
+                        block_number: 512,
+                        block_hash: H256::repeat_byte(2),
+                        ..DenebExecutionPayload::default()
+                    },
+                    ..DenebBeaconBlockBody::default()
+                },
+                ..DenebBeaconBlock::default()
+            }
+            .into(),
+        )
+        .with_signature(SignatureBytes::default());
+
+        let blinded = SignedBlindedBeaconBlock::try_from(block.clone())?;
+
+        let full_checkpoint = SyncCheckpoint::from(block.message());
+
+        assert_eq!(full_checkpoint.slot, 1_024);
+        assert_eq!(full_checkpoint.parent_root, H256::repeat_byte(1));
+        assert_eq!(full_checkpoint, SyncCheckpoint::from(blinded.message()));
 
         Ok(())
     }
