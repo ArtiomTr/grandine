@@ -5224,8 +5224,11 @@ impl<P: Preset, S: Storage<P>> Store<P, S> {
 
         let finalized_slot = self.finalized_slot();
 
-        self.finalized_attesting_balances =
-            self.finalized_attesting_balances.split_off(&finalized_slot);
+        // Keyed by block slot, which is at or before the start of the finalized epoch when that
+        // slot is empty. Pruning by `finalized_slot` would drop the last finalized block's entry.
+        self.finalized_attesting_balances = self
+            .finalized_attesting_balances
+            .split_off(&self.last_finalized().slot());
         self.execution_payload_envelope_cache
             .prune_finalized(finalized_slot);
         self.block_timeliness
