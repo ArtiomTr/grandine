@@ -1636,8 +1636,9 @@ pub async fn publish_block<P: Preset, W: Wait>(
     >,
 ) -> Result<StatusCode, Error> {
     let (signed_beacon_block, proofs, blobs) = signed_api_block.split();
+    let slot = signed_beacon_block.message().slot();
 
-    if signed_beacon_block.phase() == Phase::Fulu {
+    if controller.chain_config().phase_at_slot::<P>(slot) == Phase::Fulu {
         let signed_beacon_block = Arc::new(signed_beacon_block);
 
         let data_column_sidecars = construct_data_column_sidecars_from_blobs(
@@ -1720,7 +1721,9 @@ pub async fn publish_blinded_block<P: Preset, W: Wait>(
         .with_signature(signature)
         .pipe(Arc::new);
 
-    if signed_beacon_block.phase() == Phase::Fulu {
+    let slot = signed_beacon_block.message().slot();
+
+    if controller.chain_config().phase_at_slot::<P>(slot) == Phase::Fulu {
         let data_column_sidecars = construct_data_column_sidecars_from_blobs(
             controller.clone_arc(),
             signed_beacon_block.clone_arc(),
@@ -1833,7 +1836,7 @@ pub async fn publish_block_v2<P: Preset, W: Wait>(
     >,
 ) -> Result<StatusCode, Error> {
     let (signed_beacon_block, proofs, blobs) = signed_api_block.split();
-    let slot = signed_beacon_block.to_header().message.slot;
+    let slot = signed_beacon_block.message().slot();
     let phase = controller.chain_config().phase_at_slot::<P>(slot);
 
     if phase >= Phase::Gloas {
