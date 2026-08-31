@@ -744,6 +744,20 @@ impl<P: Preset> SignedBeaconBlock<P> {
     pub fn payload_bid(&self) -> Option<&ExecutionPayloadBid<P>> {
         self.message().payload_bid()
     }
+
+    // Pre-Bellatrix blocks have no execution payload and Gloas keeps payloads in separate
+    // `SignedExecutionPayloadEnvelope` records, so neither can be blinded.
+    #[must_use]
+    pub const fn has_blindable_payload(&self) -> bool {
+        match self {
+            Self::Phase0(_) | Self::Altair(_) | Self::Gloas(_) => false,
+            Self::Bellatrix(_)
+            | Self::Capella(_)
+            | Self::Deneb(_)
+            | Self::Electra(_)
+            | Self::Fulu(_) => true,
+        }
+    }
 }
 
 #[derive(Clone, Debug, From, VariantCount, Serialize)]
@@ -1231,6 +1245,26 @@ impl<P: Preset> SszRead<Phase> for SignedBlindedBeaconBlock<P> {
     }
 }
 
+impl<P: Preset> SszRead<Config> for SignedBlindedBeaconBlock<P> {
+    fn from_ssz_unchecked(config: &Config, bytes: &[u8]) -> Result<Self, ReadError> {
+        // The leading `Offset` and `SignatureBytes` are laid out exactly like in
+        // `SignedBeaconBlock`, so `block.message.slot` is at the same fixed position.
+        let slot_start = Offset::SIZE
+            .get()
+            .saturating_add(SignatureBytes::SIZE.get());
+
+        let slot_end = slot_start.saturating_add(Slot::SIZE.get());
+        let slot_bytes = ssz::subslice(bytes, slot_start..slot_end)?;
+        let slot = Slot::from_ssz_default(slot_bytes)?;
+        let phase = config.phase_at_slot::<P>(slot);
+        let block = <Self as SszRead<Phase>>::from_ssz_unchecked(&phase, bytes)?;
+
+        assert_eq!(slot, block.message().slot());
+
+        Ok(block)
+    }
+}
+
 impl<P: Preset> SszWrite for SignedBlindedBeaconBlock<P> {
     fn write_variable(&self, bytes: &mut Vec<u8>) -> Result<(), WriteError> {
         match self {
@@ -1307,6 +1341,17 @@ impl<P: Preset> SignedBlindedBeaconBlock<P> {
         }
     }
 
+    pub fn with_execution_payload(
+        self,
+        execution_payload: ExecutionPayload<P>,
+    ) -> Result<SignedBeaconBlock<P>, BlockPhaseError> {
+        let (message, signature) = self.split();
+
+        Ok(message
+            .with_execution_payload(execution_payload)?
+            .with_signature(signature))
+    }
+
     // This could be decomposed like the old `SignedBeaconBlock::body_post_*` methods,
     // but that may require new traits for `BlindedBeaconBlock` and `BlindedBeaconBlockBody`.
     #[must_use]
@@ -1338,8 +1383,8 @@ impl<P: Preset> SszSize for BlindedBeaconBlock<P> {
     const SIZE: Size = Size::for_untagged_union::<{ Phase::CARDINALITY - 3 }>([
         BellatrixBlindedBeaconBlock::<P>::SIZE,
         CapellaBlindedBeaconBlock::<P>::SIZE,
-        DenebSignedBlindedBeaconBlock::<P>::SIZE,
-        ElectraSignedBlindedBeaconBlock::<P>::SIZE,
+        DenebBlindedBeaconBlock::<P>::SIZE,
+        ElectraBlindedBeaconBlock::<P>::SIZE,
         FuluBlindedBeaconBlock::<P>::SIZE,
     ]);
 }
@@ -2651,9 +2696,204 @@ mod extra_tests {
     use serde_json::{Result, Value, json};
     use test_case::test_case;
 
-    use crate::preset::Mainnet;
+    use typenum::Unsigned as _;
+
+    use crate::{phase0::primitives::Epoch, preset::Mainnet};
 
     use super::*;
+
+    const FORK_EPOCH: Epoch = 1;
+
+    fn config_forking_to(phase: Phase) -> Config {
+        Config::mainnet().upgrade_once(phase, FORK_EPOCH)
+    }
+
+    fn fork_slot() -> Slot {
+        FORK_EPOCH * <Mainnet as Preset>::SlotsPerEpoch::U64
+    }
+
+    fn full_block_at_phase(phase: Phase, slot: Slot) -> SignedBeaconBlock<Mainnet> {
+        let block = match phase {
+            Phase::Phase0 => BeaconBlock::Phase0(
+                Phase0BeaconBlock {
+                    slot,
+                    ..Phase0BeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Altair => BeaconBlock::Altair(
+                AltairBeaconBlock {
+                    slot,
+                    ..AltairBeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Bellatrix => BeaconBlock::Bellatrix(
+                BellatrixBeaconBlock {
+                    slot,
+                    ..BellatrixBeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Capella => BeaconBlock::Capella(
+                CapellaBeaconBlock {
+                    slot,
+                    ..CapellaBeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Deneb => BeaconBlock::Deneb(
+                DenebBeaconBlock {
+                    slot,
+                    ..DenebBeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Electra => BeaconBlock::Electra(
+                ElectraBeaconBlock {
+                    slot,
+                    ..ElectraBeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Fulu => BeaconBlock::Fulu(
+                FuluBeaconBlock {
+                    slot,
+                    ..FuluBeaconBlock::default()
+                }
+                .into(),
+            ),
+            Phase::Gloas => BeaconBlock::Gloas(
+                GloasBeaconBlock {
+                    slot,
+                    ..GloasBeaconBlock::default()
+                }
+                .into(),
+            ),
+        };
+
+        block.with_signature(SignatureBytes::default())
+    }
+
+    #[test_case(Phase::Bellatrix)]
+    #[test_case(Phase::Capella)]
+    #[test_case(Phase::Deneb)]
+    #[test_case(Phase::Electra)]
+    #[test_case(Phase::Fulu)]
+    fn signed_blinded_beacon_block_ssz_round_trips_with_config(phase: Phase) -> anyhow::Result<()> {
+        let config = config_forking_to(phase);
+        let slot = fork_slot();
+
+        let blinded = SignedBlindedBeaconBlock::try_from(full_block_at_phase(phase, slot))?;
+        let bytes = blinded.to_ssz()?;
+
+        let decoded = SignedBlindedBeaconBlock::<Mainnet>::from_ssz(&config, bytes.as_slice())?;
+
+        assert_eq!(decoded.phase(), phase);
+        assert_eq!(decoded.message().slot(), slot);
+        assert_eq!(decoded.to_ssz()?, bytes);
+
+        Ok(())
+    }
+
+    #[test_case(Phase::Capella)]
+    #[test_case(Phase::Deneb)]
+    #[test_case(Phase::Electra)]
+    #[test_case(Phase::Fulu)]
+    fn signed_blinded_beacon_block_ssz_read_derives_phase_from_slot(
+        phase: Phase,
+    ) -> anyhow::Result<()> {
+        let config = config_forking_to(phase);
+        let previous_phase = phase.previous().expect("phase is after Phase 0");
+
+        let blinded = SignedBlindedBeaconBlock::try_from(full_block_at_phase(
+            previous_phase,
+            fork_slot().saturating_sub(1),
+        ))?;
+
+        let decoded =
+            SignedBlindedBeaconBlock::<Mainnet>::from_ssz(&config, blinded.to_ssz()?.as_slice())?;
+
+        assert_eq!(decoded.phase(), previous_phase);
+
+        Ok(())
+    }
+
+    #[test_case(Phase::Phase0, "blinded block has slot in Phase 0")]
+    #[test_case(Phase::Altair, "blinded block has slot in Altair")]
+    #[test_case(Phase::Gloas, "blinded block has slot in Gloas")]
+    fn signed_blinded_beacon_block_ssz_read_rejects_phases_without_payload_header(
+        phase: Phase,
+        expected_message: &str,
+    ) -> anyhow::Result<()> {
+        let config = Config::mainnet().start_and_stay_in(phase);
+
+        let blinded =
+            SignedBlindedBeaconBlock::try_from(full_block_at_phase(Phase::Deneb, fork_slot()))?;
+
+        let error = SignedBlindedBeaconBlock::<Mainnet>::from_ssz(&config, blinded.to_ssz()?)
+            .expect_err("blinded blocks only exist in Bellatrix through Fulu");
+
+        assert_eq!(error.to_string(), expected_message);
+
+        Ok(())
+    }
+
+    #[test_case(Phase::Bellatrix)]
+    #[test_case(Phase::Capella)]
+    #[test_case(Phase::Deneb)]
+    #[test_case(Phase::Electra)]
+    #[test_case(Phase::Fulu)]
+    fn blinding_a_block_round_trips_through_with_execution_payload(
+        phase: Phase,
+    ) -> anyhow::Result<()> {
+        let block = full_block_at_phase(phase, fork_slot());
+
+        let payload = block
+            .clone()
+            .split()
+            .0
+            .execution_payload()
+            .expect("blocks in Bellatrix through Fulu carry an execution payload");
+
+        let blinded = SignedBlindedBeaconBlock::try_from(block.clone())?;
+
+        assert_eq!(blinded.with_execution_payload(payload)?, block);
+
+        Ok(())
+    }
+
+    #[test]
+    fn with_execution_payload_rejects_payload_from_another_phase() -> anyhow::Result<()> {
+        let blinded =
+            SignedBlindedBeaconBlock::try_from(full_block_at_phase(Phase::Deneb, fork_slot()))?;
+
+        let error = blinded
+            .with_execution_payload(ExecutionPayload::Bellatrix(
+                BellatrixExecutionPayload::default(),
+            ))
+            .expect_err("payload phase does not match block phase");
+
+        assert_eq!(error.block_phase, Phase::Deneb);
+        assert_eq!(error.payload_phase, Phase::Bellatrix);
+
+        Ok(())
+    }
+
+    #[test_case(Phase::Phase0, false)]
+    #[test_case(Phase::Altair, false)]
+    #[test_case(Phase::Bellatrix, true)]
+    #[test_case(Phase::Capella, true)]
+    #[test_case(Phase::Deneb, true)]
+    #[test_case(Phase::Electra, true)]
+    #[test_case(Phase::Fulu, true)]
+    #[test_case(Phase::Gloas, false)]
+    fn has_blindable_payload_matches_blinded_conversion(phase: Phase, expected: bool) {
+        let block = full_block_at_phase(phase, fork_slot());
+
+        assert_eq!(block.has_blindable_payload(), expected);
+        assert_eq!(SignedBlindedBeaconBlock::try_from(block).is_ok(), expected,);
+    }
 
     #[test_case(
         json!({
