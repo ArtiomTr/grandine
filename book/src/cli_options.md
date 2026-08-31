@@ -47,6 +47,8 @@ The list of command line options:
           [default: 32]
       --prune-storage
           Enable prune mode where only single checkpoint state & block are stored in the DB [default: disabled]
+      --store-payloads
+          Store execution payloads in the database. Applies to the default and --archive-storage modes; --prune-storage stores no finalized blocks at all. When disabled, finalized blocks are stored blinded and their payloads are reconstructed from the execution client on demand [default: disabled]
       --unfinalized-states-in-memory <UNFINALIZED_STATES_IN_MEMORY>
           Number of unfinalized states to keep in memory. Specifying this number enables unfinalized state pruning. By default all unfinalized states are kept in memory. [default: None]
       --database-size <DATABASE_SIZE>
