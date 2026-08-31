@@ -341,7 +341,7 @@ impl Eth1Api {
                     execution_requests,
                 }),
             ) => {
-                let payload_v4 = ExecutionPayloadV4::from(payload);
+                let payload_v4 = ExecutionPayloadV4::try_from(payload)?;
                 let raw_execution_requests = RawExecutionRequests::try_from(execution_requests)?;
 
                 let params = vec![

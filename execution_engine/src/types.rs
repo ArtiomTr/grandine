@@ -484,8 +484,12 @@ pub struct ExecutionPayloadV4<P: Preset> {
     pub slot_number: Slot,
 }
 
-impl<P: Preset> From<GloasExecutionPayload<P>> for ExecutionPayloadV4<P> {
-    fn from(payload: GloasExecutionPayload<P>) -> Self {
+// `transactions` and `withdrawals` are `ProgressiveList`s, which accept far more elements
+// at SSZ decode time than the engine API type allows, so this conversion is checked.
+impl<P: Preset> TryFrom<GloasExecutionPayload<P>> for ExecutionPayloadV4<P> {
+    type Error = ReadError;
+
+    fn try_from(payload: GloasExecutionPayload<P>) -> Result<Self, Self::Error> {
         let GloasExecutionPayload {
             parent_hash,
             fee_recipient,
@@ -508,12 +512,11 @@ impl<P: Preset> From<GloasExecutionPayload<P>> for ExecutionPayloadV4<P> {
             slot_number,
         } = payload;
 
-        let transactions = Arc::try_unwrap(transactions)
-            .unwrap_or_else(|arc| (*arc).clone())
-            .into();
-        let withdrawals = ContiguousList::from(withdrawals).map(Into::into);
+        let transactions =
+            narrow_list(Arc::try_unwrap(transactions).unwrap_or_else(|arc| (*arc).clone()))?;
+        let withdrawals = narrow_list(withdrawals)?.map(Into::into);
 
-        Self {
+        Ok(Self {
             parent_hash,
             fee_recipient,
             state_root,
@@ -533,7 +536,7 @@ impl<P: Preset> From<GloasExecutionPayload<P>> for ExecutionPayloadV4<P> {
             excess_blob_gas,
             block_access_list,
             slot_number,
-        }
+        })
     }
 }
 
@@ -1288,9 +1291,8 @@ impl<P: Preset> From<RawExecutionRequests<P>> for ElectraExecutionRequests<P> {
     }
 }
 
-// The gloas `ExecutionRequests.deposits` list has a relaxed SSZ bound
-// (see `Preset::GloasDepositRequestsBound`), while the engine API type keeps
-// `MaxDepositRequestsPerPayload`, so this conversion is checked.
+// Every gloas `ExecutionRequests` field is a `ProgressiveList`, which accepts far more
+// elements at SSZ decode time than the engine API types allow, so all of them are checked.
 impl<P: Preset> TryFrom<GloasExecutionRequests<P>> for RawExecutionRequests<P> {
     type Error = ReadError;
 
@@ -1306,10 +1308,10 @@ impl<P: Preset> TryFrom<GloasExecutionRequests<P>> for RawExecutionRequests<P> {
 
         Ok(Self(
             narrow_list(deposits)?,
-            withdrawals.into(),
-            consolidations.into(),
-            builder_deposits.into(),
-            builder_exits.into(),
+            narrow_list(withdrawals)?,
+            narrow_list(consolidations)?,
+            narrow_list(builder_deposits)?,
+            narrow_list(builder_exits)?,
         ))
     }
 }

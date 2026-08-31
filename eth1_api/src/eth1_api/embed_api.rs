@@ -480,7 +480,7 @@ impl Eth1Api {
                     )
                 });
 
-                let payload_v4 = ExecutionPayloadV4::from(payload);
+                let payload_v4 = ExecutionPayloadV4::try_from(payload)?;
 
                 self.exec(move |adapter| {
                     adapter.engine_new_payload_v5(
