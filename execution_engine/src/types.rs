@@ -905,8 +905,19 @@ pub struct PayloadStatusV1 {
     pub validation_error: Option<String>,
 }
 
+/// [`ExecutionPayloadBodyV1`](https://github.com/ethereum/execution-apis/blob/b7c5d3420e00648f456744d121ffbd929862924d/src/engine/shanghai.md#executionpayloadbodyv1)
+///
+/// `withdrawals` is `null` for bodies of blocks produced before Shanghai.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(bound = "", rename_all = "camelCase")]
+pub struct ExecutionPayloadBodyV1<P: Preset> {
+    pub transactions: Arc<ContiguousList<Transaction<P>, P::MaxTransactionsPerPayload>>,
+    #[serde(default)]
+    pub withdrawals: Option<ContiguousList<WithdrawalV1, P::MaxWithdrawalsPerPayload>>,
+}
+
 /// [`WithdrawalV1`](https://github.com/ethereum/execution-apis/blob/b7c5d3420e00648f456744d121ffbd929862924d/src/engine/shanghai.md#withdrawalv1)
-#[derive(Copy, Clone, Deserialize, Serialize)]
+#[derive(Copy, Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WithdrawalV1 {
     #[serde(with = "serde_utils::prefixed_hex_quantity")]

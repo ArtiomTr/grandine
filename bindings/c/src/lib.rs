@@ -10,16 +10,17 @@ use eth1_api::ClientVersionV1;
 use execution_engine::{
     BlobAndProofV1, EngineGetPayloadV1Response, EngineGetPayloadV2Response,
     EngineGetPayloadV3Response, EngineGetPayloadV4Response, EngineGetPayloadV5Response,
-    EngineGetPayloadV6Response, ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3,
-    ExecutionPayloadV4, ForkChoiceStateV1, PayloadAttributesV1, PayloadAttributesV2,
-    PayloadAttributesV3, PayloadAttributesV4, PayloadStatusV1,
+    EngineGetPayloadV6Response, ExecutionPayloadBodyV1, ExecutionPayloadV1, ExecutionPayloadV2,
+    ExecutionPayloadV3, ExecutionPayloadV4, ForkChoiceStateV1, PayloadAttributesV1,
+    PayloadAttributesV2, PayloadAttributesV3, PayloadAttributesV4, PayloadStatusV1,
 };
 use runtime::{grandine_args::GrandineArgs, run, shutdown};
 use tracing::error;
 use types::{
     electra::containers::ExecutionRequests as ElectraExecutionRequests,
     gloas::containers::ExecutionRequests as GloasExecutionRequests,
-    phase0::primitives::ExecutionBlockNumber, preset::Mainnet,
+    phase0::primitives::{ExecutionBlockHash, ExecutionBlockNumber},
+    preset::Mainnet,
 };
 use web3::types::{BlockNumber, H64, H256};
 
@@ -372,6 +373,21 @@ impl eth1_api::EmbedAdapter for CEmbedAdapter {
                     .collect::<Result<_, _>>()?,
             ))
         })
+    }
+
+    fn engine_get_payload_bodies_by_hash_v1(
+        &self,
+        _block_hashes: Vec<ExecutionBlockHash>,
+    ) -> Result<Vec<Option<ExecutionPayloadBodyV1<Mainnet>>>> {
+        bail!("Method not implemented");
+    }
+
+    fn engine_get_payload_bodies_by_range_v1(
+        &self,
+        _start: ExecutionBlockNumber,
+        _count: u64,
+    ) -> Result<Vec<Option<ExecutionPayloadBodyV1<Mainnet>>>> {
+        bail!("Method not implemented");
     }
 
     fn engine_exchange_capabilities(&self, capabilities: &[&str]) -> Result<Vec<String>> {

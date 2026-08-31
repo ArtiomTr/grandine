@@ -7,10 +7,10 @@ use ethereum_types::H64;
 use execution_engine::{
     BlobAndProofV1, BlobAndProofV2, EngineGetPayloadV1Response, EngineGetPayloadV2Response,
     EngineGetPayloadV3Response, EngineGetPayloadV4Response, EngineGetPayloadV5Response,
-    EngineGetPayloadV6Response, ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3,
-    ExecutionPayloadV4, ForkChoiceStateV1, ForkChoiceUpdatedResponse, PayloadAttributes,
-    PayloadAttributesV1, PayloadAttributesV2, PayloadAttributesV3, PayloadAttributesV4, PayloadId,
-    PayloadStatusV1,
+    EngineGetPayloadV6Response, ExecutionPayloadBodyV1, ExecutionPayloadV1, ExecutionPayloadV2,
+    ExecutionPayloadV3, ExecutionPayloadV4, ForkChoiceStateV1, ForkChoiceUpdatedResponse,
+    PayloadAttributes, PayloadAttributesV1, PayloadAttributesV2, PayloadAttributesV3,
+    PayloadAttributesV4, PayloadId, PayloadStatusV1,
 };
 use futures::channel::mpsc::UnboundedSender;
 use prometheus_metrics::Metrics;
@@ -44,6 +44,7 @@ use crate::{
     eth1_api::{
         ENGINE_FORKCHOICE_UPDATED_V1, ENGINE_FORKCHOICE_UPDATED_V2, ENGINE_FORKCHOICE_UPDATED_V3,
         ENGINE_FORKCHOICE_UPDATED_V4, ENGINE_GET_EL_BLOBS_V1, ENGINE_GET_EL_BLOBS_V2,
+        ENGINE_GET_PAYLOAD_BODIES_BY_HASH_V1, ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1,
         ENGINE_GET_PAYLOAD_V1, ENGINE_GET_PAYLOAD_V2, ENGINE_GET_PAYLOAD_V3, ENGINE_GET_PAYLOAD_V4,
         ENGINE_GET_PAYLOAD_V5, ENGINE_GET_PAYLOAD_V6, ENGINE_NEW_PAYLOAD_V1, ENGINE_NEW_PAYLOAD_V2,
         ENGINE_NEW_PAYLOAD_V3, ENGINE_NEW_PAYLOAD_V4, ENGINE_NEW_PAYLOAD_V5,
@@ -135,6 +136,16 @@ pub trait EmbedAdapter: Send + Sync {
         &self,
         versioned_hashes: Vec<VersionedHash>,
     ) -> Result<Option<Vec<BlobAndProofV2<Mainnet>>>>;
+
+    fn engine_get_payload_bodies_by_hash_v1(
+        &self,
+        block_hashes: Vec<ExecutionBlockHash>,
+    ) -> Result<Vec<Option<ExecutionPayloadBodyV1<Mainnet>>>>;
+    fn engine_get_payload_bodies_by_range_v1(
+        &self,
+        start: ExecutionBlockNumber,
+        count: u64,
+    ) -> Result<Vec<Option<ExecutionPayloadBodyV1<Mainnet>>>>;
 
     fn engine_exchange_capabilities(&self, capabilities: &[&str]) -> Result<Vec<String>>;
     fn engine_get_client_version_v1(
@@ -863,7 +874,63 @@ impl Eth1Api {
         Ok(results)
     }
 
+    pub async fn get_payload_bodies_by_hash<P: Preset>(
+        &self,
+        block_hashes: &[ExecutionBlockHash],
+    ) -> Result<Vec<Option<ExecutionPayloadBodyV1<P>>>> {
+        let _timer = self.metrics.as_ref().map(|metrics| {
+            prometheus_metrics::start_timer_vec(
+                &metrics.eth1_api_request_times,
+                ENGINE_GET_PAYLOAD_BODIES_BY_HASH_V1,
+            )
+        });
+
+        let block_hashes = block_hashes.to_vec();
+
+        let bodies = self
+            .exec(move |adapter| adapter.engine_get_payload_bodies_by_hash_v1(block_hashes))
+            .await?;
+
+        convert_payload_bodies(bodies)
+    }
+
+    pub async fn get_payload_bodies_by_range<P: Preset>(
+        &self,
+        start: ExecutionBlockNumber,
+        count: u64,
+    ) -> Result<Vec<Option<ExecutionPayloadBodyV1<P>>>> {
+        let _timer = self.metrics.as_ref().map(|metrics| {
+            prometheus_metrics::start_timer_vec(
+                &metrics.eth1_api_request_times,
+                ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1,
+            )
+        });
+
+        let bodies = self
+            .exec(move |adapter| adapter.engine_get_payload_bodies_by_range_v1(start, count))
+            .await?;
+
+        convert_payload_bodies(bodies)
+    }
+
     pub fn el_offline(&self) -> bool {
         false
     }
+}
+
+fn convert_payload_bodies<P: Preset>(
+    bodies: Vec<Option<ExecutionPayloadBodyV1<Mainnet>>>,
+) -> Result<Vec<Option<ExecutionPayloadBodyV1<P>>>> {
+    bodies
+        .into_iter()
+        .map(|body| {
+            body.map(|body| {
+                let body: &dyn std::any::Any = &body;
+                let body: &ExecutionPayloadBodyV1<P> =
+                    body.downcast_ref().ok_or(Error::InvalidPreset)?;
+                Ok(body.clone())
+            })
+            .transpose()
+        })
+        .collect()
 }

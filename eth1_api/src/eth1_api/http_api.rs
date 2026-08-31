@@ -1,19 +1,23 @@
-use core::{ops::RangeInclusive, time::Duration};
+use core::{
+    ops::RangeInclusive,
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+    time::Duration,
+};
 use std::{collections::BTreeMap, sync::Arc};
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Error as AnyhowError, Result, bail, ensure};
 use either::Either;
 use enum_iterator::Sequence as _;
 use ethereum_types::H64;
 use execution_engine::{
     BlobAndProofV1, BlobAndProofV2, EngineGetPayloadV1Response, EngineGetPayloadV2Response,
     EngineGetPayloadV3Response, EngineGetPayloadV4Response, EngineGetPayloadV5Response,
-    EngineGetPayloadV6Response, ExecutionPayloadV1, ExecutionPayloadV2, ExecutionPayloadV3,
-    ExecutionPayloadV4, ForkChoiceStateV1, ForkChoiceUpdatedResponse, PayloadAttributes, PayloadId,
-    PayloadStatusV1, RawExecutionRequests,
+    EngineGetPayloadV6Response, ExecutionPayloadBodyV1, ExecutionPayloadV1, ExecutionPayloadV2,
+    ExecutionPayloadV3, ExecutionPayloadV4, ForkChoiceStateV1, ForkChoiceUpdatedResponse,
+    PayloadAttributes, PayloadId, PayloadStatusV1, RawExecutionRequests,
 };
 use futures::{Future, channel::mpsc::UnboundedSender};
-use logging::warn_with_peers;
+use logging::{debug_with_peers, warn_with_peers};
 use prometheus_metrics::Metrics;
 use reqwest::{Client, header::HeaderMap};
 use serde::{Deserialize, de::DeserializeOwned};
@@ -46,6 +50,7 @@ use crate::{
     eth1_api::{
         ENGINE_FORKCHOICE_UPDATED_V1, ENGINE_FORKCHOICE_UPDATED_V2, ENGINE_FORKCHOICE_UPDATED_V3,
         ENGINE_FORKCHOICE_UPDATED_V4, ENGINE_GET_EL_BLOBS_V1, ENGINE_GET_EL_BLOBS_V2,
+        ENGINE_GET_PAYLOAD_BODIES_BY_HASH_V1, ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1,
         ENGINE_GET_PAYLOAD_V1, ENGINE_GET_PAYLOAD_V2, ENGINE_GET_PAYLOAD_V3, ENGINE_GET_PAYLOAD_V4,
         ENGINE_GET_PAYLOAD_V5, ENGINE_GET_PAYLOAD_V6, ENGINE_NEW_PAYLOAD_V1, ENGINE_NEW_PAYLOAD_V2,
         ENGINE_NEW_PAYLOAD_V3, ENGINE_NEW_PAYLOAD_V4, ENGINE_NEW_PAYLOAD_V5,
@@ -58,6 +63,18 @@ const ENGINE_FORKCHOICE_UPDATED_TIMEOUT: Duration = Duration::from_secs(8);
 const ENGINE_GET_BLOBS_TIMEOUT: Duration = Duration::from_secs(2);
 const ENGINE_GET_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(1);
 const ENGINE_NEW_PAYLOAD_TIMEOUT: Duration = Duration::from_secs(8);
+const ENGINE_GET_PAYLOAD_BODIES_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Execution clients cap the number of payload bodies they return per request but offer no way to
+/// query the cap, so start optimistically and shrink on rejection.
+const PAYLOAD_BODIES_MAX_BATCH_SIZE: usize = 1024;
+
+/// The Engine API requires execution clients to serve at least this many payload bodies per
+/// request, so shrinking below it would only add round trips.
+const PAYLOAD_BODIES_MIN_BATCH_SIZE: usize = 32;
+
+/// [`Too large request`](https://github.com/ethereum/execution-apis/blob/b7c5d3420e00648f456744d121ffbd929862924d/src/engine/shanghai.md#specification-3)
+const TOO_LARGE_REQUEST_ERROR_CODE: i64 = -38004;
 
 #[expect(clippy::struct_field_names)]
 pub struct Eth1Api {
@@ -67,6 +84,8 @@ pub struct Eth1Api {
     pub(crate) endpoints: Endpoints,
     eth1_api_to_metrics_tx: Option<UnboundedSender<Eth1ApiToMetrics>>,
     pub(crate) metrics: Option<Arc<Metrics>>,
+    payload_bodies_batch_size: AtomicUsize,
+    payload_bodies_failure_reported: AtomicBool,
 }
 
 impl Eth1Api {
@@ -86,6 +105,8 @@ impl Eth1Api {
             endpoints: Endpoints::new(eth1_rpc_urls),
             eth1_api_to_metrics_tx,
             metrics,
+            payload_bodies_batch_size: AtomicUsize::new(PAYLOAD_BODIES_MAX_BATCH_SIZE),
+            payload_bodies_failure_reported: AtomicBool::new(false),
         }
     }
 
@@ -95,18 +116,22 @@ impl Eth1Api {
 
     pub async fn current_head_number(&self) -> Result<ExecutionBlockNumber> {
         Ok(self
-            .request_with_fallback(|(api, headers)| Ok(api.block_number(headers)), None)
+            .request_with_fallback(|(api, headers)| Ok(api.block_number(headers)), None, false)
             .await?
             .result
             .as_u64())
     }
 
     pub async fn get_block(&self, block_id: BlockId) -> Result<Option<Eth1Block>> {
-        self.request_with_fallback(|(api, headers)| Ok(api.block(block_id, headers)), None)
-            .await?
-            .result
-            .map(Eth1Block::try_from)
-            .transpose()
+        self.request_with_fallback(
+            |(api, headers)| Ok(api.block(block_id, headers)),
+            None,
+            false,
+        )
+        .await?
+        .result
+        .map(Eth1Block::try_from)
+        .transpose()
     }
 
     pub async fn get_block_by_number(
@@ -137,7 +162,11 @@ impl Eth1Api {
             .build();
 
         let logs = self
-            .request_with_fallback(|(api, headers)| Ok(api.logs(filter.clone(), headers)), None)
+            .request_with_fallback(
+                |(api, headers)| Ok(api.logs(filter.clone(), headers)),
+                None,
+                false,
+            )
             .await?
             .result;
 
@@ -182,6 +211,155 @@ impl Eth1Api {
         .map(WithClientVersions::result)
     }
 
+    /// Calls [`engine_getPayloadBodiesByHashV1`].
+    ///
+    /// The response has one entry per requested hash, `None` for blocks the execution client does
+    /// not have.
+    ///
+    /// [`engine_getPayloadBodiesByHashV1`]: https://github.com/ethereum/execution-apis/blob/b7c5d3420e00648f456744d121ffbd929862924d/src/engine/shanghai.md#engine_getpayloadbodiesbyhashv1
+    pub async fn get_payload_bodies_by_hash<P: Preset>(
+        &self,
+        block_hashes: &[ExecutionBlockHash],
+    ) -> Result<Vec<Option<ExecutionPayloadBodyV1<P>>>> {
+        let mut bodies = Vec::with_capacity(block_hashes.len());
+        let mut remaining = block_hashes;
+
+        while !remaining.is_empty() {
+            let batch_size = self.payload_bodies_batch_size().min(remaining.len());
+            let (batch, rest) = remaining.split_at(batch_size);
+            let params = vec![serde_json::to_value(batch)?];
+
+            let returned = match self
+                .execute::<Vec<Option<ExecutionPayloadBodyV1<P>>>>(
+                    ENGINE_GET_PAYLOAD_BODIES_BY_HASH_V1,
+                    params,
+                    Some(ENGINE_GET_PAYLOAD_BODIES_TIMEOUT),
+                    // Deliberately unfiltered by capability, unlike `get_blobs`: blocks stored
+                    // blinded cannot be served at all without these methods, and capabilities are
+                    // only known after the first exchange, which happens after the blocks
+                    // persisted by the previous run are reconstructed.
+                    None,
+                )
+                .await
+            {
+                Ok(returned) => returned.result,
+                Err(error) => {
+                    if self.shrink_payload_bodies_batch_size(&error, batch_size) {
+                        continue;
+                    }
+
+                    return Err(error);
+                }
+            };
+
+            ensure!(
+                returned.len() == batch.len(),
+                Error::PayloadBodyCountMismatch {
+                    requested: batch.len(),
+                    returned: returned.len(),
+                },
+            );
+
+            bodies.extend(returned);
+            remaining = rest;
+        }
+
+        Ok(bodies)
+    }
+
+    /// Calls [`engine_getPayloadBodiesByRangeV1`].
+    ///
+    /// The response may be shorter than `count` if the range extends past the latest block known to
+    /// the execution client.
+    ///
+    /// [`engine_getPayloadBodiesByRangeV1`]: https://github.com/ethereum/execution-apis/blob/b7c5d3420e00648f456744d121ffbd929862924d/src/engine/shanghai.md#engine_getpayloadbodiesbyrangev1
+    pub async fn get_payload_bodies_by_range<P: Preset>(
+        &self,
+        start: ExecutionBlockNumber,
+        count: u64,
+    ) -> Result<Vec<Option<ExecutionPayloadBodyV1<P>>>> {
+        let mut bodies = vec![];
+        let mut next = start;
+        let mut remaining = count;
+
+        while remaining > 0 {
+            let batch_size = u64::try_from(self.payload_bodies_batch_size())?.min(remaining);
+            let params = vec![
+                format!("{next:#x}").into(),
+                format!("{batch_size:#x}").into(),
+            ];
+
+            let returned = match self
+                .execute::<Vec<Option<ExecutionPayloadBodyV1<P>>>>(
+                    ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1,
+                    params,
+                    Some(ENGINE_GET_PAYLOAD_BODIES_TIMEOUT),
+                    None,
+                )
+                .await
+            {
+                Ok(returned) => returned.result,
+                Err(error) => {
+                    if self.shrink_payload_bodies_batch_size(&error, usize::try_from(batch_size)?) {
+                        continue;
+                    }
+
+                    return Err(error);
+                }
+            };
+
+            let returned_count = u64::try_from(returned.len())?;
+
+            ensure!(
+                returned_count <= batch_size,
+                Error::PayloadBodyCountMismatch {
+                    requested: usize::try_from(batch_size)?,
+                    returned: returned.len(),
+                },
+            );
+
+            bodies.extend(returned);
+
+            // A short response means the execution client has no more blocks to serve.
+            if returned_count < batch_size {
+                break;
+            }
+
+            next = next.saturating_add(returned_count);
+            remaining = remaining.saturating_sub(returned_count);
+        }
+
+        Ok(bodies)
+    }
+
+    fn payload_bodies_batch_size(&self) -> usize {
+        self.payload_bodies_batch_size.load(Ordering::Relaxed)
+    }
+
+    /// Halves the cached batch size if `error` says the request was too large.
+    ///
+    /// Returns `true` if the failed request should be retried with the smaller size.
+    fn shrink_payload_bodies_batch_size(&self, error: &AnyhowError, attempted: usize) -> bool {
+        let too_large = error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<Web3Error>(),
+                Some(Web3Error::Rpc(rpc_error))
+                    if rpc_error.code.code() == TOO_LARGE_REQUEST_ERROR_CODE,
+            )
+        });
+
+        if !too_large || attempted <= PAYLOAD_BODIES_MIN_BATCH_SIZE {
+            return false;
+        }
+
+        let reduced = (attempted / 2).max(PAYLOAD_BODIES_MIN_BATCH_SIZE);
+
+        self.payload_bodies_batch_size
+            .store(reduced, Ordering::Relaxed);
+
+        true
+    }
+
     pub async fn get_blocks(
         &self,
         block_number_range: RangeInclusive<ExecutionBlockNumber>,
@@ -223,7 +401,11 @@ impl Eth1Api {
         let mut deposit_events = BTreeMap::<_, Vec<_>>::new();
 
         for log in self
-            .request_with_fallback(|(api, headers)| Ok(api.logs(filter.clone(), headers)), None)
+            .request_with_fallback(
+                |(api, headers)| Ok(api.logs(filter.clone(), headers)),
+                None,
+                false,
+            )
             .await?
             .result
         {
@@ -574,6 +756,17 @@ impl Eth1Api {
             prometheus_metrics::start_timer_vec(&metrics.eth1_api_request_times, method)
         });
 
+        // Payload body reconstruction runs on behalf of peers, deliberately skips the capability
+        // filter and probes for the batch size limit. Whether these two methods succeed says
+        // nothing about the ability of the endpoint to serve the methods the node itself depends
+        // on, and peers can make them fail at will, so their outcome must not move the endpoint
+        // online status in either direction: a failure must not mask a working endpoint, and a
+        // success must not revive an endpoint that `engine_newPayload` found broken.
+        let tolerate_errors = matches!(
+            method,
+            ENGINE_GET_PAYLOAD_BODIES_BY_HASH_V1 | ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1,
+        );
+
         self.request_with_fallback(
             |(api, headers)| {
                 Ok(CallFuture::new(api.transport().execute_with_headers(
@@ -584,6 +777,7 @@ impl Eth1Api {
                 )))
             },
             capability,
+            tolerate_errors,
         )
         .await
     }
@@ -593,10 +787,16 @@ impl Eth1Api {
         self.endpoints.el_offline()
     }
 
+    /// Calls `request_from_api` on each endpoint in turn until one of them succeeds.
+    ///
+    /// `tolerate_errors` keeps requests made on behalf of peers out of the endpoint health
+    /// tracking entirely: neither their failures nor their successes change the online status or
+    /// the error metrics, and their failures are reported once per outage instead of per request.
     async fn request_with_fallback<R, O, F>(
         &self,
         request_from_api: R,
         capability: Option<&str>,
+        tolerate_errors: bool,
     ) -> Result<WithClientVersions<O>>
     where
         R: Fn((Eth<Http>, Option<HeaderMap>)) -> Result<CallFuture<O, F>> + Sync + Send,
@@ -604,6 +804,7 @@ impl Eth1Api {
         F: Future<Output = Result<Value, Web3Error>> + Send,
     {
         let mut endpoints_for_request = self.endpoints.endpoints_for_request(capability).peekable();
+        let mut last_error = None;
 
         while let Some(endpoint) = endpoints_for_request.next() {
             let api = self.build_api_for_request(endpoint);
@@ -611,7 +812,12 @@ impl Eth1Api {
 
             match query {
                 Ok(result) => {
-                    self.on_ok_response(endpoint);
+                    if tolerate_errors {
+                        self.payload_bodies_failure_reported
+                            .store(false, Ordering::Relaxed);
+                    } else {
+                        self.on_ok_response(endpoint);
+                    }
 
                     return Ok(WithClientVersions {
                         client_versions: Some(endpoint.get_client_versions()),
@@ -619,24 +825,49 @@ impl Eth1Api {
                     });
                 }
                 Err(error) => {
-                    self.on_error_response(endpoint);
+                    if tolerate_errors {
+                        debug_with_peers!(
+                            "Eth1 RPC endpoint {} could not serve a request made on behalf of a \
+                             peer: {error}",
+                            endpoint.url(),
+                        );
+                    } else {
+                        self.on_error_response(endpoint);
 
-                    match endpoints_for_request.peek() {
-                        Some(next_endpoint) => warn_with_peers!(
-                            "Eth1 RPC endpoint {} returned an error: {error}; switching to {}",
-                            endpoint.url(),
-                            next_endpoint.url(),
-                        ),
-                        None => warn_with_peers!(
-                            "last available Eth1 RPC endpoint {} returned an error: {error}",
-                            endpoint.url(),
-                        ),
+                        match endpoints_for_request.peek() {
+                            Some(next_endpoint) => warn_with_peers!(
+                                "Eth1 RPC endpoint {} returned an error: {error}; switching to {}",
+                                endpoint.url(),
+                                next_endpoint.url(),
+                            ),
+                            None => warn_with_peers!(
+                                "last available Eth1 RPC endpoint {} returned an error: {error}",
+                                endpoint.url(),
+                            ),
+                        }
                     }
+
+                    last_error = Some(error);
                 }
             }
         }
 
-        if let Some(metrics) = self.metrics.as_ref() {
+        if tolerate_errors {
+            // Peers request historical blocks continuously, so warning on every failure would
+            // flood the log. Warning on the transition into failure still tells the operator that
+            // the node stopped serving blocks it holds, which nothing else in the system reports.
+            if !self
+                .payload_bodies_failure_reported
+                .swap(true, Ordering::Relaxed)
+            {
+                warn_with_peers!(
+                    "no Eth1 RPC endpoint could serve execution payload bodies; \
+                     blocks stored without their execution payloads cannot be served \
+                     to peers or over the HTTP API until one can. \
+                     Pass --store-payloads to keep payloads in the beacon database instead",
+                );
+            }
+        } else if let Some(metrics) = self.metrics.as_ref() {
             metrics.eth1_api_reset_count.inc();
         }
 
@@ -645,7 +876,10 @@ impl Eth1Api {
         // (except during the Merge transition).
         ensure!(!self.endpoints.is_empty(), Error::NoEndpointsProvided);
 
-        bail!(Error::EndpointsExhausted)
+        match last_error {
+            Some(error) => Err(AnyhowError::new(error).context(Error::EndpointsExhausted)),
+            None => bail!(Error::EndpointsExhausted),
+        }
     }
 
     pub(crate) fn build_api_for_request(&self, endpoint: &Endpoint) -> Eth<Http> {
@@ -694,6 +928,8 @@ enum Error {
     InvalidParameters,
     #[error("attempted to call Eth1 RPC endpoint but none were provided")]
     NoEndpointsProvided,
+    #[error("execution client returned {returned} payload bodies for a request of {requested}")]
+    PayloadBodyCountMismatch { requested: usize, returned: usize },
     #[error("pre-Bellatrix phase passed to Eth1Api::forkchoice_updated")]
     PhasePreBellatrix,
 }
@@ -703,7 +939,7 @@ mod tests {
     use anyhow::Result;
     use execution_engine::PayloadValidationStatus;
     use hex_literal::hex;
-    use httpmock::{Method, MockServer};
+    use httpmock::{HttpMockRequest, Method, MockServer};
     use serde_json::json;
     use ssz::ContiguousList;
     use types::{
@@ -714,6 +950,9 @@ mod tests {
     };
 
     use super::*;
+
+    /// [`Method not found`](https://www.jsonrpc.org/specification#error_object)
+    const METHOD_NOT_FOUND_ERROR_CODE: i64 = -32601;
 
     #[tokio::test]
     async fn test_eth1_endpoints_error_with_no_endpoints() -> Result<()> {
@@ -1254,6 +1493,527 @@ mod tests {
         assert_eq!(actual_status, expected_status);
 
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_payload_bodies_by_hash_deserialization() -> Result<()> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": [
+                {
+                    "transactions": [
+                        "0xf86e078459682f0782520894419f2d6c3f5fe8bf43f91923ba21e996032897298894a1739b5e1d49c8808328d2f0a069dffffc6f9b20157bd17872d326de8ed088de3e24f2801dd9375ddbecd013f0a041aab6f5dff83fdd2595cc55725b28128b8902f12f3db598dce9f9183f989300",
+                        "0x02f87883146966830516988459682f008459682f078252089432960b83199ae0f78756dbcf016a8e88e4dd7a748894a19041886f000080c001a0f916421115b1dc667b959fe32fa01cc9ba07942078b9e28435fd0a55c1cbf2dba076da1b6e79fa9a3b6b77e1601546fa194652a3f9a73919c470254833dfae68f8",
+                    ],
+                    "withdrawals": [
+                        {
+                            "index": "0x18561",
+                            "validatorIndex": "0x7c2e8",
+                            "address": "0xf97e180c050e5ab072211ad2c213eb5aee4df134",
+                            "amount": "0x18111",
+                        },
+                    ],
+                },
+                {
+                    "transactions": [],
+                    "withdrawals": [],
+                },
+            ],
+        });
+
+        let (_server, eth1_api) = eth1_api_serving(&body)?;
+
+        let bodies = eth1_api
+            .get_payload_bodies_by_hash::<Mainnet>(&[H256::repeat_byte(1), H256::repeat_byte(2)])
+            .await?;
+
+        assert_eq!(bodies.len(), 2);
+
+        let populated = bodies[0].as_ref().expect("body should be present");
+
+        assert_eq!(populated.transactions.len(), 2);
+        assert_eq!(
+            populated
+                .withdrawals
+                .as_ref()
+                .expect("withdrawals should be present")
+                .len(),
+            1,
+        );
+
+        let empty = bodies[1].as_ref().expect("body should be present");
+
+        assert_eq!(empty.transactions.len(), 0);
+        assert_eq!(
+            empty
+                .withdrawals
+                .as_ref()
+                .expect("withdrawals should be present")
+                .len(),
+            0,
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_payload_bodies_by_hash_with_missing_body() -> Result<()> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": [
+                null,
+                {
+                    "transactions": [],
+                    "withdrawals": [],
+                },
+            ],
+        });
+
+        let (_server, eth1_api) = eth1_api_serving(&body)?;
+
+        let bodies = eth1_api
+            .get_payload_bodies_by_hash::<Mainnet>(&[H256::repeat_byte(1), H256::repeat_byte(2)])
+            .await?;
+
+        assert!(bodies[0].is_none());
+        assert!(bodies[1].is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_payload_bodies_by_hash_with_short_response() -> Result<()> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": [
+                {
+                    "transactions": [],
+                    "withdrawals": [],
+                },
+            ],
+        });
+
+        let (_server, eth1_api) = eth1_api_serving(&body)?;
+
+        assert_eq!(
+            eth1_api
+                .get_payload_bodies_by_hash::<Mainnet>(&[
+                    H256::repeat_byte(1),
+                    H256::repeat_byte(2),
+                ])
+                .await
+                .expect_err("a response shorter than the request should be an error")
+                .downcast::<Error>()?,
+            Error::PayloadBodyCountMismatch {
+                requested: 2,
+                returned: 1,
+            },
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_payload_bodies_with_no_endpoints() -> Result<()> {
+        let eth1_api = Arc::new(Eth1Api::new(
+            Arc::new(Config::mainnet()),
+            Client::new(),
+            Arc::default(),
+            vec![],
+            None,
+            None,
+        ));
+
+        assert_eq!(
+            eth1_api
+                .get_payload_bodies_by_hash::<Mainnet>(&[H256::repeat_byte(1)])
+                .await
+                .expect_err("Eth1Api with no endpoints should return an error")
+                .downcast::<Error>()?,
+            Error::NoEndpointsProvided,
+        );
+
+        assert_eq!(
+            eth1_api
+                .get_payload_bodies_by_range::<Mainnet>(1, 1)
+                .await
+                .expect_err("Eth1Api with no endpoints should return an error")
+                .downcast::<Error>()?,
+            Error::NoEndpointsProvided,
+        );
+
+        Ok(())
+    }
+
+    // Pre-Shanghai bodies have no withdrawals at all, and the execution client trims the response
+    // at its latest known block.
+    #[tokio::test]
+    async fn test_payload_bodies_by_range_without_withdrawals() -> Result<()> {
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": [
+                {
+                    "transactions": [],
+                    "withdrawals": null,
+                },
+                {
+                    "transactions": [],
+                },
+            ],
+        });
+
+        let (_server, eth1_api) = eth1_api_serving(&body)?;
+
+        let bodies = eth1_api
+            .get_payload_bodies_by_range::<Mainnet>(100, 4)
+            .await?;
+
+        assert_eq!(bodies.len(), 2);
+
+        for body in &bodies {
+            assert!(
+                body.as_ref()
+                    .expect("body should be present")
+                    .withdrawals
+                    .is_none()
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_payload_bodies_batch_size_shrinks_on_too_large_request() -> Result<()> {
+        let server = MockServer::start();
+
+        let too_large = server.mock(|when, then| {
+            when.method(Method::POST)
+                .path("/")
+                .is_true(|request| requested_hashes(request) > PAYLOAD_BODIES_MIN_BATCH_SIZE);
+
+            then.status(200).body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {
+                        "code": TOO_LARGE_REQUEST_ERROR_CODE,
+                        "message": "Too large request",
+                    },
+                })
+                .to_string(),
+            );
+        });
+
+        let accepted = server.mock(|when, then| {
+            when.method(Method::POST)
+                .path("/")
+                .is_true(|request| requested_hashes(request) <= PAYLOAD_BODIES_MIN_BATCH_SIZE);
+
+            then.status(200).body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": vec![
+                        json!({ "transactions": [], "withdrawals": [] });
+                        PAYLOAD_BODIES_MIN_BATCH_SIZE
+                    ],
+                })
+                .to_string(),
+            );
+        });
+
+        let eth1_api = Arc::new(Eth1Api::new(
+            Arc::new(Config::mainnet()),
+            Client::new(),
+            Arc::default(),
+            vec![server.url("/").parse()?],
+            None,
+            None,
+        ));
+
+        let block_hashes = (0..2 * PAYLOAD_BODIES_MIN_BATCH_SIZE)
+            .map(|index| H256::from_low_u64_be(index as u64))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            eth1_api.payload_bodies_batch_size(),
+            PAYLOAD_BODIES_MAX_BATCH_SIZE,
+        );
+
+        let bodies = eth1_api
+            .get_payload_bodies_by_hash::<Mainnet>(&block_hashes)
+            .await?;
+
+        assert_eq!(bodies.len(), block_hashes.len());
+        assert_eq!(
+            eth1_api.payload_bodies_batch_size(),
+            PAYLOAD_BODIES_MIN_BATCH_SIZE,
+        );
+
+        too_large.assert_calls(1);
+        accepted.assert_calls(2);
+
+        // Probing for the batch size limit is not an outage.
+        assert!(!eth1_api.el_offline());
+
+        // The reduced size is reused, so the oversized request is not repeated.
+        let bodies = eth1_api
+            .get_payload_bodies_by_hash::<Mainnet>(&block_hashes)
+            .await?;
+
+        assert_eq!(bodies.len(), block_hashes.len());
+
+        too_large.assert_calls(1);
+        accepted.assert_calls(4);
+
+        Ok(())
+    }
+
+    // A wrong `start`, a wrong `count`, or the wrong encoding would silently return bodies
+    // belonging to other blocks, which surfaces much later as a payload mismatch.
+    #[tokio::test]
+    async fn test_payload_bodies_by_range_sends_hex_encoded_start_and_count() -> Result<()> {
+        let server = MockServer::start();
+
+        let mock = server.mock(|when, then| {
+            when.method(Method::POST).path("/").is_true(|request| {
+                let body = serde_json::from_slice::<Value>(request.body_ref())
+                    .expect("request body is JSON");
+
+                body["method"] == ENGINE_GET_PAYLOAD_BODIES_BY_RANGE_V1
+                    && body["params"] == json!(["0x64", "0x4"])
+            });
+
+            then.status(200).body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": vec![json!({ "transactions": [], "withdrawals": [] }); 4],
+                })
+                .to_string(),
+            );
+        });
+
+        let eth1_api = Arc::new(Eth1Api::new(
+            Arc::new(Config::mainnet()),
+            Client::new(),
+            Arc::default(),
+            vec![server.url("/").parse()?],
+            None,
+            None,
+        ));
+
+        let bodies = eth1_api
+            .get_payload_bodies_by_range::<Mainnet>(100, 4)
+            .await?;
+
+        assert_eq!(bodies.len(), 4);
+        mock.assert_calls(1);
+
+        Ok(())
+    }
+
+    // Payload bodies are requested on behalf of peers and without a capability filter, so an
+    // execution client that does not implement them must not be reported as offline: `el_offline`
+    // is part of `GET /eth/v1/node/syncing` and validator clients fail over on it.
+    #[tokio::test]
+    async fn test_unimplemented_payload_bodies_do_not_mark_the_endpoint_offline() -> Result<()> {
+        let server = MockServer::start();
+
+        server.mock(|when, then| {
+            when.method(Method::POST).path("/");
+
+            then.status(200).body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {
+                        "code": METHOD_NOT_FOUND_ERROR_CODE,
+                        "message": "Method not found",
+                    },
+                })
+                .to_string(),
+            );
+        });
+
+        let eth1_api = Arc::new(Eth1Api::new(
+            Arc::new(Config::mainnet()),
+            Client::new(),
+            Arc::default(),
+            vec![server.url("/").parse()?],
+            None,
+            None,
+        ));
+
+        eth1_api
+            .get_payload_bodies_by_range::<Mainnet>(100, 4)
+            .await
+            .expect_err("an execution client without payload bodies should fail the request");
+
+        assert!(!eth1_api.el_offline());
+
+        Ok(())
+    }
+
+    // The exemption is not limited to the rejection codes: peers can make payload body requests
+    // fail in any way the execution client sees fit, including by timing it out under the load
+    // they cause.
+    #[tokio::test]
+    async fn test_failing_payload_bodies_do_not_mark_the_endpoint_offline() -> Result<()> {
+        let server = MockServer::start();
+
+        server.mock(|when, then| {
+            when.method(Method::POST).path("/");
+
+            then.status(500).body("execution client is busy");
+        });
+
+        let eth1_api = Arc::new(Eth1Api::new(
+            Arc::new(Config::mainnet()),
+            Client::new(),
+            Arc::default(),
+            vec![server.url("/").parse()?],
+            None,
+            None,
+        ));
+
+        eth1_api
+            .get_payload_bodies_by_hash::<Mainnet>(&[H256::repeat_byte(1)])
+            .await
+            .expect_err("an execution client that fails the request should fail it");
+
+        assert!(!eth1_api.el_offline());
+
+        Ok(())
+    }
+
+    // The exemption above is scoped to payload bodies. Every other engine method is one the node
+    // itself depends on, so a client that does not implement it is offline.
+    #[tokio::test]
+    async fn test_unimplemented_other_methods_mark_the_endpoint_offline() -> Result<()> {
+        let server = MockServer::start();
+
+        server.mock(|when, then| {
+            when.method(Method::POST).path("/");
+
+            then.status(200).body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {
+                        "code": METHOD_NOT_FOUND_ERROR_CODE,
+                        "message": "Method not found",
+                    },
+                })
+                .to_string(),
+            );
+        });
+
+        let eth1_api = Arc::new(Eth1Api::new(
+            Arc::new(Config::mainnet()),
+            Client::new(),
+            Arc::default(),
+            vec![server.url("/").parse()?],
+            None,
+            None,
+        ));
+
+        eth1_api
+            .current_head_number()
+            .await
+            .expect_err("an execution client without the method should fail the request");
+
+        assert!(eth1_api.el_offline());
+
+        Ok(())
+    }
+
+    // An execution client that rejects even the minimum batch must make the request fail rather
+    // than shrink forever.
+    #[tokio::test]
+    async fn test_payload_bodies_stop_shrinking_at_the_minimum_batch_size() -> Result<()> {
+        let server = MockServer::start();
+
+        let too_large = server.mock(|when, then| {
+            when.method(Method::POST).path("/");
+
+            then.status(200).body(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "error": {
+                        "code": TOO_LARGE_REQUEST_ERROR_CODE,
+                        "message": "Too large request",
+                    },
+                })
+                .to_string(),
+            );
+        });
+
+        let eth1_api = Arc::new(Eth1Api::new(
+            Arc::new(Config::mainnet()),
+            Client::new(),
+            Arc::default(),
+            vec![server.url("/").parse()?],
+            None,
+            None,
+        ));
+
+        let block_hashes = (0..4 * PAYLOAD_BODIES_MIN_BATCH_SIZE)
+            .map(|index| H256::from_low_u64_be(index as u64))
+            .collect::<Vec<_>>();
+
+        eth1_api
+            .get_payload_bodies_by_hash::<Mainnet>(&block_hashes)
+            .await
+            .expect_err("an execution client rejecting every batch size should fail the request");
+
+        // 128 -> 64 -> 32, then the floor stops the retries.
+        too_large.assert_calls(3);
+        assert_eq!(
+            eth1_api.payload_bodies_batch_size(),
+            PAYLOAD_BODIES_MIN_BATCH_SIZE,
+        );
+
+        Ok(())
+    }
+
+    // The `MockServer` is returned along with the API because dropping it returns the server to
+    // `httpmock`'s pool, where another test can claim it and replace the mocks this one relies on.
+    fn eth1_api_serving(body: &Value) -> Result<(MockServer, Arc<Eth1Api>)> {
+        let server = MockServer::start();
+
+        server.mock(|when, then| {
+            when.method(Method::POST).path("/");
+            then.status(200).body(body.to_string());
+        });
+
+        let server_url = server.url("/").parse()?;
+
+        let eth1_api = Arc::new(Eth1Api::new(
+            Arc::new(Config::mainnet()),
+            Client::new(),
+            Arc::default(),
+            vec![server_url],
+            None,
+            None,
+        ));
+
+        Ok((server, eth1_api))
+    }
+
+    fn requested_hashes(request: &HttpMockRequest) -> usize {
+        let body =
+            serde_json::from_slice::<Value>(request.body_ref()).expect("request body is JSON");
+
+        body["params"][0]
+            .as_array()
+            .expect("engine_getPayloadBodiesByHashV1 takes an array of block hashes")
+            .len()
     }
 
     fn default_payload<P: Preset>() -> ExecutionPayload<P> {
