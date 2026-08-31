@@ -734,6 +734,7 @@ pub async fn run_after_genesis<P: Preset>(
         validator_config.backfill_custody_groups,
         validator_config.custody_mode,
         storage_mode,
+        eth1_api.clone_arc(),
     )
     .await?;
 

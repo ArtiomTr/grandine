@@ -5,13 +5,16 @@ use std::{
     time::Instant,
 };
 
-use anyhow::{Result, bail};
+use anyhow::{Error as AnyhowError, Result, bail};
 use data_dumper::DataDumper;
 use debug_info::HealthCheck;
 use dedicated_executor::DedicatedExecutor;
 use eip_7594::{compute_columns_for_custody_group, get_custody_groups};
 use enum_iterator::Sequence as _;
-use eth1_api::{BlobFetcherToP2p, RealController};
+use eth1_api::{
+    BlobFetcherToP2p, Eth1Api, RealController, reconstruct_stored_blocks,
+    reconstruct_stored_blocks_in_range,
+};
 use eth2_libp2p::{
     Context, GossipId, GossipTopic, MessageAcceptance, MessageId, NetworkConfig, NetworkEvent,
     NetworkGlobals, PeerAction, PeerId, PubsubMessage, ReportSource, Response, ShutdownReason,
@@ -30,7 +33,7 @@ use eth2_libp2p::{
 };
 use features::Feature;
 use fork_choice_control::{
-    BlockWithRoot, MutatorIgnoreReason, MutatorRejectionReason, P2pMessage, Wait,
+    BlockWithRoot, MutatorIgnoreReason, MutatorRejectionReason, P2pMessage, StoredBlock, Wait,
 };
 use futures::{
     channel::mpsc::{Receiver, UnboundedReceiver, UnboundedSender},
@@ -93,6 +96,14 @@ const GOSSIPSUB_PARAMETER_UPDATE_INTERVAL: Duration = Duration::from_mins(1);
 const NETWORK_METRICS_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 const PEER_COUNT_UPDATE_INTERVAL: Duration = Duration::from_millis(100);
 
+/// Deadline for reconstructing the execution payloads of a block response.
+///
+/// `eth2_libp2p` expires an inbound substream 10 seconds after the request is negotiated and only
+/// resets that timer once a response chunk is written. Reconstruction happens before any chunk is
+/// sent and may span several engine calls across several endpoints, each with a timeout of its
+/// own, so it needs a deadline of its own to leave time for the response to reach the peer.
+const PAYLOAD_RECONSTRUCTION_TIMEOUT: Duration = Duration::from_secs(8);
+
 // > Clients MAY limit the number of blocks and sidecars in the response.
 const MAX_FOR_DOS_PREVENTION: u64 = 64;
 
@@ -151,6 +162,7 @@ pub struct Network<P: Preset, W: Wait> {
     proposer_preferences_subscribed: bool,
     backfill_custody_groups: bool,
     storage_mode: StorageMode,
+    eth1_api: Arc<Eth1Api>,
 }
 
 impl<P: Preset, W: Wait> Network<P, W> {
@@ -175,6 +187,7 @@ impl<P: Preset, W: Wait> Network<P, W> {
         backfill_custody_groups: bool,
         custody_mode: CustodyMode,
         storage_mode: StorageMode,
+        eth1_api: Arc<Eth1Api>,
     ) -> Result<Self> {
         let chain_config = controller.chain_config();
         let head_state = controller.head_state().value;
@@ -301,6 +314,7 @@ impl<P: Preset, W: Wait> Network<P, W> {
             proposer_preferences_subscribed: false,
             backfill_custody_groups,
             storage_mode,
+            eth1_api,
         };
 
         Ok(network)
@@ -1525,38 +1539,20 @@ impl<P: Preset, W: Wait> Network<P, W> {
 
         let controller = self.controller.clone_arc();
         let network_to_service_tx = self.network_to_service_tx.clone();
+        let eth1_api = self.eth1_api.clone_arc();
 
         self.dedicated_executor
             .spawn(async move {
                 let blocks = controller.blocks_by_range(start_slot..end_slot)?;
 
-                for block_with_root in blocks {
-                    let BlockWithRoot { block, root } = block_with_root;
-                    let block = block.into_full()?;
-
-                    debug_with_peers!(
-                        "sending BeaconBlocksByRange response chunk \
-                        (inbound_request_id: {inbound_request_id:?}, peer_id: {peer_id}, \
-                        slot: {}, root: {root:?})",
-                        block.message().slot(),
-                    );
-
-                    ServiceInboundMessage::SendResponse(
-                        peer_id,
-                        inbound_request_id,
-                        Box::new(Response::BlocksByRange(Some(block))),
-                    )
-                    .send(&network_to_service_tx);
-                }
-
-                debug_with_peers!("terminating BeaconBlocksByRange response stream");
-
-                ServiceInboundMessage::SendResponse(
+                respond_with_blocks_by_range(
+                    &eth1_api,
+                    blocks,
                     peer_id,
                     inbound_request_id,
-                    Box::new(Response::BlocksByRange(None)),
+                    &network_to_service_tx,
                 )
-                .send(&network_to_service_tx);
+                .await;
 
                 Ok::<_, anyhow::Error>(())
             })
@@ -1984,6 +1980,7 @@ impl<P: Preset, W: Wait> Network<P, W> {
 
         let controller = self.controller.clone_arc();
         let network_to_service_tx = self.network_to_service_tx.clone();
+        let eth1_api = self.eth1_api.clone_arc();
 
         self.dedicated_executor
             .spawn(async move {
@@ -1993,33 +1990,14 @@ impl<P: Preset, W: Wait> Network<P, W> {
 
                 let blocks = controller.blocks_by_root(block_roots)?;
 
-                for block in blocks.into_iter().map(WithStatus::value) {
-                    let block = block.into_full()?;
-
-                    debug_with_peers!(
-                        "sending BeaconBlocksByRoot response chunk \
-                        (inbound_request_id: {inbound_request_id:?}, peer_id: {peer_id}, \
-                        slot: {}, root: {:?})",
-                        block.message().slot(),
-                        block.message().hash_tree_root(),
-                    );
-
-                    ServiceInboundMessage::SendResponse(
-                        peer_id,
-                        inbound_request_id,
-                        Box::new(Response::BlocksByRoot(Some(block))),
-                    )
-                    .send(&network_to_service_tx);
-                }
-
-                debug_with_peers!("terminating BeaconBlocksByRoot response stream");
-
-                ServiceInboundMessage::SendResponse(
+                respond_with_blocks_by_root(
+                    &eth1_api,
+                    blocks.into_iter().map(WithStatus::value).collect(),
                     peer_id,
                     inbound_request_id,
-                    Box::new(Response::BlocksByRoot(None)),
+                    &network_to_service_tx,
                 )
-                .send(&network_to_service_tx);
+                .await;
 
                 Ok::<_, anyhow::Error>(())
             })
@@ -3197,15 +3175,380 @@ fn run_network_service<P: Preset>(
     });
 }
 
+/// Sends a `BeaconBlocksByRange` response, reconstructing the payloads of blinded blocks.
+///
+/// A block whose payload cannot be reconstructed terminates the stream with an error instead of
+/// being skipped: `BeaconBlocksByRange` responses are legitimately non-contiguous because of
+/// skipped slots, so omitting a block would tell the peer that slot was empty.
+///
+/// The error is `ServerError` and not `ResourceUnavailable` because peers treat the latter on the
+/// block protocols as grounds for an immediate ban rather than a score penalty. A payload body the
+/// execution client no longer has is a condition of ours that other requests may well survive.
+async fn respond_with_blocks_by_range<P: Preset>(
+    eth1_api: &Eth1Api,
+    blocks: Vec<BlockWithRoot<P>>,
+    peer_id: PeerId,
+    inbound_request_id: InboundRequestId,
+    network_to_service_tx: &UnboundedSender<ServiceInboundMessage<P>>,
+) {
+    let (roots, stored): (Vec<_>, Vec<_>) = blocks
+        .into_iter()
+        .map(|BlockWithRoot { block, root }| (root, block))
+        .unzip();
+
+    let reconstructed = tokio::time::timeout(
+        PAYLOAD_RECONSTRUCTION_TIMEOUT,
+        reconstruct_stored_blocks_in_range(eth1_api, stored),
+    )
+    .await
+    .map_err(AnyhowError::new)
+    .and_then(|result| result);
+
+    let blocks = match reconstructed {
+        Ok(blocks) => blocks,
+        Err(error) => {
+            // Peers request historical blocks continuously, so a pruned or unreachable
+            // execution client would turn this into a log flood. `Eth1Api` warns once per
+            // outage instead.
+            debug_with_peers!(
+                "unable to reconstruct execution payloads for BeaconBlocksByRange response \
+                (inbound_request_id: {inbound_request_id:?}, peer_id: {peer_id}): {error:?}",
+            );
+
+            ServiceInboundMessage::SendErrorResponse(
+                peer_id,
+                inbound_request_id,
+                RpcErrorResponse::ServerError,
+                "unable to reconstruct execution payload",
+            )
+            .send(network_to_service_tx);
+
+            return;
+        }
+    };
+
+    for (root, block) in roots.into_iter().zip(blocks) {
+        debug_with_peers!(
+            "sending BeaconBlocksByRange response chunk \
+            (inbound_request_id: {inbound_request_id:?}, peer_id: {peer_id}, \
+            slot: {}, root: {root:?})",
+            block.message().slot(),
+        );
+
+        ServiceInboundMessage::SendResponse(
+            peer_id,
+            inbound_request_id,
+            Box::new(Response::BlocksByRange(Some(block))),
+        )
+        .send(network_to_service_tx);
+    }
+
+    debug_with_peers!("terminating BeaconBlocksByRange response stream");
+
+    ServiceInboundMessage::SendResponse(
+        peer_id,
+        inbound_request_id,
+        Box::new(Response::BlocksByRange(None)),
+    )
+    .send(network_to_service_tx);
+}
+
+/// Sends a `BeaconBlocksByRoot` response, reconstructing the payloads of blinded blocks.
+///
+/// The requested blocks may be non-canonical, so their payload bodies are fetched by execution
+/// block hash rather than by number. Failures are reported like they are in
+/// `respond_with_blocks_by_range`.
+async fn respond_with_blocks_by_root<P: Preset>(
+    eth1_api: &Eth1Api,
+    blocks: Vec<StoredBlock<P>>,
+    peer_id: PeerId,
+    inbound_request_id: InboundRequestId,
+    network_to_service_tx: &UnboundedSender<ServiceInboundMessage<P>>,
+) {
+    let reconstructed = tokio::time::timeout(
+        PAYLOAD_RECONSTRUCTION_TIMEOUT,
+        reconstruct_stored_blocks(eth1_api, blocks),
+    )
+    .await
+    .map_err(AnyhowError::new)
+    .and_then(|result| result);
+
+    let blocks = match reconstructed {
+        Ok(blocks) => blocks,
+        Err(error) => {
+            // Peers request historical blocks continuously, so a pruned or unreachable
+            // execution client would turn this into a log flood. `Eth1Api` warns once per
+            // outage instead.
+            debug_with_peers!(
+                "unable to reconstruct execution payloads for BeaconBlocksByRoot response \
+                (inbound_request_id: {inbound_request_id:?}, peer_id: {peer_id}): {error:?}",
+            );
+
+            ServiceInboundMessage::SendErrorResponse(
+                peer_id,
+                inbound_request_id,
+                RpcErrorResponse::ServerError,
+                "unable to reconstruct execution payload",
+            )
+            .send(network_to_service_tx);
+
+            return;
+        }
+    };
+
+    for block in blocks {
+        debug_with_peers!(
+            "sending BeaconBlocksByRoot response chunk \
+            (inbound_request_id: {inbound_request_id:?}, peer_id: {peer_id}, \
+            slot: {}, root: {:?})",
+            block.message().slot(),
+            block.message().hash_tree_root(),
+        );
+
+        ServiceInboundMessage::SendResponse(
+            peer_id,
+            inbound_request_id,
+            Box::new(Response::BlocksByRoot(Some(block))),
+        )
+        .send(network_to_service_tx);
+    }
+
+    debug_with_peers!("terminating BeaconBlocksByRoot response stream");
+
+    ServiceInboundMessage::SendResponse(
+        peer_id,
+        inbound_request_id,
+        Box::new(Response::BlocksByRoot(None)),
+    )
+    .send(network_to_service_tx);
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::network::MAX_FOR_DOS_PREVENTION;
+    use bls::SignatureBytes;
+    use futures::channel::mpsc;
+    use httpmock::{Method, MockServer};
+    use reqwest::Client;
+    use serde_json::{Value, json};
+    use types::{
+        combined::{BeaconBlock, SignedBlindedBeaconBlock},
+        deneb::containers::{
+            BeaconBlock as DenebBeaconBlock, BeaconBlockBody as DenebBeaconBlockBody,
+            ExecutionPayload as DenebExecutionPayload,
+        },
+        phase0::primitives::ExecutionBlockNumber,
+        preset::Mainnet,
+    };
 
-    use types::{config::Config, nonstandard::Phase};
+    use super::*;
+
+    const FIRST_BLOCK_NUMBER: ExecutionBlockNumber = 17_000_000;
 
     #[test]
     fn ensure_constant_sanity() {
         assert!(MAX_FOR_DOS_PREVENTION < Config::mainnet().max_request_blocks(Phase::Phase0));
         assert!(MAX_FOR_DOS_PREVENTION < Config::mainnet().max_request_blocks(Phase::Deneb));
+    }
+
+    #[tokio::test]
+    async fn blocks_by_range_response_carries_reconstructed_payloads() -> Result<()> {
+        let blocks = [FIRST_BLOCK_NUMBER, FIRST_BLOCK_NUMBER + 1].map(full_block);
+
+        let (_server, eth1_api) = eth1_api_serving(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": [empty_body(), empty_body()],
+        }))?;
+
+        let stored = blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| {
+                Ok(BlockWithRoot {
+                    block: blinded(block)?,
+                    root: H256::from_low_u64_be(index.try_into()?),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+
+        let messages = collect_messages(|peer_id, inbound_request_id, tx| async move {
+            respond_with_blocks_by_range(&eth1_api, stored, peer_id, inbound_request_id, &tx).await;
+        })
+        .await;
+
+        match messages.as_slice() {
+            [
+                ServiceInboundMessage::SendResponse(_, _, first),
+                ServiceInboundMessage::SendResponse(_, _, second),
+                ServiceInboundMessage::SendResponse(_, _, termination),
+            ] => {
+                assert_eq!(
+                    **first,
+                    Response::BlocksByRange(Some(blocks[0].clone_arc())),
+                );
+                assert_eq!(
+                    **second,
+                    Response::BlocksByRange(Some(blocks[1].clone_arc())),
+                );
+                assert_eq!(**termination, Response::BlocksByRange(None));
+            }
+            _ => panic!("unexpected BeaconBlocksByRange response: {messages:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blocks_by_root_response_carries_reconstructed_payloads() -> Result<()> {
+        let block = full_block(FIRST_BLOCK_NUMBER);
+
+        let (_server, eth1_api) = eth1_api_serving(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": [empty_body()],
+        }))?;
+
+        let stored = vec![blinded(&block)?];
+
+        let messages = collect_messages(|peer_id, inbound_request_id, tx| async move {
+            respond_with_blocks_by_root(&eth1_api, stored, peer_id, inbound_request_id, &tx).await;
+        })
+        .await;
+
+        match messages.as_slice() {
+            [
+                ServiceInboundMessage::SendResponse(_, _, chunk),
+                ServiceInboundMessage::SendResponse(_, _, termination),
+            ] => {
+                assert_eq!(**chunk, Response::BlocksByRoot(Some(block)));
+                assert_eq!(**termination, Response::BlocksByRoot(None));
+            }
+            _ => panic!("unexpected BeaconBlocksByRoot response: {messages:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blocks_by_range_response_errors_when_a_payload_body_is_missing() -> Result<()> {
+        let block = full_block(FIRST_BLOCK_NUMBER);
+
+        let (_server, eth1_api) = eth1_api_serving(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": [null],
+        }))?;
+
+        let stored = vec![BlockWithRoot {
+            block: blinded(&block)?,
+            root: H256::zero(),
+        }];
+
+        let messages = collect_messages(|peer_id, inbound_request_id, tx| async move {
+            respond_with_blocks_by_range(&eth1_api, stored, peer_id, inbound_request_id, &tx).await;
+        })
+        .await;
+
+        match messages.as_slice() {
+            [ServiceInboundMessage::SendErrorResponse(_, _, error, _)] => {
+                assert_eq!(*error, RpcErrorResponse::ServerError);
+            }
+            _ => panic!("unexpected BeaconBlocksByRange response: {messages:?}"),
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn blocks_by_root_response_errors_when_a_payload_body_is_missing() -> Result<()> {
+        let block = full_block(FIRST_BLOCK_NUMBER);
+
+        let (_server, eth1_api) = eth1_api_serving(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": [null],
+        }))?;
+
+        let stored = vec![blinded(&block)?];
+
+        let messages = collect_messages(|peer_id, inbound_request_id, tx| async move {
+            respond_with_blocks_by_root(&eth1_api, stored, peer_id, inbound_request_id, &tx).await;
+        })
+        .await;
+
+        match messages.as_slice() {
+            [ServiceInboundMessage::SendErrorResponse(_, _, error, _)] => {
+                assert_eq!(*error, RpcErrorResponse::ServerError);
+            }
+            _ => panic!("unexpected BeaconBlocksByRoot response: {messages:?}"),
+        }
+
+        Ok(())
+    }
+
+    async fn collect_messages<F: Future<Output = ()>>(
+        respond: impl FnOnce(
+            PeerId,
+            InboundRequestId,
+            UnboundedSender<ServiceInboundMessage<Mainnet>>,
+        ) -> F,
+    ) -> Vec<ServiceInboundMessage<Mainnet>> {
+        let (tx, rx) = mpsc::unbounded();
+
+        respond(PeerId::random(), InboundRequestId::new_unchecked(0, 0), tx).await;
+
+        rx.collect().await
+    }
+
+    fn full_block(block_number: ExecutionBlockNumber) -> Arc<SignedBeaconBlock<Mainnet>> {
+        let block = BeaconBlock::Deneb(
+            DenebBeaconBlock {
+                body: DenebBeaconBlockBody {
+                    execution_payload: DenebExecutionPayload {
+                        block_number,
+                        block_hash: H256::from_low_u64_be(block_number),
+                        gas_limit: 30_000_000,
+                        ..DenebExecutionPayload::default()
+                    },
+                    ..DenebBeaconBlockBody::default()
+                },
+                ..DenebBeaconBlock::default()
+            }
+            .into(),
+        );
+
+        Arc::new(block.with_signature(SignatureBytes::default()))
+    }
+
+    fn blinded(block: &Arc<SignedBeaconBlock<Mainnet>>) -> Result<StoredBlock<Mainnet>> {
+        let blinded = SignedBlindedBeaconBlock::try_from(block.as_ref().clone())?;
+
+        Ok(StoredBlock::Blinded(Arc::new(blinded)))
+    }
+
+    fn empty_body() -> Value {
+        json!({ "transactions": [], "withdrawals": [] })
+    }
+
+    // The `MockServer` is returned along with the API because dropping it returns the server to
+    // `httpmock`'s pool, where another test can claim it and replace the mocks this one relies on.
+    fn eth1_api_serving(body: &Value) -> Result<(MockServer, Eth1Api)> {
+        let server = MockServer::start();
+
+        server.mock(|when, then| {
+            when.method(Method::POST).path("/");
+            then.status(200).body(body.to_string());
+        });
+
+        let eth1_api = Eth1Api::new(
+            Arc::new(Config::mainnet()),
+            Client::new(),
+            Arc::default(),
+            vec![server.url("/").parse()?],
+            None,
+            None,
+        );
+
+        Ok((server, eth1_api))
     }
 }
