@@ -73,9 +73,11 @@ pub fn custom_process_blinded_block<P: Preset>(
         pubkey_cache,
         state,
         block.body.sync_aggregate,
-        verifier,
+        &mut verifier,
         slot_report,
-    )
+    )?;
+
+    verifier.finish()
 }
 
 fn process_execution_payload<P: Preset>(

@@ -44,7 +44,8 @@ pub fn custom_process_blinded_block<P: Preset>(
     unphased::process_randao(config, pubkey_cache, state, &block.body, &mut verifier)?;
     unphased::process_eth1_data(state, &block.body)?;
 
-    electra::process_operations(
+    // > [Modified in Fulu:EIP6110] (removes former deposit mechanism)
+    super::block_processing::process_operations(
         config,
         pubkey_cache,
         state,
@@ -53,9 +54,9 @@ pub fn custom_process_blinded_block<P: Preset>(
         &mut slot_report,
     )?;
 
-    // > [New in Electra:EIP6110]
+    // > [Modified in Fulu:EIP6110]
     for deposit_request in &block.body.execution_requests.deposits {
-        electra::process_deposit_request(state, *deposit_request)?;
+        super::block_processing::process_deposit_request(state, *deposit_request)?;
     }
 
     // > [New in Electra:EIP7002:EIP7251]
@@ -73,9 +74,11 @@ pub fn custom_process_blinded_block<P: Preset>(
         pubkey_cache,
         state,
         block.body.sync_aggregate,
-        verifier,
+        &mut verifier,
         slot_report,
-    )
+    )?;
+
+    verifier.finish()
 }
 
 fn process_execution_payload<P: Preset>(
