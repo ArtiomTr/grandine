@@ -29,6 +29,7 @@ use crate::{
 #[cfg(feature = "metrics")]
 use prometheus_metrics::METRICS;
 
+#[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all))]
 pub fn process_epoch(
     config: &Config,
     pubkey_cache: &PubkeyCache,
@@ -41,37 +42,53 @@ pub fn process_epoch(
 
     // TODO(Grandine Team): Some parts of epoch processing could be done in parallel.
 
-    let (statistics, mut summaries, participation) = altair::statistics_and_summaries(state)?;
+    let (statistics, mut summaries, participation) = step("statistics_and_summaries", || {
+        altair::statistics_and_summaries(state)
+    })?;
 
     altair::process_justification_and_finalization(state, statistics)?;
 
-    altair::process_inactivity_updates(
-        config,
-        state,
-        summaries.iter().copied(),
-        participation.iter().copied(),
-    )?;
+    step("process_inactivity_updates", || {
+        altair::process_inactivity_updates(
+            config,
+            state,
+            summaries.iter().copied(),
+            participation.iter().copied(),
+        )
+    })?;
 
     // Epoch deltas must be computed after `process_justification_and_finalization` and
     // `process_inactivity_updates` because they depend on updated values of
     // `BeaconState.finalized_checkpoint` and `BeaconState.inactivity_scores`.
     //
     // Using `vec_of_default` in the genesis epoch does not improve performance.
-    let epoch_deltas: Vec<EpochDeltasForTransition> = epoch_intermediates::epoch_deltas(
-        config,
-        state,
-        statistics,
-        summaries.iter().copied(),
-        participation,
-    )?;
+    let epoch_deltas: Vec<EpochDeltasForTransition> = step("epoch_deltas", || {
+        epoch_intermediates::epoch_deltas(
+            config,
+            state,
+            statistics,
+            summaries.iter().copied(),
+            participation,
+        )
+    })?;
 
-    unphased::process_rewards_and_penalties(state, epoch_deltas)?;
-    electra::process_registry_updates(config, state, summaries.as_mut_slice())?;
-    electra::process_slashings::<_, ()>(state, summaries)?;
+    step("process_rewards_and_penalties", || {
+        unphased::process_rewards_and_penalties(state, epoch_deltas)
+    })?;
+    step("process_registry_updates", || {
+        electra::process_registry_updates(config, state, summaries.as_mut_slice())
+    })?;
+    step("process_slashings", || {
+        electra::process_slashings::<_, ()>(state, summaries)
+    })?;
     unphased::process_eth1_data_reset(state)?;
-    process_pending_deposits(config, pubkey_cache, state)?;
+    step("process_pending_deposits", || {
+        process_pending_deposits(config, pubkey_cache, state)
+    })?;
     electra::process_pending_consolidations(state)?;
-    electra::process_effective_balance_updates(state)?;
+    step("process_effective_balance_updates", || {
+        electra::process_effective_balance_updates(state)
+    })?;
     unphased::process_slashings_reset(state)?;
     unphased::process_randao_mixes_reset(state)?;
 
@@ -79,14 +96,32 @@ pub fn process_epoch(
     process_historical_summaries_update(state)?;
 
     altair::process_participation_flag_updates(state);
-    altair::process_sync_committee_updates(pubkey_cache, state)?;
+    step("process_sync_committee_updates", || {
+        altair::process_sync_committee_updates(pubkey_cache, state)
+    })?;
 
     // > [New in Fulu:EIP7917]
-    process_proposer_lookahead(config, state)?;
+    step("process_proposer_lookahead", || {
+        process_proposer_lookahead(config, state)
+    })?;
 
     state.cache.advance_epoch();
 
     Ok(())
+}
+
+/// Runs one epoch processing step inside a span named after it, so that a trace attributes the
+/// cost of an epoch transition to the step that incurred it.
+#[cfg(feature = "tracing")]
+fn step<T>(name: &'static str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let _span = tracing::debug_span!("epoch_step", step = name).entered();
+
+    f()
+}
+
+#[cfg(not(feature = "tracing"))]
+fn step<T>(_name: &'static str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    f()
 }
 
 /// <https://github.com/ethereum/consensus-specs/blob/v1.7.0-alpha.9/specs/fulu/beacon-chain.md#modified-process_pending_deposits>

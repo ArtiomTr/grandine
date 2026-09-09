@@ -21,7 +21,7 @@ use reqwest::Client;
 use ssz::{Ssz, SszRead, SszReadDefault, SszSize, SszWrite};
 use std_ext::ArcExt as _;
 use thiserror::Error;
-use tracing::info;
+use tracing::{debug_span, info, instrument};
 use transition_functions::combined;
 use typenum::Unsigned as _;
 use types::{
@@ -1261,6 +1261,12 @@ impl<P: Preset> Storage<P> {
         self.get(BlockRootBySlot(slot))
     }
 
+    #[instrument(
+        skip_all,
+        level = "debug",
+        name = "storage::reconstruct_state",
+        fields(block_root = ?block_root),
+    )]
     fn state_with_key_by_block_root(
         &self,
         block_root: H256,
@@ -1316,6 +1322,8 @@ impl<P: Preset> Storage<P> {
                 break;
             }
 
+            let read_span = debug_span!("storage::read_row", layer).entered();
+
             let Some(raw_value) = self.database.get_raw(row_key.to_string())? else {
                 // The row was read as a key just above, so it can only be gone
                 // if pruning deleted it in between. Treated like a chain cut
@@ -1337,6 +1345,8 @@ impl<P: Preset> Storage<P> {
                     snap::raw::Decoder::new().decompress_vec(&raw_value)?
                 }
             };
+
+            drop(read_span);
 
             items.push((value, layer, row_key.block_root));
 
@@ -1377,9 +1387,13 @@ impl<P: Preset> Storage<P> {
                 unreachable!("items cannot be empty");
             };
 
+            let decode_span = debug_span!("storage::decode_frame", layer).entered();
+
             let mut frame = Arc::<BeaconState<P>>::from_ssz(&self.config, frame_bytes)?;
 
             self.restore_validators_to_state(frame.make_mut(), finalized_validators, None)?;
+
+            drop(decode_span);
 
             if *layer < self.hierarchy.depth() {
                 self.frame_cache
@@ -1390,6 +1404,8 @@ impl<P: Preset> Storage<P> {
         };
 
         for (delta, layer, block_root) in deltas {
+            let _patch_span = debug_span!("storage::apply_patch", layer).entered();
+
             let patch = BeaconStatePatch::from_ssz(&self.config, delta)?;
             let validators_before = frame.validators().len_usize();
 
@@ -1470,7 +1486,15 @@ impl<P: Preset> Storage<P> {
         Ok(Some((block, block_root)))
     }
 
-    pub(crate) fn stored_state(
+    /// The state as of `slot`, reconstructed from the frame and deltas on disk and advanced to
+    /// `slot` by replaying the blocks in between.
+    #[instrument(
+        skip_all,
+        level = "debug",
+        name = "storage::stored_state",
+        fields(slot)
+    )]
+    pub fn stored_state(
         &self,
         slot: Slot,
         finalized_validators: Option<&dyn SszValidatorList>,
@@ -1487,17 +1511,32 @@ impl<P: Preset> Storage<P> {
 
         // State may be persisted only once in several epochs.
         // `blocks` here are needed to transition state closer to `slot`.
-        for result in blocks.rev() {
-            let block = result?;
-            combined::trusted_state_transition(
-                &self.config,
-                &self.pubkey_cache,
-                state.make_mut(),
-                &block,
-            )?;
+        {
+            let _span = debug_span!("storage::replay_blocks").entered();
+
+            let base_slot = state.slot();
+            let mut replayed = 0u64;
+
+            for result in blocks.rev() {
+                let block = result?;
+                combined::trusted_state_transition(
+                    &self.config,
+                    &self.pubkey_cache,
+                    state.make_mut(),
+                    &block,
+                )?;
+                replayed = replayed.saturating_add(1);
+            }
+
+            debug_with_peers!(
+                "state at slot {slot} was reconstructed from the state at slot {base_slot} \
+                 by replaying {replayed} blocks",
+            );
         }
 
         if state.slot() < slot {
+            let _span = debug_span!("storage::process_slots").entered();
+
             combined::process_slots(&self.config, &self.pubkey_cache, state.make_mut(), slot)?;
         }
 
@@ -1627,6 +1666,12 @@ impl<P: Preset> Storage<P> {
     /// Finds the newest persisted state at or below `start_from_slot`, along with the blocks
     /// needed to replay it forward. `epoch_start_only` restricts the search to states that can
     /// serve as a fork choice anchor.
+    #[instrument(
+        skip_all,
+        level = "debug",
+        name = "storage::find_base_state",
+        fields(start_from_slot)
+    )]
     fn load_state_by_iteration(
         &self,
         start_from_slot: Slot,

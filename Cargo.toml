@@ -60,6 +60,7 @@ members = [
     'snapshot_test_utils',
     'spec_test_utils',
     'ssz',
+    'state_bench',
     'ssz_derive',
     'state_cache',
     'std_ext',
