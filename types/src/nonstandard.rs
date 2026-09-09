@@ -1097,25 +1097,34 @@ impl RawValidatorList {
     ) -> Result<(), E> {
         let len = self.len_usize();
 
-        let Self {
-            effective_balances,
-            items,
-            ..
-        } = self;
+        // `Vector::iter_mut` clones every node it hands out, so walking the column mutably copies
+        // all of it whether or not anything changes. Almost nothing does: an effective balance
+        // only moves when the real balance crosses a hysteresis threshold, which in a normal epoch
+        // happens to a small fraction of the registry. So the values are computed over a shared
+        // read and only the entries that differ are written back.
+        let mut changed = Vec::new();
 
-        for (index, (partial_validator, effective_balance)) in
-            items.iter().zip(effective_balances.iter_mut()).enumerate()
+        for (index, (partial_validator, effective_balance)) in self
+            .items
+            .iter()
+            .zip(self.effective_balances.iter())
+            .enumerate()
         {
             let old_effective_balance = *effective_balance;
             let new_effective_balance = updater(partial_validator, old_effective_balance)?;
 
-            if new_effective_balance == old_effective_balance {
-                continue;
+            if new_effective_balance != old_effective_balance {
+                changed.push((index, new_effective_balance));
             }
+        }
 
+        for (index, new_effective_balance) in changed {
             invalidate(index, len);
 
-            *effective_balance = new_effective_balance;
+            *self
+                .effective_balances
+                .get_mut(index)
+                .expect("index was produced by enumerating the column") = new_effective_balance;
         }
 
         Ok(())
@@ -1179,6 +1188,16 @@ impl RawValidatorList {
     #[must_use]
     pub fn effective_balances(&self) -> VectorIter<'_, Gwei> {
         self.effective_balances.iter()
+    }
+
+    #[must_use]
+    pub const fn partial_validator_column(&self) -> &Vector<PartialValidator> {
+        &self.items
+    }
+
+    #[must_use]
+    pub const fn effective_balance_column(&self) -> &Vector<Gwei> {
+        &self.effective_balances
     }
 
     #[must_use]

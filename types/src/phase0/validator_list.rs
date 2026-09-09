@@ -1,14 +1,14 @@
 use core::{fmt, iter, marker::PhantomData, ops::Range};
-#[cfg(target_os = "zkvm")]
-use std::slice::Iter as VectorIter;
 use std::sync::Arc;
+#[cfg(target_os = "zkvm")]
+use std::{slice::Iter as VectorIter, vec::Vec as Vector};
 
 use anyhow::Result;
 use arithmetic::{NonZeroExt as _, U64Ext as _};
 use bls::PublicKeyBytes;
 use derivative::Derivative;
 #[cfg(not(target_os = "zkvm"))]
-use im::vector::Iter as VectorIter;
+use im::{Vector, vector::Iter as VectorIter};
 use once_cell::race::OnceBox;
 use serde::{
     Deserialize, Serialize,
@@ -299,6 +299,14 @@ impl<N: Unsigned> SszValidatorList for ValidatorList<N> {
         self.buf.clear_pubkeys(count);
         let length = self.len_usize();
         self.cache = (length > 0).then(|| CacheNode::build_empty(length));
+    }
+
+    fn partial_validator_column(&self) -> &Vector<PartialValidator> {
+        self.buf.partial_validator_column()
+    }
+
+    fn effective_balance_column(&self) -> &Vector<Gwei> {
+        self.buf.effective_balance_column()
     }
 
     fn partial_validators(&self) -> VectorIter<'_, PartialValidator> {

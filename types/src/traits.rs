@@ -10,14 +10,14 @@
 // TODO(Grandine Team): GC unused impls for pointers.
 
 use core::{fmt::Debug, ops::Range};
-#[cfg(target_os = "zkvm")]
-use std::slice::Iter as VectorIter;
 use std::sync::Arc;
+#[cfg(target_os = "zkvm")]
+use std::{slice::Iter as VectorIter, vec::Vec as Vector};
 
 use bls::{AggregateSignatureBytes, PublicKeyBytes, SignatureBytes};
 use duplicate::duplicate_item;
 #[cfg(not(target_os = "zkvm"))]
-use im::vector::Iter as VectorIter;
+use im::{Vector, vector::Iter as VectorIter};
 use ssz::{
     BitVector, ContiguousList, Hc, IndexError, ProgressiveList, PushError, SszBitList, SszHash,
     SszList, SszListMut,
@@ -2269,6 +2269,16 @@ pub trait SszValidatorList: SszHash<PackingFactor = U1> {
     fn partial_validators(&self) -> VectorIter<'_, PartialValidator>;
 
     fn effective_balances(&self) -> VectorIter<'_, Gwei>;
+
+    /// The column backing [`Self::partial_validators`].
+    ///
+    /// This trait is used through `dyn`, so a parallel walk of the registry cannot be handed back
+    /// as an `impl ParallelIterator`. Callers that want one take the column and build it
+    /// themselves.
+    fn partial_validator_column(&self) -> &Vector<PartialValidator>;
+
+    /// The column backing [`Self::effective_balances`]. See [`Self::partial_validator_column`].
+    fn effective_balance_column(&self) -> &Vector<Gwei>;
 
     fn update_effective_balances(
         &mut self,

@@ -1,14 +1,14 @@
 use core::{convert::Infallible, fmt, iter, ops::Range};
-#[cfg(target_os = "zkvm")]
-use std::slice::Iter as VectorIter;
 use std::sync::Arc;
+#[cfg(target_os = "zkvm")]
+use std::{slice::Iter as VectorIter, vec::Vec as Vector};
 
 use derivative::Derivative;
 
 use anyhow::Result;
 use bls::PublicKeyBytes;
 #[cfg(not(target_os = "zkvm"))]
-use im::vector::Iter as VectorIter;
+use im::{Vector, vector::Iter as VectorIter};
 use once_cell::race::OnceBox;
 use serde::{
     Deserialize, Serialize,
@@ -278,6 +278,14 @@ impl SszValidatorList for ProgressiveValidatorList {
         self.buf.clear_pubkeys(count);
         let length = self.len_usize();
         self.cache = (length > 0).then(|| CacheNode::build_empty(length, 0));
+    }
+
+    fn partial_validator_column(&self) -> &Vector<PartialValidator> {
+        self.buf.partial_validator_column()
+    }
+
+    fn effective_balance_column(&self) -> &Vector<Gwei> {
+        self.buf.effective_balance_column()
     }
 
     fn partial_validators(&self) -> VectorIter<'_, PartialValidator> {
