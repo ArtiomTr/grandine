@@ -256,6 +256,9 @@ pub fn get_or_init_active_validator_indices_ordered<P: Preset>(
     }
 
     state.cache().active_validator_indices_ordered[relative_epoch].get_or_try_init(|| {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::debug_span!("collect_active_validator_indices").entered();
+
         if report_cache_miss {
             #[cfg(feature = "metrics")]
             if let Some(metrics) = METRICS.get() {
@@ -299,7 +302,7 @@ pub fn get_or_init_active_validator_indices_shuffled<P: Preset>(
 where
     P::ValidatorRegistryLimit: FitsInU64,
 {
-    fn shuffle<P: Preset, T: Copy>(ordered: &[T], seed: H256) -> Arc<[T]> {
+    fn shuffle<P: Preset, T: Copy + Send>(ordered: &[T], seed: H256) -> Arc<[T]> {
         let mut shuffled = ArcBox::from(ordered);
 
         shuffling::shuffle_slice::<P, _>(&mut shuffled, seed).expect(
@@ -311,6 +314,9 @@ where
     }
 
     state.cache().active_validator_indices_shuffled[relative_epoch].get_or_try_init(|| {
+        #[cfg(feature = "tracing")]
+        let _span = tracing::debug_span!("shuffle_active_validator_indices").entered();
+
         if report_cache_miss {
             #[cfg(feature = "metrics")]
             if let Some(metrics) = METRICS.get() {

@@ -14492,6 +14492,7 @@ dependencies = [
  "hashing",
  "itertools 0.14.0",
  "nonzero_ext",
+ "rayon",
  "serde",
  "spec_test_utils",
  "tap",
@@ -15935,6 +15936,27 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "state_bench"
+version = "0.0.0"
+dependencies = [
+ "allocator",
+ "anyhow",
+ "bls",
+ "bytesize",
+ "clap",
+ "database",
+ "fork_choice_control",
+ "helper_functions",
+ "kzg_utils",
+ "pubkey_cache",
+ "ssz",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+ "transition_functions",
+ "types",
+]
 
 [[package]]
 name = "state_cache"
