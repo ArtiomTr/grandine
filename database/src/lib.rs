@@ -15,7 +15,10 @@ use im::OrdMap;
 #[cfg(not(target_os = "zkvm"))]
 use itertools::Either;
 #[cfg(not(target_os = "zkvm"))]
-use libmdbx::{DatabaseFlags, Environment, Geometry, Info, ObjectLength, Stat, WriteFlags};
+use libmdbx::{
+    DatabaseFlags, Environment, EnvironmentFlags, Geometry, Info, Mode, ObjectLength, Stat,
+    WriteFlags,
+};
 #[cfg(not(target_os = "zkvm"))]
 use logging::{debug_with_peers, error_with_peers};
 use snap::raw::{Decoder, Encoder};
@@ -117,34 +120,72 @@ impl Database {
 
         // TODO(Grandine Team): The call to `set_max_dbs` and `MAX_NAMED_DATABASES` should be
         //                      unnecessary if the default database is used.
-        let environment = Environment::builder()
+        let mut builder = Environment::builder();
+
+        builder
             .set_max_dbs(MAX_NAMED_DATABASES)
-            .set_rp_augment_limit(RECLAIMABLE_PAGE_LIMIT)
-            .set_geometry(Geometry {
+            .set_rp_augment_limit(RECLAIMABLE_PAGE_LIMIT);
+
+        if mode.is_read_only() {
+            // `MDBX_RDONLY` is what actually keeps a reader off the write path. Opening without it
+            // and merely refraining from writing is not enough: the write transaction taken below
+            // to resolve the database name would contend with whatever process owns the
+            // environment. `MDBX_ACCEDE` lets the environment be joined with whatever flags its
+            // owner created it with, and read-ahead only hurts the scattered reads a reader does.
+            //
+            // Geometry is deliberately not set. It is a property of the environment its writer
+            // owns, and MDBX rejects an attempt to change it from a read-only handle.
+            builder.set_flags(EnvironmentFlags {
+                mode: Mode::ReadOnly,
+                accede: true,
+                no_rdahead: true,
+                ..EnvironmentFlags::default()
+            });
+        } else {
+            builder.set_geometry(Geometry {
                 size: Some(..usize::try_from(max_size.as_u64())?),
                 growth_step: Some(isize::try_from(GROWTH_STEP.as_u64())?),
                 shrink_threshold: None,
                 page_size: None,
-            })
-            .open_with_permissions(directory.as_ref(), mode.permissions())?;
-
-        let transaction = environment.begin_rw_txn()?;
-        let existing_db = transaction.open_db(Some(legacy_name));
-
-        let database_name = if existing_db.is_err() {
-            debug_with_peers!("database: {legacy_name} with name {name}");
-            if !mode.is_read_only() {
-                transaction.create_db(Some(name), DatabaseFlags::default())?;
-            }
-
-            name
-        } else {
-            debug_with_peers!("legacy database: {legacy_name}");
-            legacy_name
+            });
         }
-        .to_owned();
 
-        transaction.commit()?;
+        let environment = builder.open_with_permissions(directory.as_ref(), mode.permissions())?;
+
+        let database_name = if mode.is_read_only() {
+            let transaction = environment.begin_ro_txn()?;
+            let existing_db = transaction.open_db(Some(legacy_name));
+
+            let database_name = if existing_db.is_err() {
+                debug_with_peers!("database: {legacy_name} with name {name}");
+                name
+            } else {
+                debug_with_peers!("legacy database: {legacy_name}");
+                legacy_name
+            }
+            .to_owned();
+
+            transaction.commit()?;
+
+            database_name
+        } else {
+            let transaction = environment.begin_rw_txn()?;
+            let existing_db = transaction.open_db(Some(legacy_name));
+
+            let database_name = if existing_db.is_err() {
+                debug_with_peers!("database: {legacy_name} with name {name}");
+                transaction.create_db(Some(name), DatabaseFlags::default())?;
+                name
+            } else {
+                debug_with_peers!("legacy database: {legacy_name}");
+                legacy_name
+            }
+            .to_owned();
+
+            transaction.commit()?;
+
+            database_name
+        };
 
         Ok(Self(DatabaseKind::Persistent {
             database_name,
