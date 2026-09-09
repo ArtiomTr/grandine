@@ -109,12 +109,12 @@ pub fn count_required_signatures<P: Preset>(block: &Hc<BeaconBlock<P>>) -> Resul
 }
 
 #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all))]
-pub fn custom_process_block<P: Preset>(
+pub fn custom_process_block<P: Preset, E: ExecutionEngine<P>>(
     config: &Config,
     pubkey_cache: &PubkeyCache,
     state: &mut FuluBeaconState<P>,
     block: &Hc<BeaconBlock<P>>,
-    execution_engine: impl ExecutionEngine<P>,
+    execution_engine: E,
     mut verifier: impl Verifier,
     mut slot_report: impl SlotReport,
 ) -> Result<()> {
@@ -132,7 +132,10 @@ pub fn custom_process_block<P: Preset>(
         // TODO(Grandine Team): Consider removing the parameter entirely.
         //                      It's only used for error reporting.
         //                      Perhaps it would be better to send the whole block?
-        block.hash_tree_root(),
+        //
+        // Passed as a closure rather than a root: hashing a block is not cheap, and a null engine
+        // never looks at it.
+        || block.hash_tree_root(),
         &block.body,
         execution_engine,
     )?;
@@ -339,12 +342,12 @@ fn process_execution_payload_for_gossip<P: Preset>(
 }
 
 #[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all))]
-fn process_execution_payload<P: Preset>(
+fn process_execution_payload<P: Preset, E: ExecutionEngine<P>>(
     config: &Config,
     state: &mut FuluBeaconState<P>,
-    block_root: H256,
+    block_root: impl FnOnce() -> H256,
     body: &BeaconBlockBody<P>,
-    execution_engine: impl ExecutionEngine<P>,
+    execution_engine: E,
 ) -> Result<()> {
     let payload = &body.execution_payload;
     let execution_requests = &body.execution_requests;
@@ -370,23 +373,31 @@ fn process_execution_payload<P: Preset>(
     process_execution_payload_for_gossip(config, state, body)?;
 
     // > Verify the execution payload is valid
-    let versioned_hashes = body
-        .blob_kzg_commitments
-        .iter()
-        .copied()
-        .map(kzg_commitment_to_versioned_hash)
-        .collect();
+    //
+    // Notifying a null engine is a no-op, but assembling the notification is not: it hashes the
+    // block, deep-copies the payload with all of its transactions, and clones the execution
+    // requests. Replaying stored blocks - which is how an archived state is reconstructed - runs
+    // with a null engine for every block, so the whole notification is skipped rather than built
+    // and thrown away.
+    if !E::IS_NULL {
+        let versioned_hashes = body
+            .blob_kzg_commitments
+            .iter()
+            .copied()
+            .map(kzg_commitment_to_versioned_hash)
+            .collect();
 
-    execution_engine.notify_new_payload(
-        block_root,
-        payload.clone().into(),
-        Some(ExecutionPayloadParams::Electra {
-            versioned_hashes,
-            parent_beacon_block_root: state.latest_block_header.parent_root,
-            execution_requests: execution_requests.clone(),
-        }),
-        None,
-    )?;
+        execution_engine.notify_new_payload(
+            block_root(),
+            payload.clone().into(),
+            Some(ExecutionPayloadParams::Electra {
+                versioned_hashes,
+                parent_beacon_block_root: state.latest_block_header.parent_root,
+                execution_requests: execution_requests.clone(),
+            }),
+            None,
+        )?;
+    }
 
     // > Cache execution payload header
     state.latest_execution_payload_header = ExecutionPayloadHeader::from(payload);
