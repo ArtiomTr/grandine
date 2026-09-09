@@ -269,9 +269,10 @@ pub fn get_or_init_active_validator_indices_ordered<P: Preset>(
         // Possible optimization: cache the number of active validators and index of the last one.
         // That would make it possible to avoid temporary allocations.
         // The cached values would have to be kept up to date as the validator registry changes.
-        let mut indices = Vec::with_capacity(state.validators().len_usize());
-
-        indices.extend(get_active_validator_indices(state, relative_epoch)?);
+        let epoch = absolute_epoch(state, relative_epoch)?;
+        let indices = par_utils::filter_registry_indices(state.validators(), |validator| {
+            predicates::is_active_validator(validator, epoch)
+        });
 
         let result: PackedIndices = match indices.last().copied().unwrap_or_default() {
             0..0x100 => PackedIndices::U8(pack(indices)),
@@ -1080,8 +1081,8 @@ pub fn get_beacon_proposer_indices<P: Preset>(
 ) -> Result<Vec<ValidatorIndex>> {
     let exclude_slashed = state.is_post_gloas();
 
-    let indices = get_filtered_active_validator_indices_by_epoch(state, epoch, |validator| {
-        !(exclude_slashed && validator.slashed)
+    let indices = par_utils::filter_registry_indices(state.validators(), |validator| {
+        predicates::is_active_validator(validator, epoch) && !(exclude_slashed && validator.slashed)
     });
     let seed = get_seed_by_epoch(state, epoch, DOMAIN_BEACON_PROPOSER)?;
 
@@ -1090,7 +1091,7 @@ pub fn get_beacon_proposer_indices<P: Preset>(
         state,
         epoch,
         seed,
-        &PackedIndices::U64(indices.into_iter().collect()),
+        &PackedIndices::U64(indices.into()),
     )
 }
 

@@ -51,7 +51,7 @@ use types::{
     },
 };
 
-use crate::{accessors, error::Error, predicates};
+use crate::{accessors, error::Error, par_utils, predicates};
 
 pub const PREFIX_LEN: usize = H256::len_bytes() - ExecutionAddress::len_bytes();
 
@@ -914,18 +914,19 @@ pub fn compute_proposer_indices<P: Preset>(
 ) -> Result<Vec<ValidatorIndex>> {
     let start_slot = compute_start_slot_at_epoch::<P>(epoch);
 
-    (0..P::SlotsPerEpoch::U64)
-        .map(|i| {
-            let seed = hashing::hash_256_64(seed, start_slot.try_add(i)?);
+    // One slot's proposer is drawn by rejection sampling, which shuffles an index per attempt, so a
+    // whole epoch's worth of them is a meaningful amount of work. The slots are independent and
+    // only read the state, so they run across all cores.
+    par_utils::try_map_range(0..P::SlotsPerEpoch::U64, |i| {
+        let seed = hashing::hash_256_64(seed, start_slot.try_add(i)?);
 
-            if state.is_post_gloas() {
-                compute_balance_weighted_selection(state, indices, seed, 1, true)
-                    .map(|validators| validators[0])
-            } else {
-                compute_proposer_index(config, state, indices, seed, epoch)
-            }
-        })
-        .collect::<Result<_>>()
+        if state.is_post_gloas() {
+            compute_balance_weighted_selection(state, indices, seed, 1, true)
+                .map(|validators| validators[0])
+        } else {
+            compute_proposer_index(config, state, indices, seed, epoch)
+        }
+    })
 }
 
 pub fn compute_balance_weighted_selection<P: Preset>(

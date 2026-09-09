@@ -72,8 +72,27 @@ pub fn is_eligible_for_penalties(
     validator: &PartialValidator,
     previous_epoch: Epoch,
 ) -> Result<bool> {
-    Ok(is_active_validator(validator, previous_epoch)
-        || (validator.slashed && previous_epoch.try_add(1)? < validator.withdrawable_epoch))
+    Ok(is_eligible_for_penalties_in(
+        validator,
+        previous_epoch,
+        previous_epoch.try_add(1)?,
+    ))
+}
+
+/// [`is_eligible_for_penalties`] with the `previous_epoch + 1` it computes lifted out.
+///
+/// That addition is the only fallible part of the check and it does not depend on the validator,
+/// so a caller walking the whole registry computes it once and is left with an infallible
+/// predicate - which is what lets such a walk be a plain parallel map.
+#[inline]
+#[must_use]
+pub const fn is_eligible_for_penalties_in(
+    validator: &PartialValidator,
+    previous_epoch: Epoch,
+    epoch_after_previous: Epoch,
+) -> bool {
+    is_active_validator(validator, previous_epoch)
+        || (validator.slashed && epoch_after_previous < validator.withdrawable_epoch)
 }
 
 // > Check if ``validator`` is slashable.
