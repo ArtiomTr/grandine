@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use anyhow::{Result, ensure};
 use arithmetic::{U64Ext as _, UsizeExt as _};
 use ssz::ContiguousList;
@@ -69,15 +67,13 @@ pub fn get_indexed_attestation<P: Preset>(
     state: &impl BeaconState<P>,
     attestation: &Attestation<P>,
 ) -> Result<IndexedAttestation<P>> {
-    let attesting_indices = get_attesting_indices(state, attestation)?;
-
-    let mut attesting_indices = ContiguousList::try_from_iter(attesting_indices).expect(
-        "Attestation.aggregation_bits and IndexedAttestation.attesting_indices \
+    // `get_attesting_indices` already returns the indices sorted, which is the order
+    // `IndexedAttestation` requires.
+    let attesting_indices =
+        ContiguousList::try_from_iter(get_attesting_indices(state, attestation)?).expect(
+            "Attestation.aggregation_bits and IndexedAttestation.attesting_indices \
          have the same maximum length",
-    );
-
-    // Sorting a slice is faster than building a `BTreeMap`.
-    attesting_indices.sort_unstable();
+        );
 
     Ok(IndexedAttestation {
         attesting_indices,
@@ -87,17 +83,26 @@ pub fn get_indexed_attestation<P: Preset>(
 }
 
 // > Return the set of attesting indices corresponding to ``aggregation_bits`` and ``committee_bits``.
+///
+/// The indices come back sorted and without duplicates.
+///
+/// The committees an attestation covers are disjoint, so sorting the concatenation is all the
+/// deduplication a set would have done. Sorted is the order every caller wants:
+/// `get_indexed_attestation` needs it to build an `IndexedAttestation`, and the callers that walk
+/// the registry, the balances or the participation flags at these indices turn what would be
+/// random access into a forward scan.
+#[cfg_attr(feature = "tracing", tracing::instrument(level = "debug", skip_all))]
 pub fn get_attesting_indices<P: Preset>(
     state: &impl BeaconState<P>,
     attestation: &impl PostElectraAttestation<P>,
-) -> Result<HashSet<ValidatorIndex>> {
-    let mut output = HashSet::new();
+) -> Result<Vec<ValidatorIndex>> {
+    let mut output = vec![];
     let committee_indices = get_committee_indices::<P>(attestation.committee_bits());
     let mut committee_offset: usize = 0;
 
     for index in committee_indices {
         let committee = beacon_committee(state, attestation.data().slot, index)?;
-        let mut committee_attesters = vec![];
+        let attesters_before = output.len();
 
         for (i, index) in committee.into_iter().enumerate() {
             let bit_index = committee_offset.try_add(i)?;
@@ -107,16 +112,14 @@ pub fn get_attesting_indices<P: Preset>(
                 .get_bit(bit_index)
                 .is_some_and(|bit| bit)
             {
-                committee_attesters.push(index);
+                output.push(index);
             }
         }
 
         ensure!(
-            !committee_attesters.is_empty(),
+            output.len() > attesters_before,
             Error::NoCommitteeAttesters { index },
         );
-
-        output.extend(committee_attesters);
 
         committee_offset = committee_offset.try_add(committee.len())?;
     }
@@ -129,6 +132,8 @@ pub fn get_attesting_indices<P: Preset>(
             participants_count: committee_offset
         },
     );
+
+    output.sort_unstable();
 
     Ok(output)
 }

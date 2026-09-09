@@ -1055,8 +1055,14 @@ pub fn apply_attestation<P: Preset>(
     // > Update epoch participation flags
     let base_reward_per_increment = get_base_reward_per_increment(state)?;
 
-    let attesting_indices_with_base_rewards = get_attesting_indices(state, attestation)?
-        .into_iter()
+    // Computed once and reused for the slot report below. The indices come back sorted, so both
+    // the base reward lookups here and the participation flag updates further down walk the
+    // registry and the flag list forwards instead of jumping around them.
+    let attesting_indices = get_attesting_indices(state, attestation)?;
+
+    let attesting_indices_with_base_rewards = attesting_indices
+        .iter()
+        .copied()
         .map(|validator_index| {
             let base_reward = get_base_reward(state, validator_index, base_reward_per_increment)?;
             let effective_balance = state.validators().effective_balance(validator_index)?;
@@ -1134,11 +1140,7 @@ pub fn apply_attestation<P: Preset>(
         .mod_index_mut(payment_slot) = payment;
 
     slot_report.add_attestation_reward(proposer_reward);
-    slot_report.update_performance(
-        state,
-        attestation.data,
-        get_attesting_indices(state, attestation)?,
-    )?;
+    slot_report.update_performance(state, attestation.data, attesting_indices)?;
 
     Ok(())
 }
