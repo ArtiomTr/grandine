@@ -56,13 +56,8 @@ pub fn process_epoch(
     // `BeaconState.finalized_checkpoint` and `BeaconState.inactivity_scores`.
     //
     // Using `vec_of_default` in the genesis epoch does not improve performance.
-    let epoch_deltas: Vec<EpochDeltasForTransition> = epoch_intermediates::epoch_deltas(
-        config,
-        state,
-        statistics,
-        summaries.iter().copied(),
-        participation,
-    )?;
+    let epoch_deltas: Vec<EpochDeltasForTransition> =
+        epoch_intermediates::epoch_deltas(config, state, statistics, &summaries, &participation)?;
 
     unphased::process_rewards_and_penalties(state, epoch_deltas)?;
     process_registry_updates(config, state, summaries.as_mut_slice())?;
@@ -103,13 +98,7 @@ pub fn epoch_report<P: Preset>(
     // the genesis epoch to avoid making misleading reports. The check cannot be done inside
     // `epoch_deltas` because some `rewards` test cases compute deltas in the genesis epoch.
     let epoch_deltas = if unphased::should_process_rewards_and_penalties(state) {
-        epoch_intermediates::epoch_deltas(
-            config,
-            state,
-            statistics,
-            summaries.iter().copied(),
-            participation,
-        )?
+        epoch_intermediates::epoch_deltas(config, state, statistics, &summaries, &participation)?
     } else {
         vec_of_default(state)
     };
@@ -452,8 +441,8 @@ mod spec_tests {
                 &P::default_config(),
                 state,
                 statistics,
-                summaries,
-                participation,
+                &summaries,
+                &participation,
             )?;
 
             unphased::process_rewards_and_penalties(state, deltas)

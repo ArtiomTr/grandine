@@ -7,7 +7,8 @@ use helper_functions::{
         get_current_epoch, get_previous_epoch, total_active_balance,
     },
     mutators::clamp_balance,
-    predicates::{is_active_validator, is_eligible_for_penalties, is_in_inactivity_leak},
+    par_utils,
+    predicates::{is_active_validator, is_eligible_for_penalties_in, is_in_inactivity_leak},
 };
 use itertools::izip;
 use serde::Serialize;
@@ -44,6 +45,11 @@ pub trait AltairEpochDeltas: Default {
     fn add_inactivity_penalty(&mut self, value: Gwei) -> Result<()>;
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These are memoized per-validator predicates, not configuration flags; \
+              the point of the struct is to compute them once and read them many times."
+)]
 #[derive(Clone, Copy, Debug, Serialize)]
 #[cfg_attr(test, derive(Default))]
 pub struct AltairValidatorSummary {
@@ -53,6 +59,9 @@ pub struct AltairValidatorSummary {
     // Storing `activation_epoch` and `exit_epoch` is more general but caused a measurable slowdown
     // in Phase 0 and requires duplicating the implementation of `is_active_validator`.
     pub active_in_previous_epoch: bool,
+    // Only `statistics_and_summaries` reads this, to fold the statistics out of the summaries
+    // instead of walking the registry a second time. It fits in the padding the other flags leave.
+    pub active_in_current_epoch: bool,
     pub eligible_for_penalties: bool,
 }
 
@@ -199,67 +208,74 @@ pub fn statistics_and_summaries<P: Preset, S: PostAltairBeaconState<P>>(
 ) -> Result<(Statistics, Vec<AltairValidatorSummary>, Vec<Participation>)> {
     let current_epoch = get_current_epoch(state);
     let previous_epoch = get_previous_epoch(state);
+    let epoch_after_previous = previous_epoch.try_add(1)?;
     let participation = combined_participation(state);
+
+    // Building the summaries is a pure map over the registry, so it runs across all cores. The
+    // statistics are folded out of the summaries afterwards rather than accumulated here: they are
+    // four running totals, which a parallel map cannot carry, and the summaries they are folded
+    // from are contiguous by then.
+    let summaries = par_utils::map_registry(state.validators(), |validator, effective_balance| {
+        AltairValidatorSummary {
+            effective_balance,
+            slashed: validator.slashed,
+            withdrawable_epoch: validator.withdrawable_epoch,
+            active_in_previous_epoch: is_active_validator(validator, previous_epoch),
+            active_in_current_epoch: is_active_validator(validator, current_epoch),
+            eligible_for_penalties: is_eligible_for_penalties_in(
+                validator,
+                previous_epoch,
+                epoch_after_previous,
+            ),
+        }
+    });
 
     let mut statistics = Statistics::default();
 
-    let summaries = izip!(
-        state.validators().partial_validators(),
-        state.validators().effective_balances().copied(),
-        participation.iter().copied(),
-    )
-    .map(
-        |(validator, effective_balance, participation)| -> Result<AltairValidatorSummary> {
-            let slashed = validator.slashed;
-            let withdrawable_epoch = validator.withdrawable_epoch;
+    for (summary, participation) in izip!(&summaries, &participation) {
+        let AltairValidatorSummary {
+            effective_balance,
+            slashed,
+            active_in_previous_epoch,
+            active_in_current_epoch,
+            ..
+        } = *summary;
 
-            let active_in_previous_epoch = is_active_validator(validator, previous_epoch);
-            let active_in_current_epoch = is_active_validator(validator, current_epoch);
-            let eligible_for_penalties = is_eligible_for_penalties(validator, previous_epoch)?;
+        if slashed {
+            continue;
+        }
 
-            if !slashed {
-                // Unlike `get_unslashed_attesting_indices` in Phase 0,
-                // `get_unslashed_participating_indices` in Altair checks if validators were active.
-                // There doesn't seem to be a way for a validator that's not active to attest in
-                // normal operation, but some test cases in `consensus-spec-tests` cover the check.
+        // Unlike `get_unslashed_attesting_indices` in Phase 0,
+        // `get_unslashed_participating_indices` in Altair checks if validators were active.
+        // There doesn't seem to be a way for a validator that's not active to attest in
+        // normal operation, but some test cases in `consensus-spec-tests` cover the check.
 
-                if active_in_previous_epoch {
-                    if participation.previous_epoch_matching_source() {
-                        statistics.previous_epoch_source_participating_balance = statistics
-                            .previous_epoch_source_participating_balance
-                            .try_add(effective_balance)?;
-                    }
-
-                    if participation.previous_epoch_matching_target() {
-                        statistics.previous_epoch_target_participating_balance = statistics
-                            .previous_epoch_target_participating_balance
-                            .try_add(effective_balance)?;
-                    }
-
-                    if participation.previous_epoch_matching_head() {
-                        statistics.previous_epoch_head_participating_balance = statistics
-                            .previous_epoch_head_participating_balance
-                            .try_add(effective_balance)?;
-                    }
-                }
-
-                if active_in_current_epoch && participation.current_epoch_matching_target() {
-                    statistics.current_epoch_target_participating_balance = statistics
-                        .current_epoch_target_participating_balance
-                        .try_add(effective_balance)?;
-                }
+        if active_in_previous_epoch {
+            if participation.previous_epoch_matching_source() {
+                statistics.previous_epoch_source_participating_balance = statistics
+                    .previous_epoch_source_participating_balance
+                    .try_add(effective_balance)?;
             }
 
-            Ok(AltairValidatorSummary {
-                effective_balance,
-                slashed,
-                withdrawable_epoch,
-                active_in_previous_epoch,
-                eligible_for_penalties,
-            })
-        },
-    )
-    .collect::<Result<Vec<_>>>()?;
+            if participation.previous_epoch_matching_target() {
+                statistics.previous_epoch_target_participating_balance = statistics
+                    .previous_epoch_target_participating_balance
+                    .try_add(effective_balance)?;
+            }
+
+            if participation.previous_epoch_matching_head() {
+                statistics.previous_epoch_head_participating_balance = statistics
+                    .previous_epoch_head_participating_balance
+                    .try_add(effective_balance)?;
+            }
+        }
+
+        if active_in_current_epoch && participation.current_epoch_matching_target() {
+            statistics.current_epoch_target_participating_balance = statistics
+                .current_epoch_target_participating_balance
+                .try_add(effective_balance)?;
+        }
+    }
 
     statistics.clamp_balances::<P>();
 
@@ -326,12 +342,12 @@ pub fn statistics<P: Preset, S: PostAltairBeaconState<P>>(state: &S) -> Result<S
     Ok(statistics)
 }
 
-pub fn epoch_deltas<P: Preset, D: AltairEpochDeltas>(
+pub fn epoch_deltas<P: Preset, D: AltairEpochDeltas + Send>(
     config: &Config,
     state: &BeaconState<P>,
     statistics: Statistics,
-    summaries: impl IntoIterator<Item = AltairValidatorSummary>,
-    participation: impl IntoIterator<Item = Participation>,
+    summaries: &[AltairValidatorSummary],
+    participation: &[Participation],
 ) -> Result<Vec<D>> {
     let in_inactivity_leak = is_in_inactivity_leak(state)?;
     let base_reward_per_increment = get_base_reward_per_increment(state)?;
@@ -342,8 +358,20 @@ pub fn epoch_deltas<P: Preset, D: AltairEpochDeltas>(
     let head_increments = statistics.previous_epoch_head_participating_balance / increment;
     let active_increments = total_active_balance(state) / increment;
 
-    izip!(summaries, participation, &state.inactivity_scores)
-        .map(|(summary, participation, inactivity_score)| -> Result<D> {
+    // The inactivity scores live in a persistent list, which can only be walked in order, so they
+    // are laid out flat first. The map itself is per-validator and pure, so it runs across all
+    // cores.
+    let inactivity_scores = state
+        .inactivity_scores
+        .into_iter()
+        .copied()
+        .collect::<Vec<_>>();
+
+    par_utils::try_map_zipped(
+        summaries,
+        participation,
+        inactivity_scores.as_slice(),
+        |summary, participation, inactivity_score| -> Result<D> {
             let mut deltas = D::default();
 
             let AltairValidatorSummary {
@@ -351,7 +379,7 @@ pub fn epoch_deltas<P: Preset, D: AltairEpochDeltas>(
                 slashed,
                 eligible_for_penalties,
                 ..
-            } = summary;
+            } = *summary;
 
             if !eligible_for_penalties {
                 return Ok(deltas);
@@ -415,8 +443,8 @@ pub fn epoch_deltas<P: Preset, D: AltairEpochDeltas>(
             }
 
             Ok(deltas)
-        })
-        .collect()
+        },
+    )
 }
 
 #[cfg(test)]
@@ -451,8 +479,8 @@ mod spec_tests {
             &P::default_config(),
             &state,
             statistics,
-            summaries,
-            participation,
+            &summaries,
+            &participation,
         )?;
 
         TestDeltas::assert_equal(

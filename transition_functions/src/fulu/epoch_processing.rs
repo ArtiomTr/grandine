@@ -63,13 +63,7 @@ pub fn process_epoch(
     //
     // Using `vec_of_default` in the genesis epoch does not improve performance.
     let epoch_deltas: Vec<EpochDeltasForTransition> = step("epoch_deltas", || {
-        epoch_intermediates::epoch_deltas(
-            config,
-            state,
-            statistics,
-            summaries.iter().copied(),
-            participation,
-        )
+        epoch_intermediates::epoch_deltas(config, state, statistics, &summaries, &participation)
     })?;
 
     step("process_rewards_and_penalties", || {
@@ -506,8 +500,8 @@ mod spec_tests {
                 &P::default_config(),
                 state,
                 statistics,
-                summaries,
-                participation,
+                &summaries,
+                &participation,
             )?;
 
             unphased::process_rewards_and_penalties(state, deltas)

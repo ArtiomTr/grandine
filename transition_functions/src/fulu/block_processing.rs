@@ -749,7 +749,7 @@ mod spec_tests {
         let result = process_execution_payload(
             &P::default_config(),
             &mut state,
-            H256::default(),
+            H256::default,
             &body,
             &execution_engine,
         )

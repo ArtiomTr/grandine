@@ -2,9 +2,9 @@ use anyhow::Result;
 use arithmetic::{NonZeroU64Ext as _, U64Ext as _};
 use helper_functions::{
     accessors::{compute_base_reward, get_base_reward_per_increment, total_active_balance},
+    par_utils,
     predicates::is_in_inactivity_leak,
 };
-use itertools::izip;
 use types::{
     altair::consts::{
         TIMELY_HEAD_WEIGHT, TIMELY_SOURCE_WEIGHT, TIMELY_TARGET_WEIGHT, WEIGHT_DENOMINATOR,
@@ -18,12 +18,12 @@ use types::{
 
 use crate::altair::{EpochDeltas, Statistics, ValidatorSummary};
 
-pub fn epoch_deltas<P: Preset, D: EpochDeltas>(
+pub fn epoch_deltas<P: Preset, D: EpochDeltas + Send>(
     config: &Config,
     state: &BeaconState<P>,
     statistics: Statistics,
-    summaries: impl IntoIterator<Item = ValidatorSummary>,
-    participation: impl IntoIterator<Item = Participation>,
+    summaries: &[ValidatorSummary],
+    participation: &[Participation],
 ) -> Result<Vec<D>> {
     let in_inactivity_leak = is_in_inactivity_leak(state)?;
     let base_reward_per_increment = get_base_reward_per_increment(state)?;
@@ -34,8 +34,20 @@ pub fn epoch_deltas<P: Preset, D: EpochDeltas>(
     let head_increments = statistics.previous_epoch_head_participating_balance / increment;
     let active_increments = total_active_balance(state) / increment;
 
-    izip!(summaries, participation, &state.inactivity_scores)
-        .map(|(summary, participation, inactivity_score)| -> Result<D> {
+    // The inactivity scores live in a persistent list, which can only be walked in order, so they
+    // are laid out flat first. The map itself is per-validator and pure, so it runs across all
+    // cores.
+    let inactivity_scores = state
+        .inactivity_scores
+        .into_iter()
+        .copied()
+        .collect::<Vec<_>>();
+
+    par_utils::try_map_zipped(
+        summaries,
+        participation,
+        inactivity_scores.as_slice(),
+        |summary, participation, inactivity_score| -> Result<D> {
             let mut deltas = D::default();
 
             let ValidatorSummary {
@@ -43,7 +55,7 @@ pub fn epoch_deltas<P: Preset, D: EpochDeltas>(
                 slashed,
                 eligible_for_penalties,
                 ..
-            } = summary;
+            } = *summary;
 
             if !eligible_for_penalties {
                 return Ok(deltas);
@@ -105,8 +117,8 @@ pub fn epoch_deltas<P: Preset, D: EpochDeltas>(
             }
 
             Ok(deltas)
-        })
-        .collect()
+        },
+    )
 }
 
 #[cfg(test)]
@@ -141,8 +153,8 @@ mod spec_tests {
             &P::default_config(),
             &state,
             statistics,
-            summaries,
-            participation,
+            &summaries,
+            &participation,
         )?;
 
         TestDeltas::assert_equal(
