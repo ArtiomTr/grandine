@@ -16,6 +16,7 @@ bls = { workspace = true }
 bytesize = { workspace = true }
 clap = { workspace = true }
 database = { workspace = true }
+diff = { workspace = true, features = ['tracing'] }
 fork_choice_control = { workspace = true }
 helper_functions = { workspace = true, features = ['tracing'] }
 kzg_utils = { workspace = true }

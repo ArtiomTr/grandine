@@ -167,16 +167,28 @@ impl<P: Preset, S: BeaconState<P>> Patch<S> for Phase0Patch<P> {
         self.slot.apply(base.slot_mut())?;
         self.latest_block_header
             .apply(base.latest_block_header_mut())?;
-        self.block_roots.apply(base.block_roots_mut())?;
-        self.state_roots.apply(base.state_roots_mut())?;
+        {
+            crate::field_span!("patch: recent_roots");
+            self.block_roots.apply(base.block_roots_mut())?;
+            self.state_roots.apply(base.state_roots_mut())?;
+        }
         self.historical_roots.apply(base.historical_roots_mut())?;
         self.eth1_data.apply(base.eth1_data_mut())?;
         self.eth1_data_votes.apply(base.eth1_data_votes_mut())?;
         self.eth1_deposit_index
             .apply(base.eth1_deposit_index_mut())?;
-        self.validators.apply(base.validators_mut())?;
-        self.balances.apply(base.balances_mut())?;
-        self.randao_mixes.apply(base.randao_mixes_mut())?;
+        {
+            crate::field_span!("patch: validators");
+            self.validators.apply(base.validators_mut())?;
+        }
+        {
+            crate::field_span!("patch: balances");
+            self.balances.apply(base.balances_mut())?;
+        }
+        {
+            crate::field_span!("patch: randao_mixes");
+            self.randao_mixes.apply(base.randao_mixes_mut())?;
+        }
         self.slashings.apply(base.slashings_mut())?;
         self.justification_bits
             .apply(base.justification_bits_mut())?;

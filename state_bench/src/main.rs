@@ -18,6 +18,7 @@ use bls as _;
 use bytesize::ByteSize;
 use clap::{Parser, ValueEnum};
 use database::{Database, DatabaseMode};
+use diff as _;
 use fork_choice_control::{StateStorageConfig, Storage};
 use helper_functions as _;
 use kzg_utils as _;

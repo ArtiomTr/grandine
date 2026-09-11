@@ -83,11 +83,17 @@ impl<P: Preset, S: PostAltairBeaconState<P>> Patch<S> for AltairPatch<P> {
     }
 
     fn apply(self, base: &mut S) -> Result<(), Error> {
-        self.previous_epoch_participation
-            .apply(base.previous_epoch_participation_mut())?;
-        self.current_epoch_participation
-            .apply(base.current_epoch_participation_mut())?;
-        self.inactivity_scores.apply(base.inactivity_scores_mut())?;
+        {
+            crate::field_span!("patch: participation");
+            self.previous_epoch_participation
+                .apply(base.previous_epoch_participation_mut())?;
+            self.current_epoch_participation
+                .apply(base.current_epoch_participation_mut())?;
+        }
+        {
+            crate::field_span!("patch: inactivity_scores");
+            self.inactivity_scores.apply(base.inactivity_scores_mut())?;
+        }
         self.current_sync_committee
             .apply(base.current_sync_committee_mut())?;
         self.next_sync_committee
