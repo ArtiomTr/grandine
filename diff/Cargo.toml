@@ -45,3 +45,8 @@ harness = false
 [[bench]]
 name = 'beacon_state'
 harness = false
+
+# Registry-scale timings for the patch pipeline, without needing downloaded states.
+[[bench]]
+name = 'list_patches'
+harness = false
