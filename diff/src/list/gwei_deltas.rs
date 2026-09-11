@@ -120,13 +120,28 @@ impl GweiDeltas {
         finish(remaining)
     }
 
+    /// The most repeated delta, which the encoder subtracts from every other one so that the bulk
+    /// of an epoch's balances encode as a single byte.
+    ///
+    /// Only the first [`MODE_SAMPLE`] changed balances are counted. The mode is a coding choice, not
+    /// part of the format - it is written into the patch and read back from it - so a sample that
+    /// picks a slightly worse one costs a few bytes on the wire, never correctness. Counting all of
+    /// them means a second pass over the whole registry and a hash lookup per changed balance,
+    /// which is the single most expensive thing a diff of an unchanged list does.
     fn estimate_mode(pairs: impl Iterator<Item = (Gwei, Gwei)>) -> Result<Gwei, Error> {
         let mut counts = HashMap::new();
+        let mut sampled = 0usize;
 
         for (before, after) in pairs {
             if before == after || after == 0 {
                 continue;
             }
+
+            if sampled >= MODE_SAMPLE {
+                break;
+            }
+
+            sampled = sampled.saturating_add(1);
 
             let after = i64::try_from(after).map_err(|_| Error::InvalidBalanceDelta)?;
             let before = i64::try_from(before).map_err(|_| Error::InvalidBalanceDelta)?;
@@ -145,6 +160,9 @@ impl GweiDeltas {
             .map_or(0, |(delta, _)| delta))
     }
 }
+
+/// How many changed balances [`GweiDeltas::estimate_mode`] counts before settling on a mode.
+const MODE_SAMPLE: usize = 1 << 16;
 
 fn next_balance(remaining: &mut &[u8], mode: i64, balance: Gwei) -> Result<Gwei, Error> {
     let delta;
