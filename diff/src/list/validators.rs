@@ -148,16 +148,24 @@ impl<C: SszValidatorList + ?Sized> Patch<C> for ValidatorListPatch {
             .zip(changed.partial_validators())
             .enumerate()
         {
-            withdrawal_credentials.push(
+            // Between two states almost every validator is untouched, and one comparison of the
+            // whole item settles both accumulators. Only the ones that differ pay for the
+            // per-field comparison and for materialising the patch structs.
+            let unchanged = base_item == changed_item;
+
+            withdrawal_credentials.push_lazy(
                 index,
-                &base_item.withdrawal_credentials,
-                &changed_item.withdrawal_credentials,
+                unchanged
+                    || base_item.withdrawal_credentials == changed_item.withdrawal_credentials,
+                || changed_item.withdrawal_credentials,
             );
 
-            others.push(
+            others.push_lazy(
                 index,
-                &OtherValidatorEdits::from(base_item),
-                &OtherValidatorEdits::from(changed_item),
+                unchanged
+                    || OtherValidatorEdits::from(base_item)
+                        == OtherValidatorEdits::from(changed_item),
+                || OtherValidatorEdits::from(changed_item),
             );
         }
 

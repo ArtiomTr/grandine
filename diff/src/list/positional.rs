@@ -74,21 +74,33 @@ impl<T: Clone + Eq + SszSize> EditAccumulator<T> {
     }
 
     pub(crate) fn push(&mut self, i: usize, base_i: &T, changed_i: &T) {
+        self.push_lazy(i, base_i == changed_i, || changed_i.clone());
+    }
+
+    /// [`Self::push`] for callers that can tell whether the element changed more cheaply than by
+    /// building both sides of the comparison.
+    ///
+    /// An element of a richer item - a validator's `exit_epoch`, say - has to be copied out into a
+    /// patch-specific struct before two of them can be compared. Almost nothing changes between two
+    /// states, so `changed_i` is built only for the elements that actually need it.
+    pub(crate) fn push_lazy(&mut self, i: usize, unchanged: bool, changed_i: impl FnOnce() -> T) {
         let threshold = merge_gap_threshold::<T>();
 
-        if base_i == changed_i {
+        if unchanged {
             if self.last_edit.is_some() && self.buffer.len() < threshold {
-                self.buffer.push(changed_i.clone());
+                self.buffer.push(changed_i());
             }
 
             return;
         }
 
+        let changed_i = changed_i();
+
         match self.last_edit.as_mut() {
             Some((_, end, edits)) if i.saturating_sub(*end).saturating_sub(1) <= threshold => {
                 edits.extend_from_slice(&self.buffer);
                 self.buffer.clear();
-                edits.push(changed_i.clone());
+                edits.push(changed_i);
                 *end = i;
             }
             _ => {
@@ -98,7 +110,7 @@ impl<T: Clone + Eq + SszSize> EditAccumulator<T> {
                 self.last_edit = Some((
                     u32::try_from(i).expect("list index should fit in u32"),
                     i,
-                    vec![changed_i.clone()],
+                    vec![changed_i],
                 ))
             }
         }
