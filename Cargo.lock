@@ -4670,6 +4670,7 @@ dependencies = [
  "eth-state-diff",
  "fs-err",
  "qbsdiff",
+ "rayon",
  "reqwest 0.13.2",
  "rkyv",
  "ssz",

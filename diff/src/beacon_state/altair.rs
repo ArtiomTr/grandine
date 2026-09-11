@@ -53,22 +53,39 @@ pub struct AltairPatch<P: Preset> {
 
 impl<P: Preset, S: PostAltairBeaconState<P>> Patch<S> for AltairPatch<P> {
     fn diff(config: PatchConfig, base: &S, changed: &S) -> Result<Self, Error> {
+        let ((previous_epoch_participation, current_epoch_participation), inactivity_scores) =
+            crate::join(
+                || {
+                    crate::join(
+                        || {
+                            Patch::diff(
+                                config,
+                                base.previous_epoch_participation(),
+                                changed.previous_epoch_participation(),
+                            )
+                        },
+                        || {
+                            Patch::diff(
+                                config,
+                                base.current_epoch_participation(),
+                                changed.current_epoch_participation(),
+                            )
+                        },
+                    )
+                },
+                || {
+                    Patch::diff(
+                        config,
+                        base.inactivity_scores(),
+                        changed.inactivity_scores(),
+                    )
+                },
+            );
+
         Ok(Self {
-            previous_epoch_participation: Patch::diff(
-                config,
-                base.previous_epoch_participation(),
-                changed.previous_epoch_participation(),
-            )?,
-            current_epoch_participation: Patch::diff(
-                config,
-                base.current_epoch_participation(),
-                changed.current_epoch_participation(),
-            )?,
-            inactivity_scores: Patch::diff(
-                config,
-                base.inactivity_scores(),
-                changed.inactivity_scores(),
-            )?,
+            previous_epoch_participation: previous_epoch_participation?,
+            current_epoch_participation: current_epoch_participation?,
+            inactivity_scores: inactivity_scores?,
             current_sync_committee: Patch::diff(
                 config,
                 base.current_sync_committee(),

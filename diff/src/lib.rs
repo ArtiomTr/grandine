@@ -17,6 +17,23 @@ macro_rules! field_span {
 
 pub(crate) use field_span;
 
+/// Runs two closures, potentially at the same time.
+///
+/// Diffing is a read-only walk of two states, so the fields of a patch are independent and the
+/// registry-sized ones are what a diff spends nearly all of its time on.
+#[cfg(not(target_os = "zkvm"))]
+pub(crate) fn join<A: Send, B: Send>(
+    a: impl FnOnce() -> A + Send,
+    b: impl FnOnce() -> B + Send,
+) -> (A, B) {
+    rayon::join(a, b)
+}
+
+#[cfg(target_os = "zkvm")]
+pub(crate) fn join<A, B>(a: impl FnOnce() -> A, b: impl FnOnce() -> B) -> (A, B) {
+    (a(), b())
+}
+
 mod beacon_state;
 mod compress;
 mod error;

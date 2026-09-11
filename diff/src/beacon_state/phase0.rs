@@ -110,6 +110,11 @@ impl<P: Preset, S: BeaconState<P>> Patch<S> for Phase0Patch<P> {
             return Err(Error::UnsupportedDiff);
         }
 
+        let (validators, balances) = crate::join(
+            || Patch::diff(config, base.validators(), changed.validators()),
+            || Patch::diff(config, base.balances(), changed.balances()),
+        );
+
         Ok(Self {
             slot: Patch::diff(config, &base.slot(), &changed.slot())?,
             latest_block_header: Patch::diff(
@@ -135,8 +140,8 @@ impl<P: Preset, S: BeaconState<P>> Patch<S> for Phase0Patch<P> {
                 &base.eth1_deposit_index(),
                 &changed.eth1_deposit_index(),
             )?,
-            validators: Patch::diff(config, base.validators(), changed.validators())?,
-            balances: Patch::diff(config, base.balances(), changed.balances())?,
+            validators: validators?,
+            balances: balances?,
             randao_mixes: Patch::diff(config, base.randao_mixes(), changed.randao_mixes())?,
             slashings: Patch::diff(config, base.slashings(), changed.slashings())?,
             justification_bits: Patch::diff(

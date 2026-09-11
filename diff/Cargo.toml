@@ -23,6 +23,9 @@ types = { workspace = true }
 unsigned-varint = { workspace = true }
 zstd = { workspace = true }
 
+[target.'cfg(not(target_os = "zkvm"))'.dependencies]
+rayon = { workspace = true }
+
 [dev-dependencies]
 bytesize = { workspace = true }
 criterion = { workspace = true }
