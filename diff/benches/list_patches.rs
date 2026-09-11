@@ -282,6 +282,30 @@ fn scan_costs(base: &FuluBeaconState<Mainnet>) {
         copy
     });
 
+    let batch = (0..REGISTRY).step_by(50).collect::<Vec<_>>();
+
+    time("  clone + batched edit_partial_validators", || {
+        let mut copy = v.clone();
+
+        copy.edit_partial_validators(&batch, &mut |_, partial_validator| {
+            partial_validator.exit_epoch = 1;
+        })
+        .expect("indices are within bounds");
+
+        copy
+    });
+
+    time("  clone + batched edit_effective_balances", || {
+        let mut copy = v.clone();
+
+        copy.edit_effective_balances(&batch, &mut |_, effective_balance| {
+            *effective_balance = 1;
+        })
+        .expect("indices are within bounds");
+
+        copy
+    });
+
     // The same edits against a uniquely owned registry: `Arc::make_mut` has nothing to clone, so
     // this is the cost of the walk alone, without the copy-on-write the frame cache forces.
     time("  unshared 47200 effective_balance_mut", || {

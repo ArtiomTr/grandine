@@ -1,5 +1,5 @@
 use bls::PublicKeyBytes;
-use ssz::{ContiguousList, H256, Ssz};
+use ssz::{ContiguousList, H256, Ssz, SszSize};
 use try_from_iterator::TryFromIterator as _;
 use types::{
     nonstandard::PartialValidator,
@@ -200,50 +200,62 @@ impl<C: SszValidatorList + ?Sized> Patch<C> for ValidatorListPatch {
             return Err(Error::PatchBaseLengthMismatch);
         }
 
-        effective_balances.apply_by_index(|index, patch| {
-            let ptr = base
-                .effective_balance_mut(index)
-                .map_err(|_| Error::PatchIndexOutOfBounds)?;
+        let mut failure = None;
 
-            *ptr = patch(*ptr)?;
+        let balances = effective_balances.into_index_ops()?;
+        let balance_indices = ascending_indices(&balances)?;
 
-            Ok(())
-        })?;
+        base.edit_effective_balances(&balance_indices, &mut |ordinal, effective_balance| {
+            if failure.is_some() {
+                return;
+            }
 
-        PositionalPatch::apply_edits(
-            withdrawal_credentials_edits,
-            |index, withdrawal_credentials| {
-                let ptr = base
-                    .partial_validator_mut(index)
-                    .map_err(|_| Error::PatchIndexOutOfBounds)?;
+            let (_, op) = balances[ordinal];
 
-                ptr.withdrawal_credentials = withdrawal_credentials;
+            match op.apply(*effective_balance) {
+                Ok(patched) => *effective_balance = patched,
+                Err(error) => failure = Some(error),
+            }
+        })
+        .map_err(|_| Error::PatchIndexOutOfBounds)?;
 
-                Ok(())
-            },
+        if let Some(error) = failure {
+            return Err(error);
+        }
+
+        // The two streams cover the same column, so they are merged: a validator that both streams
+        // touch is then looked up, and has its cached hash invalidated, once instead of twice.
+        let edits = merge_edits(
+            flatten(withdrawal_credentials_edits)?,
+            flatten(other_edits)?,
         )?;
 
-        PositionalPatch::apply_edits(other_edits, |index, edits| {
-            let ptr = base
-                .partial_validator_mut(index)
-                .map_err(|_| Error::PatchIndexOutOfBounds)?;
+        let edit_indices = ascending_indices(&edits)?;
 
-            let OtherValidatorEdits {
-                slashed,
-                activation_eligibility_epoch,
-                activation_epoch,
-                exit_epoch,
-                withdrawable_epoch,
-            } = edits;
+        base.edit_partial_validators(&edit_indices, &mut |ordinal, partial_validator| {
+            let (_, withdrawal_credentials, other) = &edits[ordinal];
 
-            ptr.slashed = slashed;
-            ptr.activation_eligibility_epoch = activation_eligibility_epoch;
-            ptr.activation_epoch = activation_epoch;
-            ptr.exit_epoch = exit_epoch;
-            ptr.withdrawable_epoch = withdrawable_epoch;
+            if let Some(withdrawal_credentials) = withdrawal_credentials {
+                partial_validator.withdrawal_credentials = *withdrawal_credentials;
+            }
 
-            Ok(())
-        })?;
+            if let Some(other) = other {
+                let OtherValidatorEdits {
+                    slashed,
+                    activation_eligibility_epoch,
+                    activation_epoch,
+                    exit_epoch,
+                    withdrawable_epoch,
+                } = *other;
+
+                partial_validator.slashed = slashed;
+                partial_validator.activation_eligibility_epoch = activation_eligibility_epoch;
+                partial_validator.activation_epoch = activation_epoch;
+                partial_validator.exit_epoch = exit_epoch;
+                partial_validator.withdrawable_epoch = withdrawable_epoch;
+            }
+        })
+        .map_err(|_| Error::PatchIndexOutOfBounds)?;
 
         for validator in appended {
             base.push(validator.into_validator())
@@ -252,6 +264,89 @@ impl<C: SszValidatorList + ?Sized> Patch<C> for ValidatorListPatch {
 
         Ok(())
     }
+}
+
+/// Expands positional edit runs into one `(index, value)` pair per position.
+fn flatten<T: Clone + Eq + SszSize>(
+    edits: ContiguousList<PositionalEdit<T>, Unlimited>,
+) -> Result<Vec<(u64, T)>, Error> {
+    let mut flattened = Vec::new();
+
+    PositionalPatch::apply_edits(edits, |index, value| {
+        flattened.push((index, value));
+        Ok(())
+    })?;
+
+    Ok(flattened)
+}
+
+/// The indices of `edits`, which must already be in strictly ascending order.
+///
+/// A patch built by `diff` always is. One that is not is rejected rather than applied out of
+/// order: the batched invalidation behind `edit_effective_balances` and `edit_partial_validators`
+/// needs sorted indices, and an unsorted batch would leave stale cached hashes behind instead of
+/// failing.
+fn ascending_indices<T: Indexed>(edits: &[T]) -> Result<Vec<u64>, Error> {
+    if edits
+        .windows(2)
+        .any(|pair| pair[0].index() >= pair[1].index())
+    {
+        return Err(Error::InvalidPatchEncoding);
+    }
+
+    Ok(edits.iter().map(Indexed::index).collect())
+}
+
+trait Indexed {
+    fn index(&self) -> u64;
+}
+
+impl<T> Indexed for (u64, T) {
+    fn index(&self) -> u64 {
+        self.0
+    }
+}
+
+impl<T, U> Indexed for (u64, T, U) {
+    fn index(&self) -> u64 {
+        self.0
+    }
+}
+
+/// Merges the two streams of edits to the partial validator column into one edit per validator, in
+/// index order.
+fn merge_edits(
+    withdrawal_credentials: Vec<(u64, H256)>,
+    others: Vec<(u64, OtherValidatorEdits)>,
+) -> Result<Vec<(u64, Option<H256>, Option<OtherValidatorEdits>)>, Error> {
+    let mut withdrawal_credentials = withdrawal_credentials.into_iter().peekable();
+    let mut others = others.into_iter().peekable();
+
+    let mut merged = Vec::new();
+
+    loop {
+        let next = [
+            withdrawal_credentials.peek().map(|(index, _)| *index),
+            others.peek().map(|(index, _)| *index),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+
+        let Some(index) = next else { break };
+
+        let credentials = withdrawal_credentials
+            .next_if(|(candidate, _)| *candidate == index)
+            .map(|(_, value)| value);
+
+        let other = others
+            .next_if(|(candidate, _)| *candidate == index)
+            .map(|(_, value)| value);
+
+        merged.push((index, credentials, other));
+    }
+
+    Ok(merged)
 }
 
 #[cfg(test)]

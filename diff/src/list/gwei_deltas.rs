@@ -98,10 +98,12 @@ impl GweiDeltas {
         finish(remaining)
     }
 
-    pub fn apply_by_index(
-        self,
-        mut edit: impl FnMut(u64, &mut dyn FnMut(Gwei) -> Result<Gwei, Error>) -> Result<(), Error>,
-    ) -> Result<(), Error> {
+    /// The changed positions and what to do at each of them, in index order.
+    ///
+    /// Handing the caller the whole batch lets it merge these edits with the ones other fields of
+    /// the same item carry, so that the item is looked up - and its cached hash invalidated - once
+    /// rather than once per field.
+    pub fn into_index_ops(self) -> Result<Vec<(u64, GweiOp)>, Error> {
         let Self {
             mode,
             positions,
@@ -110,14 +112,17 @@ impl GweiDeltas {
 
         let mode = unzigzag(mode);
         let mut remaining = deltas.as_bytes();
+        let mut ops = Vec::new();
 
         positions.apply_by_index(|index| {
-            edit(index, &mut |balance| {
-                next_balance(&mut remaining, mode, balance)
-            })
+            ops.push((index, next_op(&mut remaining, mode)?));
+
+            Ok(())
         })?;
 
-        finish(remaining)
+        finish(remaining)?;
+
+        Ok(ops)
     }
 
     /// The most repeated delta, which the encoder subtracts from every other one so that the bulk
@@ -163,6 +168,48 @@ impl GweiDeltas {
 
 /// How many changed balances [`GweiDeltas::estimate_mode`] counts before settling on a mode.
 const MODE_SAMPLE: usize = 1 << 16;
+
+/// What a [`GweiDeltas`] entry does to the balance it covers.
+#[derive(Clone, Copy, Debug)]
+pub enum GweiOp {
+    /// The balance was zeroed.
+    Zero,
+    /// The balance moved by this much.
+    Shift(i64),
+}
+
+impl GweiOp {
+    pub fn apply(self, balance: Gwei) -> Result<Gwei, Error> {
+        match self {
+            Self::Zero => Ok(0),
+            Self::Shift(delta) => {
+                let patched = i64::try_from(balance).map_err(|_| Error::InvalidBalanceDelta)?;
+                let patched = patched
+                    .checked_add(delta)
+                    .ok_or(Error::InvalidBalanceDelta)?;
+
+                u64::try_from(patched).map_err(|_| Error::InvalidBalanceDelta)
+            }
+        }
+    }
+}
+
+/// Decodes the next entry of the delta stream.
+fn next_op(remaining: &mut &[u8], mode: i64) -> Result<GweiOp, Error> {
+    let delta;
+    (delta, *remaining) =
+        unsigned_varint::decode::u64(remaining).map_err(|_| Error::InvalidPatchEncoding)?;
+
+    match delta {
+        // set to zero
+        0 => Ok(GweiOp::Zero),
+        // zigzagged delta
+        1.. => unzigzag(delta.saturating_sub(1))
+            .checked_add(mode)
+            .ok_or(Error::InvalidBalanceDelta)
+            .map(GweiOp::Shift),
+    }
+}
 
 fn next_balance(remaining: &mut &[u8], mode: i64, balance: Gwei) -> Result<Gwei, Error> {
     let delta;
@@ -308,22 +355,22 @@ mod tests {
     }
 
     #[test]
-    fn apply_by_index_visits_the_changed_positions_in_order() {
+    fn into_index_ops_yields_the_changed_positions_in_order() {
         let base = list([10, 20, 30, 40, 50]);
         let changed = list([10, 22, 30, 0, 51]);
 
-        let mut visited = Vec::new();
-
-        diff(&base, &changed)
-            .apply_by_index(|index, patch| {
+        let patched = diff(&base, &changed)
+            .into_index_ops()
+            .expect("deltas should decode")
+            .into_iter()
+            .map(|(index, op)| {
                 let before = *base.get(index).expect("index is within bounds");
 
-                visited.push((index, patch(before)?));
-
-                Ok(())
+                op.apply(before).map(|after| (index, after))
             })
+            .collect::<Result<Vec<_>, _>>()
             .expect("deltas should apply");
 
-        assert_eq!(visited, [(1, 22), (3, 0), (4, 51)]);
+        assert_eq!(patched, [(1, 22), (3, 0), (4, 51)]);
     }
 }

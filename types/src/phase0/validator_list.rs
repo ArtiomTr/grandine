@@ -152,6 +152,44 @@ impl CacheNode {
         }
     }
 
+    /// Invalidates every cached root that covers one of `indices`, which must be sorted and lie
+    /// within `offset..offset + length`.
+    ///
+    /// A batch visits every node of the cache at most once. Invalidating the same indices one at a
+    /// time re-walks - and, while the cache is shared with the state the edit started from,
+    /// re-clones - the whole root-to-leaf path for each of them.
+    pub(crate) fn invalidate_sorted(
+        self: &mut Arc<Self>,
+        indices: &[usize],
+        offset: usize,
+        length: usize,
+    ) {
+        if indices.is_empty() {
+            return;
+        }
+
+        match Arc::make_mut(self) {
+            Self::Leaf(root) => *root = OnceBox::new(),
+            Self::Internal { root, left, right } => {
+                *root = OnceBox::new();
+
+                let left_length = length.next_power_of_two() / 2;
+                let right_length = length
+                    .checked_sub(left_length)
+                    .expect("left_length never exceeds length");
+                let right_offset = offset
+                    .checked_add(left_length)
+                    .expect("offset + left_length never overflows usize");
+
+                let split = indices.partition_point(|&index| index < right_offset);
+                let (in_left, in_right) = indices.split_at(split);
+
+                left.invalidate_sorted(in_left, offset, left_length);
+                right.invalidate_sorted(in_right, right_offset, right_length);
+            }
+        }
+    }
+
     pub(crate) fn hash(&self, buf: &RawValidatorList, len: usize, offset: usize) -> H256 {
         match self {
             Self::Leaf(root) => root
@@ -223,6 +261,40 @@ impl<N: Unsigned> ValidatorList<N> {
         }
     }
 
+    /// Invalidates the cached hashes of `indices`, which must be sorted and within bounds, in a
+    /// single walk of the cache.
+    fn invalidate_batch(&mut self, indices: &[u64]) -> Result<(), IndexError> {
+        if indices.is_empty() {
+            return Ok(());
+        }
+
+        let length = self.len_usize();
+
+        let positions = indices
+            .iter()
+            .copied()
+            .map(|index| {
+                let position =
+                    usize::try_from(index).map_err(|_| IndexError::DoesNotFitInUsize { index })?;
+
+                if position >= length {
+                    return Err(IndexError::OutOfBounds {
+                        length,
+                        index: position,
+                    });
+                }
+
+                Ok(position)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if let Some(cache) = self.cache.as_mut() {
+            cache.invalidate_sorted(&positions, 0, length);
+        }
+
+        Ok(())
+    }
+
     /// Invalidates the cached hashes of the validators in `range`.
     fn invalidate_pubkey_range(&mut self, range: Range<usize>) {
         if range.is_empty() {
@@ -273,6 +345,34 @@ impl<N: Unsigned> SszValidatorList for ValidatorList<N> {
         );
 
         self.buf.partial_validator_mut(index)
+    }
+
+    fn edit_effective_balances(
+        &mut self,
+        indices: &[u64],
+        edit: &mut dyn FnMut(usize, &mut Gwei),
+    ) -> Result<(), IndexError> {
+        self.invalidate_batch(indices)?;
+
+        for (ordinal, index) in indices.iter().copied().enumerate() {
+            edit(ordinal, self.buf.effective_balance_mut(index)?);
+        }
+
+        Ok(())
+    }
+
+    fn edit_partial_validators(
+        &mut self,
+        indices: &[u64],
+        edit: &mut dyn FnMut(usize, &mut PartialValidator),
+    ) -> Result<(), IndexError> {
+        self.invalidate_batch(indices)?;
+
+        for (ordinal, index) in indices.iter().copied().enumerate() {
+            edit(ordinal, self.buf.partial_validator_mut(index)?);
+        }
+
+        Ok(())
     }
 
     fn pubkeys(&self) -> &PubkeyList {

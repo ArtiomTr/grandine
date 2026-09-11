@@ -254,6 +254,33 @@ impl SszValidatorList for ProgressiveValidatorList {
         self.buf.partial_validator_mut(index)
     }
 
+    // The progressive cache is not walked in batch yet, so these only save the dispatch, not the
+    // repeated invalidation. Gloas is not live on any network this runs against, and the batched
+    // walk in `ValidatorList` is what a mainnet state diff goes through.
+    fn edit_effective_balances(
+        &mut self,
+        indices: &[u64],
+        edit: &mut dyn FnMut(usize, &mut Gwei),
+    ) -> Result<(), IndexError> {
+        for (ordinal, index) in indices.iter().copied().enumerate() {
+            edit(ordinal, self.effective_balance_mut(index)?);
+        }
+
+        Ok(())
+    }
+
+    fn edit_partial_validators(
+        &mut self,
+        indices: &[u64],
+        edit: &mut dyn FnMut(usize, &mut PartialValidator),
+    ) -> Result<(), IndexError> {
+        for (ordinal, index) in indices.iter().copied().enumerate() {
+            edit(ordinal, self.partial_validator_mut(index)?);
+        }
+
+        Ok(())
+    }
+
     fn pubkeys(&self) -> &PubkeyList {
         self.buf.pubkeys()
     }

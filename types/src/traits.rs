@@ -2251,6 +2251,37 @@ pub trait SszValidatorList: SszHash<PackingFactor = U1> {
 
     fn partial_validator_mut(&mut self, index: u64) -> Result<&mut PartialValidator, IndexError>;
 
+    /// Applies `edit` to the effective balances at `indices`, which must be sorted, deduplicated
+    /// and within bounds.
+    ///
+    /// `edit` is handed the position of the index within `indices`, so a caller that carries a
+    /// parallel list of edits can look its own up.
+    ///
+    /// This exists so that an implementation can invalidate the cached hashes of a whole batch in
+    /// one walk of its cache. Making the same edits one at a time through
+    /// [`Self::effective_balance_mut`] walks the full depth of the cache for every one of them,
+    /// which dominates the cost of applying a state diff.
+    ///
+    /// The two columns have separate entry points because they are stored separately: touching the
+    /// richer one for an edit that only moves a balance would copy the block of validators around
+    /// it for nothing.
+    fn edit_effective_balances(
+        &mut self,
+        indices: &[u64],
+        edit: &mut dyn FnMut(usize, &mut Gwei),
+    ) -> Result<(), IndexError>;
+
+    /// Applies `edit` to the validators at `indices`, which must be sorted, deduplicated and
+    /// within bounds.
+    ///
+    /// The batched counterpart of [`Self::partial_validator_mut`]. See
+    /// [`Self::edit_effective_balances`].
+    fn edit_partial_validators(
+        &mut self,
+        indices: &[u64],
+        edit: &mut dyn FnMut(usize, &mut PartialValidator),
+    ) -> Result<(), IndexError>;
+
     fn pubkeys(&self) -> &PubkeyList;
 
     /// Restores the public keys that were removed by [`Self::clear_pubkeys`].
