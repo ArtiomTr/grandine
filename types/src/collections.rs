@@ -72,8 +72,9 @@ pub type EpochParticipation<P> = PersistentList<
 
 pub type ProgressiveEpochParticipation = PersistentProgressiveList<ParticipationFlags>;
 
-pub type InactivityScores<P> =
-    PersistentList<u64, <P as Preset>::ValidatorRegistryLimit, UnhashedBundleSize<u64>>;
+/// Bundled coarsely for the same reason as [`Balances`]: a leak rewrites every score in the
+/// registry, and the rebuild is bound by the node count rather than the bytes copied.
+pub type InactivityScores<P> = PersistentList<u64, <P as Preset>::ValidatorRegistryLimit, U64>;
 
 pub type ProgressiveInactivityScores = PersistentProgressiveList<u64>;
 
