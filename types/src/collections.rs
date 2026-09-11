@@ -11,6 +11,7 @@ use ssz::{
     ContiguousVector, IncompletePersistentVector, PersistentList, PersistentProgressiveList,
     PersistentVector, UnhashedBundleSize,
 };
+use typenum::U64;
 
 use crate::{
     altair::primitives::ParticipationFlags,
@@ -45,8 +46,13 @@ pub type Validators<P> = ValidatorList<<P as Preset>::ValidatorRegistryLimit>;
 // (EIP-7688). Pre-Gloas forks keep the bounded `PersistentList` versions above.
 pub type ProgressiveValidators = ProgressiveValidatorList;
 
-pub type Balances<P> =
-    PersistentList<Gwei, <P as Preset>::ValidatorRegistryLimit, UnhashedBundleSize<Gwei>>;
+/// Balances are bundled far more coarsely than [`UnhashedBundleSize`] would have them.
+///
+/// Every balance in the registry moves at an epoch boundary, and rewriting a persistent list is
+/// dominated by the nodes the rebuild allocates rather than by the bytes it copies. Bundling 64 to
+/// a leaf cuts that node count eightfold. Bundling is invisible to SSZ - the serialization and the
+/// hash tree root are the same either way - so this is purely a memory layout choice.
+pub type Balances<P> = PersistentList<Gwei, <P as Preset>::ValidatorRegistryLimit, U64>;
 
 pub type ProgressiveBalances = PersistentProgressiveList<Gwei>;
 
