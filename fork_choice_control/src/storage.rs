@@ -1279,7 +1279,10 @@ impl<P: Preset> Storage<P> {
             .and_then(BlockRootBySlotValue::block_root))
     }
 
-    fn block_root_by_slot_value(&self, slot: Slot) -> Result<Option<BlockRootBySlotValue>> {
+    pub(crate) fn block_root_by_slot_value(
+        &self,
+        slot: Slot,
+    ) -> Result<Option<BlockRootBySlotValue>> {
         self.get(BlockRootBySlot(slot))
     }
 
@@ -1796,7 +1799,10 @@ impl<P: Preset> Storage<P> {
     ///
     /// Only the key is read: a state row holds a whole frame or delta, so the value is fetched
     /// separately, once the caller knows it needs it.
-    fn state_key_by_block_root(&self, block_root: H256) -> Result<Option<StateByBlockRoot>> {
+    pub(crate) fn state_key_by_block_root(
+        &self,
+        block_root: H256,
+    ) -> Result<Option<StateByBlockRoot>> {
         let prefix = StateByBlockRoot::prefix(block_root);
 
         // We don't know the full key of state, because full key contains
@@ -2120,6 +2126,14 @@ pub enum BlockRootBySlotValue {
 
 impl BlockRootBySlotValue {
     const BLOCKLESS_PREFIX: u8 = b'f';
+
+    /// The root the state of a slot without a block is stored under: the hash of the state root
+    /// followed by the blockless marker. Block roots are hashes of 64-byte Merkle nodes, so a
+    /// 33-byte preimage keeps the two apart.
+    #[must_use]
+    pub fn blockless(state_root: H256) -> Self {
+        Self::Blockless(hashing::hash_256_8(state_root, Self::BLOCKLESS_PREFIX))
+    }
 
     /// The root of the block at this slot, if there is one.
     #[must_use]
@@ -4632,6 +4646,20 @@ mod tests {
             assert_eq!(blockless.block_root(), None);
             assert_eq!(blockless.state_key_root(), root);
         }
+
+        Ok(())
+    }
+
+    #[test]
+    fn a_blockless_root_hashes_the_state_root_followed_by_the_marker() -> Result<()> {
+        // sha256([0x11; 32] ++ b"f")
+        let expected =
+            hex::decode("8bfb11946ec2ecd2554260c4d4c97b92e99ccd28ae15af271d7060dd6c6f3b83")?;
+
+        assert_eq!(
+            BlockRootBySlotValue::blockless(H256::repeat_byte(0x11)),
+            BlockRootBySlotValue::Blockless(H256::from_slice(&expected)),
+        );
 
         Ok(())
     }
