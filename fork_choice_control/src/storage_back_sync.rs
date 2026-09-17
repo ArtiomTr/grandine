@@ -430,13 +430,12 @@ mod tests {
             let state_root = recomputed_root(state)?;
             let blockless = BlockRootBySlotValue::blockless(state_root);
 
-            assert_eq!(storage.block_root_by_slot_value(slot)?, Some(blockless));
-            assert_eq!(storage.slot_by_state_root(state_root)?, Some(slot));
-            assert!(
-                storage
-                    .state_key_by_block_root(blockless.state_key_root())?
-                    .is_some()
+            assert_eq!(
+                storage.stored_block_root_by_slot_value(slot)?,
+                Some(blockless)
             );
+            assert_eq!(storage.slot_by_state_root(state_root)?, Some(slot));
+            assert!(storage.contains_state_for_root(blockless.state_key_root())?);
         }
 
         // Slots without a block are served by transitioning the nearest stored state forward.
@@ -517,77 +516,23 @@ mod tests {
 
 #[cfg(test)]
 mod synthetic_chain_tests {
-    use database::Database;
-    use pubkey_cache::PubkeyCache;
-    use ssz::{H256, SszRead as _, SszWrite as _};
-    use types::{
-        combined::BeaconState, config::Config, nonstandard::StorageMode, preset::Minimal,
-        traits::BeaconState as _,
-    };
+    use types::traits::BeaconState as _;
 
     use super::*;
-    use crate::{hierarchy::Hierarchy, state_storage_config::StateStorageConfig};
+    use crate::test_chain::TestChain;
 
-    struct Chain {
-        storage: Storage<Minimal>,
-        genesis_state: Arc<BeaconState<Minimal>>,
-        blocks: Vec<Arc<SignedBeaconBlock<Minimal>>>,
-        // The state at every slot from genesis to the last block.
-        states: Vec<Arc<BeaconState<Minimal>>>,
+    /// A chain with a block at each of `block_slots`, stored the way back-sync finds it.
+    fn chain(block_slots: impl IntoIterator<Item = Slot>) -> Result<TestChain> {
+        let chain = TestChain::new(block_slots)?;
+
+        chain
+            .storage
+            .store_back_sync_blocks(chain.blocks.iter().cloned())?;
+
+        Ok(chain)
     }
 
-    /// A chain with a block at each of `block_slots`, stored the way back-sync finds it, in a
-    /// storage whose hierarchy has a node every 4 slots.
-    fn chain(block_slots: impl IntoIterator<Item = Slot>) -> Result<Chain> {
-        let config = Arc::new(Config::minimal());
-        let pubkey_cache = Arc::new(PubkeyCache::default());
-        let hierarchy = Hierarchy::new([4, 2])?;
-
-        let storage = Storage::<Minimal>::new(
-            config.clone_arc(),
-            pubkey_cache.clone_arc(),
-            Database::in_memory(),
-            StorageMode::default(),
-            StateStorageConfig {
-                cache_sizes: vec![0; hierarchy.depth()],
-                hierarchy,
-                ..StateStorageConfig::default()
-            },
-            None,
-        )?;
-
-        let (genesis_state, _) = factory::min_genesis_state::<Minimal>(&config, &pubkey_cache)?;
-
-        let mut blocks = vec![];
-        let mut states = vec![genesis_state.clone_arc()];
-
-        for block_slot in block_slots {
-            let mut state = states.last().expect("genesis is pushed above").clone_arc();
-
-            while state.slot().saturating_add(1) < block_slot {
-                let slot = state.slot().saturating_add(1);
-                combined::process_slots(&config, &pubkey_cache, state.make_mut(), slot)?;
-                states.push(state.clone_arc());
-            }
-
-            let (block, post_state) =
-                factory::empty_block(&config, &pubkey_cache, state, block_slot, H256::zero())?;
-
-            blocks.push(block);
-            states.push(post_state);
-        }
-
-        storage.store_back_sync_blocks(blocks.iter().cloned())?;
-
-        Ok(Chain {
-            storage,
-            genesis_state,
-            blocks,
-            states,
-        })
-    }
-
-    fn archive(chain: &Chain, start_slot: Slot, end_slot: Slot) -> Result<()> {
+    fn archive(chain: &TestChain, start_slot: Slot, end_slot: Slot) -> Result<()> {
         chain.storage.archive_back_sync_states(
             start_slot,
             end_slot,
@@ -597,43 +542,25 @@ mod synthetic_chain_tests {
         )
     }
 
-    /// The root of the stored state at `slot`, recomputed from its contents, because
-    /// `stored_state` may carry a cached root that would echo the expected one back.
-    fn stored_root(chain: &Chain, slot: Slot) -> Result<Option<H256>> {
-        let config = chain.storage.config();
-
-        chain
-            .storage
-            .stored_state(slot, Some(chain.genesis_state.validators()))?
-            .map(|state| {
-                Ok(BeaconState::<Minimal>::from_ssz(config, state.to_ssz()?)?.hash_tree_root())
-            })
-            .transpose()
-    }
-
     #[test]
     fn back_sync_persists_and_resumes_from_the_state_of_a_slot_without_a_block() -> Result<()> {
         let chain = chain([1, 2, 3, 5, 6, 7, 8])?;
         let storage = &chain.storage;
-        let state_root_4 = chain.states[4].hash_tree_root();
+        let state_root_4 = chain.state(4).hash_tree_root();
 
         archive(&chain, 0, 4)?;
 
         let blockless = BlockRootBySlotValue::blockless(state_root_4);
 
         assert_eq!(storage.block_root_by_slot(4)?, None);
-        assert_eq!(storage.block_root_by_slot_value(4)?, Some(blockless));
+        assert_eq!(storage.stored_block_root_by_slot_value(4)?, Some(blockless));
         assert_eq!(storage.slot_by_state_root(state_root_4)?, Some(4));
         assert_eq!(get_latest_archived_slot(&storage.database)?, Some(4));
-        assert!(
-            storage
-                .state_key_by_block_root(blockless.state_key_root())?
-                .is_some()
-        );
+        assert!(storage.contains_state_for_root(blockless.state_key_root())?);
 
         storage.clear_caches();
 
-        assert_eq!(stored_root(&chain, 4)?, Some(state_root_4));
+        assert_eq!(chain.stored_state_root(4)?, Some(state_root_4));
 
         // Only a run that resumes from the blockless state at slot 4 can get past this: one
         // starting over from genesis fails on the missing block at slot 2.
@@ -649,8 +576,8 @@ mod synthetic_chain_tests {
 
         for slot in [6, 8] {
             assert_eq!(
-                stored_root(&chain, slot)?,
-                Some(chain.states[usize::try_from(slot)?].hash_tree_root()),
+                chain.stored_state_root(slot)?,
+                Some(chain.state(slot).hash_tree_root()),
             );
         }
 
@@ -678,12 +605,12 @@ mod synthetic_chain_tests {
         );
 
         assert_eq!(
-            storage.block_root_by_slot_value(4)?,
+            storage.stored_block_root_by_slot_value(4)?,
             Some(BlockRootBySlotValue::Block(block_root_4)),
         );
 
         // The state an empty slot 4 would have had is not stored under any root.
-        let mut empty_slot_state = chain.states[3].clone_arc();
+        let mut empty_slot_state = chain.state(3);
         combined::process_slots(
             storage.config(),
             &storage.pubkey_cache,
@@ -693,12 +620,8 @@ mod synthetic_chain_tests {
 
         let would_be_blockless = BlockRootBySlotValue::blockless(empty_slot_state.hash_tree_root());
 
-        assert!(
-            storage
-                .state_key_by_block_root(would_be_blockless.state_key_root())?
-                .is_none()
-        );
-        assert!(storage.state_key_by_block_root(block_root_4)?.is_none());
+        assert!(!storage.contains_state_for_root(would_be_blockless.state_key_root())?);
+        assert!(!storage.contains_state_for_root(block_root_4)?);
 
         Ok(())
     }

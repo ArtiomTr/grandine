@@ -68,3 +68,5 @@ mod extra_tests;
 mod helpers;
 #[cfg(test)]
 mod spec_tests;
+#[cfg(test)]
+mod test_chain;

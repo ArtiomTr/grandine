@@ -18,7 +18,9 @@ use parking_lot::Mutex;
 use prometheus_metrics::{Metrics, observe_vec, start_timer_vec, stop_and_record};
 use pubkey_cache::PubkeyCache;
 use reqwest::Client;
-use ssz::{ReadError, Size, Ssz, SszRead, SszReadDefault, SszSize, SszWrite, WriteError};
+use ssz::{
+    ReadError, Size, Ssz, SszHash as _, SszRead, SszReadDefault, SszSize, SszWrite, WriteError,
+};
 use std_ext::ArcExt as _;
 use thiserror::Error;
 use tracing::info;
@@ -641,7 +643,7 @@ impl<P: Preset> Storage<P> {
 
         let anchor_slot = self.anchor_slot.load(Ordering::SeqCst);
         let mut update_finalized_validators = false;
-        let mut states_to_save = Vec::new();
+        let mut finalized_links = Vec::new();
 
         for (chain_link, finalized) in chain {
             let block_root = chain_link.block_root;
@@ -708,24 +710,23 @@ impl<P: Preset> Storage<P> {
                     update_finalized_validators = true;
                 }
 
-                if !self.prune_storage_enabled() && is_hierarchy_slot {
-                    info_with_peers!("saving state in slot {state_slot}");
-
-                    // The chain link is kept rather than the state itself: `ChainLink::state` may
-                    // have to reconstruct an unloaded state, and materialising every state here
-                    // would hold the whole run resident at once.
-                    states_to_save.push((state_slot, block_root, chain_link));
-
-                    update_finalized_validators = true;
+                if !self.prune_storage_enabled() {
+                    // Links are kept rather than states: `ChainLink::state` may have to
+                    // reconstruct an unloaded state, and materialising every state here would
+                    // hold the whole run resident at once. A link whose own slot stores nothing
+                    // is kept too, because its state is what the empty slots after it are
+                    // advanced from.
+                    finalized_links.push(chain_link);
                 }
             }
         }
 
+        // The links come newest first, and states have to be written oldest first.
+        finalized_links.reverse();
+
         self.append_finalized_states(
-            states_to_save
-                .into_iter()
-                .rev()
-                .map(|(slot, block_root, chain_link)| (slot, block_root, chain_link.state(store))),
+            &finalized_links,
+            store,
             anchor_slot,
             &*finalized_validators,
             &mut batch,
@@ -760,12 +761,20 @@ impl<P: Preset> Storage<P> {
         Ok(())
     }
 
-    /// Persists `states` and everything already accumulated in `batch`, committing every
-    /// `ARCHIVED_STATES_BEFORE_FLUSH` states so that neither the batch nor the states waiting to be
-    /// encoded grow with the length of the run.
+    /// Persists the states of `links`, oldest first, along with everything already accumulated in
+    /// `batch`, committing every `ARCHIVED_STATES_BEFORE_FLUSH` states so that neither the batch
+    /// nor the states waiting to be encoded grow with the length of the run.
+    ///
+    /// A hierarchy slot with no block gets a state too: the state of the finalized link before it,
+    /// advanced through the empty slots. Such a state is stored under a blockless root, and the
+    /// slot's `BlockRootBySlot` and `SlotByStateRoot` rows go into the same batch as the state.
+    /// Consecutive runs overlap by a link - the append at shutdown and the next archival run see
+    /// the same slots - and a slot seen again is written with the same content as before, so
+    /// nothing is duplicated or changed.
     fn append_finalized_states(
         &self,
-        states: impl IntoIterator<Item = (Slot, H256, Arc<BeaconState<P>>)>,
+        links: &[&ChainLink<P>],
+        store: &Store<P, Self>,
         anchor_slot: Slot,
         finalized_validators: &dyn SszValidatorList,
         batch: &mut Vec<(String, Vec<u8>)>,
@@ -782,35 +791,104 @@ impl<P: Preset> Storage<P> {
         let mut deleted_keys = Vec::new();
         let mut states_in_batch: u64 = 0;
 
-        for (slot, block_root, state) in states {
-            let to_delete = self.append_finalized_state(
-                state,
-                slot,
-                block_root,
-                anchor_slot,
-                finalized_validators,
-                &spine,
-                batch,
-                update_finalized_validators,
-            )?;
+        let mut save_state =
+            |slot: Slot, block_root: Option<H256>, state: Arc<BeaconState<P>>| -> Result<()> {
+                // The state may bring validators that the stored list does not have yet, so
+                // the list is refreshed by the flush that commits it.
+                *update_finalized_validators = true;
 
-            if let Some(to_delete) = to_delete {
-                deleted_keys.push(to_delete);
-            }
+                // A slot without a block has no block root to store its state under, so the
+                // state root provides one. The rows that make the state findable by slot go into
+                // the batch that holds the state itself.
+                let block_root = match block_root {
+                    Some(block_root) => block_root,
+                    None => {
+                        let state_root = state.hash_tree_root();
+                        let value = BlockRootBySlotValue::blockless(state_root);
 
-            states_in_batch = states_in_batch.saturating_add(1);
+                        batch.push(serialize(BlockRootBySlot(slot), value)?);
+                        batch.push(serialize(SlotByStateRoot(state_root), slot)?);
 
-            if states_in_batch == ARCHIVED_STATES_BEFORE_FLUSH {
-                self.flush(
-                    batch,
-                    &mut deleted_keys,
-                    update_finalized_validators,
+                        value.state_key_root()
+                    }
+                };
+
+                let to_delete = self.append_finalized_state(
+                    state,
+                    slot,
+                    block_root,
+                    anchor_slot,
                     finalized_validators,
+                    &spine,
+                    batch,
+                    update_finalized_validators,
                 )?;
 
-                spine.copy_into(&self.forward_spine);
+                if let Some(to_delete) = to_delete {
+                    deleted_keys.push(to_delete);
+                }
 
-                states_in_batch = 0;
+                states_in_batch = states_in_batch.saturating_add(1);
+
+                if states_in_batch == ARCHIVED_STATES_BEFORE_FLUSH {
+                    self.flush(
+                        batch,
+                        &mut deleted_keys,
+                        update_finalized_validators,
+                        finalized_validators,
+                    )?;
+
+                    spine.copy_into(&self.forward_spine);
+
+                    states_in_batch = 0;
+                }
+
+                Ok(())
+            };
+
+        for (index, chain_link) in links.iter().enumerate() {
+            let slot = chain_link.slot();
+
+            // Empty slots after the newest finalized link are left for the run that finalizes past
+            // them.
+            let next_slot = links
+                .get(index.saturating_add(1))
+                .map_or(slot, |link| link.slot());
+
+            let saves_link_state = self
+                .hierarchy
+                .contains::<P>(&self.config, anchor_slot, slot);
+
+            let empty_slots = (slot.saturating_add(1)..next_slot)
+                .filter(|slot| {
+                    self.hierarchy
+                        .contains::<P>(&self.config, anchor_slot, *slot)
+                })
+                .collect_vec();
+
+            if !saves_link_state && empty_slots.is_empty() {
+                continue;
+            }
+
+            let mut state = chain_link.state(store);
+
+            if saves_link_state {
+                info_with_peers!("saving state in slot {slot}");
+
+                save_state(slot, Some(chain_link.block_root), state.clone_arc())?;
+            }
+
+            for empty_slot in empty_slots {
+                info_with_peers!("saving state in empty slot {empty_slot}");
+
+                combined::process_slots(
+                    &self.config,
+                    &self.pubkey_cache,
+                    state.make_mut(),
+                    empty_slot,
+                )?;
+
+                save_state(empty_slot, None, state.clone_arc())?;
             }
         }
 
@@ -1279,10 +1357,7 @@ impl<P: Preset> Storage<P> {
             .and_then(BlockRootBySlotValue::block_root))
     }
 
-    pub(crate) fn block_root_by_slot_value(
-        &self,
-        slot: Slot,
-    ) -> Result<Option<BlockRootBySlotValue>> {
+    fn block_root_by_slot_value(&self, slot: Slot) -> Result<Option<BlockRootBySlotValue>> {
         self.get(BlockRootBySlot(slot))
     }
 
@@ -1799,10 +1874,7 @@ impl<P: Preset> Storage<P> {
     ///
     /// Only the key is read: a state row holds a whole frame or delta, so the value is fetched
     /// separately, once the caller knows it needs it.
-    pub(crate) fn state_key_by_block_root(
-        &self,
-        block_root: H256,
-    ) -> Result<Option<StateByBlockRoot>> {
+    fn state_key_by_block_root(&self, block_root: H256) -> Result<Option<StateByBlockRoot>> {
         let prefix = StateByBlockRoot::prefix(block_root);
 
         // We don't know the full key of state, because full key contains
@@ -1909,6 +1981,17 @@ impl<P: Preset> Storage<P> {
 
 #[cfg(test)]
 impl<P: Preset> Storage<P> {
+    pub fn stored_block_root_by_slot_value(
+        &self,
+        slot: Slot,
+    ) -> Result<Option<BlockRootBySlotValue>> {
+        self.block_root_by_slot_value(slot)
+    }
+
+    pub fn contains_state_for_root(&self, block_root: H256) -> Result<bool> {
+        Ok(self.state_key_by_block_root(block_root)?.is_some())
+    }
+
     pub fn block_root_by_slot_count(&self) -> Result<usize> {
         let results = self
             .database
@@ -2558,7 +2641,6 @@ mod tests {
     use bls::PublicKeyBytes;
     use bytesize::ByteSize;
     use database::DatabaseMode;
-    use ssz::SszHash as _;
     use tempfile::TempDir;
     use try_from_iterator::TryFromIterator as _;
     use types::{
@@ -2574,6 +2656,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::test_chain::TestChain;
 
     fn block_with_slot(slot: Slot) -> SignedBeaconBlock<Mainnet> {
         SignedBeaconBlock::<Mainnet>::Phase0(Phase0SignedBeaconBlock {
@@ -2584,6 +2667,54 @@ mod tests {
             .into(),
             ..Phase0SignedBeaconBlock::default()
         })
+    }
+
+    /// Writes `states` the way archival does, for tests whose subject is a read path rather than
+    /// archival itself. `Storage::append` derives its states from a chain, so states that no short
+    /// test chain produces - fabricated validator lists, marked states, mainnet slot spacing - are
+    /// written through `append_finalized_state`, the same entry point back-sync uses.
+    fn store_states<P: Preset>(
+        storage: &Storage<P>,
+        states: impl IntoIterator<Item = (Slot, H256, Arc<BeaconState<P>>)>,
+        anchor_slot: Slot,
+        finalized_validators: &dyn SszValidatorList,
+    ) -> Result<()> {
+        let spine = storage.temporary_spine(anchor_slot);
+        storage.forward_spine.copy_into(&spine);
+
+        let mut batch = vec![];
+        let mut deleted_keys = Vec::new();
+
+        for (slot, block_root, state) in states {
+            // The flush below clears the flag, so every state sets it again.
+            let mut update_finalized_validators = true;
+
+            let to_delete = storage.append_finalized_state(
+                state,
+                slot,
+                block_root,
+                anchor_slot,
+                finalized_validators,
+                &spine,
+                &mut batch,
+                &mut update_finalized_validators,
+            )?;
+
+            if let Some(to_delete) = to_delete {
+                deleted_keys.push(to_delete);
+            }
+
+            storage.flush(
+                &mut batch,
+                &mut deleted_keys,
+                &mut update_finalized_validators,
+                finalized_validators,
+            )?;
+
+            spine.copy_into(&storage.forward_spine);
+        }
+
+        Ok(())
     }
 
     fn storage_with_hierarchy(
@@ -3008,15 +3139,11 @@ mod tests {
             serialize(FinalizedBlockByRoot(pruned_root), &block)?,
         ])?;
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [(0, anchor_root, state_with_slot(0))],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         assert!(
@@ -3072,18 +3199,14 @@ mod tests {
             serialize(FinalizedBlockByRoot(mid_epoch_root), block_with_slot(8))?,
         ])?;
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, epoch_start_root, state_with_slot(0)),
                 (8, mid_epoch_root, state_with_slot(8)),
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         assert_eq!(
@@ -3499,74 +3622,38 @@ mod tests {
         Ok(())
     }
 
+    /// A run longer than `ARCHIVED_STATES_BEFORE_FLUSH` commits as it goes, so that neither the
+    /// batch nor the states waiting to be encoded grow with the length of the run. Only the
+    /// outcome is checked here: every state of the run ends up on disk, readable after the caches
+    /// are dropped.
     #[test]
-    fn append_finalized_states_commits_as_the_run_progresses() -> Result<()> {
-        let storage = Storage::<Mainnet>::new(
-            Arc::new(Config::mainnet()),
-            Arc::new(PubkeyCache::default()),
-            Database::in_memory(),
-            StorageMode::default(),
-            StateStorageConfig::default(),
-            None,
-        )
-        .expect("state cache sizes in tests are valid");
+    fn an_archival_run_longer_than_the_flush_threshold_stores_every_state() -> Result<()> {
+        // The chain has a block in every hierarchy slot, so the run writes one state per link.
+        let block_slots = (1..=2 * ARCHIVED_STATES_BEFORE_FLUSH + 2)
+            .map(|index| index * 4)
+            .collect_vec();
 
-        storage.forward_spine().insert(
-            0,
-            StateByBlockRoot::snapshot(H256::repeat_byte(1)),
-            state_with_slot(0),
-        );
+        let chain = TestChain::new(block_slots.iter().copied())?;
+        let storage = &chain.storage;
+        let store = chain.store();
 
-        let validator_source = state_with_slot(0);
-        let finalized_validators = validator_source.validators();
+        let finalized = core::iter::once(0)
+            .chain(block_slots.iter().copied())
+            .map(|slot| chain.link(slot))
+            .collect_vec();
 
-        // Every one of these slots is a hierarchy slot whose parent is the
-        // anchor already seeded into the spine, so each yields exactly one
-        // written state.
-        let total = 2 * ARCHIVED_STATES_BEFORE_FLUSH + 2;
+        storage.append(core::iter::empty(), finalized.iter(), &store)?;
 
-        let states = (1..=total).map(|index| {
-            let committed =
-                (index - 1) / ARCHIVED_STATES_BEFORE_FLUSH * ARCHIVED_STATES_BEFORE_FLUSH;
+        assert_eq!(storage.state_count()?, finalized.len());
 
+        storage.clear_caches();
+
+        for slot in block_slots {
             assert_eq!(
-                storage
-                    .state_count()
-                    .expect("counting states in an in-memory database does not fail"),
-                usize::try_from(committed).expect("state counts in tests are small"),
-                "states appended before slot {index} must already be committed",
+                chain.stored_state_root(slot)?,
+                Some(chain.state(slot).hash_tree_root()),
             );
-
-            // The forward spine must never name a state that is not committed
-            // yet, or a failure here would leave later states delta-encoded
-            // against a parent that was never written.
-            assert!(
-                storage.forward_spine().get((index - 1) * 32).is_none() || committed >= index - 1,
-                "the forward spine tracks slot {} before it is committed",
-                (index - 1) * 32,
-            );
-
-            let slot = index * 32;
-
-            (slot, H256::from_low_u64_be(index), state_with_slot(slot))
-        });
-
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
-        storage.append_finalized_states(
-            states,
-            0,
-            finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
-        )?;
-
-        assert!(batch.is_empty());
-        assert_eq!(
-            storage.state_count()?,
-            usize::try_from(total).expect("state counts in tests are small"),
-        );
+        }
 
         Ok(())
     }
@@ -3631,23 +3718,19 @@ mod tests {
         let validator_source = state_with_slot(0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         // Slot 512 has no ancestor on disk and is not a leaf, so it is written
         // as a snapshot; slot 544 then delta-encodes against it.
         let snapshot_root = H256::repeat_byte(1);
         let delta_root = H256::repeat_byte(2);
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (512, snapshot_root, state_with_slot(512)),
                 (544, delta_root, state_with_slot(544)),
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         storage.forward_spine().clear();
@@ -3685,21 +3768,17 @@ mod tests {
         let validator_source = state_with_slot(0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         let snapshot_root = H256::repeat_byte(1);
         let delta_root = H256::repeat_byte(2);
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (512, snapshot_root, state_with_slot(512)),
                 (544, delta_root, state_with_slot(544)),
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         assert!(storage.forward_spine().get(544).is_some());
@@ -3819,9 +3898,6 @@ mod tests {
         let validator_source = state_with_validators(0, 6, 0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         let anchor_root = H256::repeat_byte(1);
         let parent_root = H256::repeat_byte(2);
         let child_root = H256::repeat_byte(3);
@@ -3830,7 +3906,8 @@ mod tests {
         let parent_state = state_with_validators(512, 6, 1_000);
         let child_state = state_with_validators(544, 6, 2_000);
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, anchor_root, anchor_state.clone_arc()),
                 (512, parent_root, parent_state.clone_arc()),
@@ -3838,8 +3915,6 @@ mod tests {
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         storage.clear_caches();
@@ -3881,9 +3956,6 @@ mod tests {
         let validator_source = state_with_validators(0, 8, 0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         let anchor_root = H256::repeat_byte(1);
         let parent_root = H256::repeat_byte(2);
         let child_root = H256::repeat_byte(3);
@@ -3892,7 +3964,8 @@ mod tests {
         let parent_state = state_with_validators(512, 7, 1_000);
         let child_state = state_with_validators(544, 8, 2_000);
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, anchor_root, anchor_state.clone_arc()),
                 (512, parent_root, parent_state.clone_arc()),
@@ -3900,8 +3973,6 @@ mod tests {
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         storage.clear_caches();
@@ -3939,9 +4010,6 @@ mod tests {
         let validator_source = state_with_validators(0, 8, 0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         let anchor_root = H256::repeat_byte(1);
         let parent_root = H256::repeat_byte(2);
         let child_root = H256::repeat_byte(3);
@@ -3950,7 +4018,8 @@ mod tests {
         let parent_state = state_with_validators(512, 7, 1_000);
         let child_state = state_with_validators(544, 8, 2_000);
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, anchor_root, anchor_state.clone_arc()),
                 (512, parent_root, parent_state.clone_arc()),
@@ -3958,8 +4027,6 @@ mod tests {
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         storage.clear_caches();
@@ -4148,21 +4215,17 @@ mod tests {
         let validator_source = state_with_slot(0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         let anchor_root = H256::repeat_byte(1);
         let child_root = H256::repeat_byte(2);
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, anchor_root, state_with_slot(0)),
                 (512, child_root, state_with_slot(512)),
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         // Neither the spine nor the cache can stand in for the missing frame.
@@ -4188,24 +4251,20 @@ mod tests {
         let validator_source = state_with_slot(0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         let anchor_root = H256::repeat_byte(1);
         let parent_root = H256::repeat_byte(2);
         let child_root = H256::repeat_byte(3);
 
         // The anchor is not on disk yet, so 512 is written as a snapshot and
         // 544 delta-encodes against it.
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (512, parent_root, state_with_slot(512)),
                 (544, child_root, state_with_slot(544)),
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         assert_eq!(
@@ -4221,15 +4280,14 @@ mod tests {
         // Now the anchor shows up, which turns the snapshot at 512 into a delta
         // against it and deletes the snapshot - leaving the chain recorded in
         // 544's key naming a row that is no longer a frame.
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, anchor_root, state_with_slot(0)),
                 (512, parent_root, state_with_slot(512)),
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         assert_eq!(
@@ -4261,14 +4319,12 @@ mod tests {
         let validator_source = state_with_slot(0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         let anchor_root = H256::repeat_byte(1);
         let parent_root = H256::repeat_byte(2);
         let child_root = H256::repeat_byte(3);
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, anchor_root, state_with_slot(0)),
                 (512, parent_root, state_with_slot(512)),
@@ -4276,8 +4332,6 @@ mod tests {
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         storage.forward_spine().clear();
@@ -4318,21 +4372,17 @@ mod tests {
         let validator_source = state_with_slot(0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         let anchor_root = H256::repeat_byte(1);
         let parent_root = H256::repeat_byte(2);
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, anchor_root, state_with_slot(0)),
                 (512, parent_root, state_with_slot(512)),
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         storage.forward_spine().clear();
@@ -4402,21 +4452,17 @@ mod tests {
         let validator_source = state_with_slot(0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         let anchor_root = H256::repeat_byte(1);
         let parent_root = H256::repeat_byte(2);
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, anchor_root, state_with_slot(0)),
                 (512, parent_root, state_with_slot(512)),
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         storage.forward_spine().clear();
@@ -4442,14 +4488,12 @@ mod tests {
         let validator_source = state_with_slot(0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         let anchor_root = H256::repeat_byte(1);
         let parent_root = H256::repeat_byte(2);
         let child_root = H256::repeat_byte(3);
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, anchor_root, state_with_slot(0)),
                 (512, parent_root, state_with_slot(512)),
@@ -4457,8 +4501,6 @@ mod tests {
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         storage.forward_spine().clear();
@@ -4490,14 +4532,12 @@ mod tests {
         let validator_source = state_with_slot(0);
         let finalized_validators = validator_source.validators();
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
         let anchor_root = H256::repeat_byte(1);
         let parent_root = H256::repeat_byte(2);
         let child_root = H256::repeat_byte(3);
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, anchor_root, state_with_slot(0)),
                 (512, parent_root, state_with_slot(512)),
@@ -4505,8 +4545,6 @@ mod tests {
             ],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         // Only the row of the queried state is left, so the frame it would be
@@ -4784,32 +4822,33 @@ mod tests {
         let validator_source = state_with_slot(0);
 
         let anchor_root = H256::repeat_byte(1);
-        let blockless_root = H256::repeat_byte(0xaa);
         let child_root = H256::repeat_byte(40);
 
+        let blockless_state = state_with_slot_and_marker(32, 2);
+        let blockless_root =
+            BlockRootBySlotValue::blockless(blockless_state.hash_tree_root()).state_key_root();
+
+        // The blockless row at slot 32 is written along with its state, the way archival writes
+        // the two together.
         storage.database.put_batch_raw(vec![
             serialize(BlockRootBySlot(0), BlockRootBySlotValue::Block(anchor_root))?,
             serialize(FinalizedBlockByRoot(anchor_root), block_with_slot(0))?,
             serialize(
                 BlockRootBySlot(32),
-                BlockRootBySlotValue::Blockless(blockless_root),
+                BlockRootBySlotValue::blockless(blockless_state.hash_tree_root()),
             )?,
             serialize(BlockRootBySlot(40), BlockRootBySlotValue::Block(child_root))?,
             serialize(FinalizedBlockByRoot(child_root), block_with_slot(40))?,
         ])?;
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [
                 (0, anchor_root, state_with_slot_and_marker(0, 1)),
-                (32, blockless_root, state_with_slot_and_marker(32, 2)),
+                (32, blockless_root, blockless_state),
             ],
             0,
             validator_source.validators(),
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         Ok((storage, validator_source, blockless_root))
@@ -4826,15 +4865,12 @@ mod tests {
         storage.clear_caches();
 
         let child_root = H256::repeat_byte(40);
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
 
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [(40, child_root, state_with_slot_and_marker(40, 3))],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         let key = storage
@@ -4926,15 +4962,11 @@ mod tests {
             serialize(FinalizedBlockByRoot(child_root), block_with_slot(16))?,
         ])?;
 
-        let mut batch = vec![];
-        let mut update_finalized_validators = false;
-
-        storage.append_finalized_states(
+        store_states(
+            &storage,
             [(0, anchor_root, state_with_slot(0))],
             0,
             finalized_validators,
-            &mut batch,
-            &mut update_finalized_validators,
         )?;
 
         let OptionalStateStorage::Full((state, block, blocks)) =
@@ -4998,6 +5030,186 @@ mod tests {
 
         assert_eq!(storage.prune_unfinalized_blocks(8)?, [8]);
         assert_eq!(storage.block_root_by_slot_value(8)?, Some(blockless));
+
+        Ok(())
+    }
+
+    fn assert_blockless_state_stored(chain: &TestChain, slot: Slot) -> Result<()> {
+        let storage = &chain.storage;
+        let state_root = chain.state(slot).hash_tree_root();
+        let blockless = BlockRootBySlotValue::blockless(state_root);
+
+        assert_eq!(storage.block_root_by_slot(slot)?, None);
+        assert_eq!(storage.block_root_by_slot_value(slot)?, Some(blockless));
+        assert_eq!(storage.slot_by_state_root(state_root)?, Some(slot));
+        assert!(
+            storage
+                .state_key_by_block_root(blockless.state_key_root())?
+                .is_some(),
+            "the state at slot {slot} must be stored under its blockless root",
+        );
+
+        storage.clear_caches();
+
+        assert_eq!(chain.stored_state_root(slot)?, Some(state_root));
+
+        Ok(())
+    }
+
+    /// Archival runs overlap by one link: the anchor that ends one run starts the next. The empty
+    /// slot right after that link is only known to be empty once the next run brings the block
+    /// after it.
+    #[test]
+    fn forward_sync_persists_an_empty_hierarchy_slot_in_the_run_that_finalizes_past_it()
+    -> Result<()> {
+        let chain = TestChain::new([1, 2, 3, 5, 6, 7])?;
+        let storage = &chain.storage;
+        let store = chain.store();
+
+        let first_run = [0, 1, 2, 3].map(|slot| chain.link(slot));
+        let unfinalized = [6, 5].map(|slot| chain.link(slot));
+
+        storage.append(unfinalized.iter(), first_run.iter(), &store)?;
+
+        // Slot 4 lies between the last finalized link and the first unfinalized one.
+        assert_eq!(storage.block_root_by_slot_value(4)?, None);
+
+        let second_run = [3, 5, 6, 7].map(|slot| chain.link(slot));
+
+        storage.append(core::iter::empty(), second_run.iter(), &store)?;
+
+        assert_blockless_state_stored(&chain, 4)?;
+
+        // Blocks after the empty slot are replayed on top of its state.
+        storage.clear_caches();
+
+        assert_eq!(
+            chain.stored_state_root(7)?,
+            Some(chain.state(7).hash_tree_root()),
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn forward_sync_persists_every_empty_hierarchy_slot_in_a_gap() -> Result<()> {
+        let chain = TestChain::new([1, 2, 3, 9])?;
+        let storage = &chain.storage;
+        let store = chain.store();
+
+        let finalized = [0, 1, 2, 3, 9].map(|slot| chain.link(slot));
+
+        storage.append(core::iter::empty(), finalized.iter(), &store)?;
+
+        assert_blockless_state_stored(&chain, 4)?;
+        assert_blockless_state_stored(&chain, 8)?;
+
+        for slot in [5, 6, 7] {
+            assert_eq!(storage.block_root_by_slot_value(slot)?, None);
+        }
+
+        Ok(())
+    }
+
+    /// An unfinalized block at a slot that ends up empty on the canonical chain leaves a block row
+    /// behind. The blockless row replaces it, and pruning unfinalized blocks keeps the blockless
+    /// row.
+    #[test]
+    fn a_blockless_row_replaces_the_row_of_an_unfinalized_block_that_lost_its_slot() -> Result<()> {
+        let chain = TestChain::new([1, 2, 3, 5])?;
+        let storage = &chain.storage;
+        let store = chain.store();
+
+        let sibling = chain.sibling(4)?;
+        let first_run = [0, 1, 2, 3].map(|slot| chain.link(slot));
+
+        storage.append(core::iter::once(&sibling), first_run.iter(), &store)?;
+
+        assert_eq!(storage.block_root_by_slot(4)?, Some(sibling.block_root));
+
+        let second_run = [3, 5].map(|slot| chain.link(slot));
+
+        storage.append(core::iter::empty(), second_run.iter(), &store)?;
+
+        assert_blockless_state_stored(&chain, 4)?;
+
+        // The shared link at slot 3 is also stored as an unfinalized block by the second run, so
+        // it is pruned too.
+        assert!(storage.prune_unfinalized_blocks(5)?.contains(&4));
+        assert!(!storage.contains_unfinalized_block(sibling.block_root)?);
+
+        assert_blockless_state_stored(&chain, 4)?;
+
+        Ok(())
+    }
+
+    fn state_row_count<P: Preset>(storage: &Storage<P>, block_root: H256) -> Result<usize> {
+        let prefix = StateByBlockRoot::prefix(block_root);
+        let keys = storage.database.keys_ascending(prefix.as_bytes()..)?;
+
+        itertools::process_results(keys, |keys| {
+            keys.take_while(|key| key.starts_with(prefix.as_bytes()))
+                .count()
+        })
+    }
+
+    /// The append at shutdown covers the whole finalized chain, and the first archival run after a
+    /// restart covers part of it again.
+    #[test]
+    fn appending_the_same_empty_hierarchy_slots_again_changes_nothing() -> Result<()> {
+        let chain = TestChain::new([1, 2, 3, 9])?;
+        let storage = &chain.storage;
+        let store = chain.store();
+
+        let finalized = [0, 1, 2, 3, 9].map(|slot| chain.link(slot));
+
+        storage.append(core::iter::empty(), finalized.iter(), &store)?;
+
+        let blockless_roots = [4, 8].map(|slot| {
+            BlockRootBySlotValue::blockless(chain.state(slot).hash_tree_root()).state_key_root()
+        });
+
+        let row_counts = blockless_roots
+            .iter()
+            .map(|root| state_row_count(storage, *root))
+            .collect::<Result<Vec<_>>>()?;
+
+        assert_eq!(row_counts, [1, 1]);
+
+        storage.append(core::iter::empty(), finalized.iter(), &store)?;
+
+        assert_blockless_state_stored(&chain, 4)?;
+        assert_blockless_state_stored(&chain, 8)?;
+
+        for (root, row_count) in blockless_roots.into_iter().zip(row_counts) {
+            assert_eq!(state_row_count(storage, root)?, row_count);
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn forward_sync_persists_no_empty_hierarchy_slot_when_pruning() -> Result<()> {
+        let chain = TestChain::with_storage_mode([1, 2, 3, 9], StorageMode::Prune)?;
+        let storage = &chain.storage;
+        let store = chain.store();
+
+        let finalized = [0, 1, 2, 3, 9].map(|slot| chain.link(slot));
+
+        storage.append(core::iter::empty(), finalized.iter(), &store)?;
+
+        for slot in [4, 8] {
+            let state_root = chain.state(slot).hash_tree_root();
+            let blockless = BlockRootBySlotValue::blockless(state_root);
+
+            assert_eq!(storage.block_root_by_slot_value(slot)?, None);
+            assert_eq!(storage.slot_by_state_root(state_root)?, None);
+            assert!(
+                storage
+                    .state_key_by_block_root(blockless.state_key_root())?
+                    .is_none()
+            );
+        }
 
         Ok(())
     }
