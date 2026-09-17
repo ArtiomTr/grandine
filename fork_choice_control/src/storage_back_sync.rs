@@ -21,8 +21,8 @@ use types::{
 use crate::{
     Storage,
     storage::{
-        ARCHIVED_STATES_BEFORE_FLUSH, BlockRootBySlot, Error, FinalizedBlockByRoot,
-        SLOT_BY_STATE_ROOTS_BEFORE_FLUSH, SlotByStateRoot, get, serialize,
+        ARCHIVED_STATES_BEFORE_FLUSH, BlockRootBySlot, BlockRootBySlotValue, Error,
+        FinalizedBlockByRoot, SLOT_BY_STATE_ROOTS_BEFORE_FLUSH, SlotByStateRoot, get, serialize,
     },
 };
 
@@ -223,7 +223,10 @@ impl<P: Preset> Storage<P> {
             let slot = block.message().slot();
             let block_root = block.message().hash_tree_root();
 
-            batch.push(serialize(BlockRootBySlot(slot), block_root)?);
+            batch.push(serialize(
+                BlockRootBySlot(slot),
+                BlockRootBySlotValue::Block(block_root),
+            )?);
             batch.push(serialize(FinalizedBlockByRoot(block_root), block)?);
         }
 
