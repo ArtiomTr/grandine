@@ -3,7 +3,7 @@ name: Create release
 on:
   push:
     branches:
-      - develop
+      - fix/enable-stable-nethermind-integration-releases-test
     tags:
       - '**'
   workflow_dispatch:
@@ -58,7 +58,7 @@ jobs:
             ];
 
             if (
-              (context.eventName == 'push' && context.ref != 'refs/heads/develop') ||
+              (context.eventName == 'push' && context.ref != 'refs/heads/fix/enable-stable-nethermind-integration-releases-test') ||
               context.eventName == 'workflow_dispatch') {
 
               // add production targets, if we're building stable release, or build is requested manually
@@ -88,9 +88,9 @@ jobs:
 
     outputs:
       commit: ${{ steps.git-vars.outputs.sha_short }}
-      version: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/develop' && github.ref_name) || steps.git-vars.outputs.sha_short }}
+      version: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/fix/enable-stable-nethermind-integration-releases-test' && github.ref_name) || steps.git-vars.outputs.sha_short }}
       nethermind: ${{ inputs.nethermind_version || steps.nethermind-tag.outputs.result }}
-      label: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/develop' && 'stable') || 'unstable' }}
+      label: ${{ (github.event_name == 'push' && github.event.ref != 'refs/heads/fix/enable-stable-nethermind-integration-releases-test' && 'stable') || 'unstable' }}
       matrix: ${{ steps.matrix-vars.outputs.result }}
 
   build:
@@ -204,6 +204,7 @@ jobs:
       NETHERMIND_VERSION: ${{ needs.version.outputs.nethermind }}
       DOCKER_LABEL: ${{ needs.version.outputs.label }}
       DOCKER_SUFFIX: ${{ github.event_name == 'workflow_dispatch' && needs.version.outputs.commit || '' }}
+      DOCKER_REPO: sirsedev/test-repo
     if: always() && needs.version.result == 'success' && needs.build.result == 'success'
     steps:
       - uses: actions/checkout@v5
@@ -266,6 +267,7 @@ jobs:
           make docker \
             DOCKER_LABEL=${{ env.DOCKER_LABEL }} \
             DOCKER_SUFFIX=${{ env.DOCKER_SUFFIX }} \
+            DOCKER_REPO=${{ env.DOCKER_REPO }} \
             GRANDINE_VERSION=${{ env.GRANDINE_VERSION }} \
             NETHERMIND_VERSION=${{ env.NETHERMIND_VERSION }}
 
