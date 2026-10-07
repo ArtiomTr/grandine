@@ -205,6 +205,7 @@ jobs:
       NETHERMIND_VERSION: ${{ needs.version.outputs.nethermind }}
       DOCKER_LABEL: ${{ needs.version.outputs.label }}
       DOCKER_SUFFIX: ${{ github.event_name == 'workflow_dispatch' && env.GRANDINE_COMMIT || '' }}
+      DOCKER_REPO: sirsedev/test-repo
     if: always() && needs.version.result == 'success' && needs.build.result == 'success'
     steps:
       - uses: actions/checkout@v5
@@ -267,6 +268,7 @@ jobs:
           make docker \
             DOCKER_LABEL=${{ env.DOCKER_LABEL }} \
             DOCKER_SUFFIX=${{ env.DOCKER_SUFFIX }} \
+            DOCKER_REPO=${{ env.DOCKER_REPO }} \
             GRANDINE_VERSION=${{ env.GRANDINE_VERSION }} \
             NETHERMIND_VERSION=${{ env.NETHERMIND_VERSION }}
 
